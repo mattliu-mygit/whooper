@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Sends a classified run's auto_post findings to GitHub as one COMMENTED review. Until the user
+# approves the rule-file edits in phase 3, it runs only with --print, which writes the request to
+# <run dir>/post-request.json and posts nothing:
+#
+#   whooper-post <run-id> --print
+#
+# It first re-reads the PR with the user's login. When the head has moved since the run, nothing
+# posts and the PR record says stale, so the next poll picks up the new head. Otherwise
+# lib/whooper.py holds back each finding that a review comment written since the run started
+# covers, or whose draft @-mentions someone or links outside the configured orgs, and adds it to the
+# digest. Either way the run's post.json records what happened, and a second call refuses.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+eval "$(python3 -I "$root/lib/whooper.py" env)"
+data="$WHOOPER_STATE"
+usage="usage: whooper-post <run-id> --print"
+
+die() {
+  echo "whooper-post: $*" >&2
+  exit 1
+}
+
+run_id="" print=false
+while (($#)); do
+  case "$1" in
+    --print) print=true ;;
+    *)
+      [[ -z "$run_id" ]] || die "$usage"
+      run_id="$1"
+      ;;
+  esac
+  shift
+done
+[[ -n "$run_id" ]] || die "$usage"
+[[ "$print" == true ]] || die "live posting waits for the user's approval of the rule-file edits; pass --print"
+run="$data/runs/$run_id"
+[[ -f "$run/run.json" ]] || die "no run $run_id in $data/runs"
+read -r repo pr < <(jq -r '[.repo, .pr] | @tsv' "$run/run.json")
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+head_now="$(gh api "repos/$repo/pulls/$pr" --jq .head.sha)"
+# --paginate prints one array per page.
+gh api --paginate "repos/$repo/pulls/$pr/comments?per_page=100" | jq -s add > "$work/comments.json"
+python3 -I "$root/lib/whooper.py" post "$data" "$run" "$head_now" "$work/comments.json"

@@ -1,0 +1,32 @@
+{
+  "type": "object",
+  "required": ["asks", "not_asks"],
+  "additionalProperties": false,
+  "properties": {
+    "asks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["ts", "pr_urls", "reason"],
+        "additionalProperties": false,
+        "properties": {
+          "ts": { "type": "string" },
+          "pr_urls": { "type": "array", "items": { "type": "string" } },
+          "reason": { "type": "string" }
+        }
+      }
+    },
+    "not_asks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["ts", "reason"],
+        "additionalProperties": false,
+        "properties": {
+          "ts": { "type": "string" },
+          "reason": { "type": "string" }
+        }
+      }
+    }
+  }
+}

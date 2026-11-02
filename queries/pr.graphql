@@ -1,0 +1,39 @@
+# One pull request by URL, with what lib/whooper.py's rules read. resource is null when the URL
+# names no pull request. Each list is one page of 100. lib/whooper.py fails on a longer list
+# rather than judge from part of it, and paging is the fix if a PR ever has more. A review's body
+# and first comment tell a thread reply from a review.
+query($url: URI!) {
+  resource(url: $url) {
+    ... on PullRequest {
+      url
+      number
+      repository { nameWithOwner }
+      state
+      headRefOid
+      baseRefName
+      author { login }
+      reviewRequests(first: 100) {
+        totalCount
+        nodes { requestedReviewer { ... on User { login } } }
+      }
+      reviews(first: 100) {
+        totalCount
+        nodes {
+          author { __typename login }
+          state
+          submittedAt
+          body
+          commit { oid }
+          comments(first: 1) { totalCount nodes { replyTo { id } } }
+        }
+      }
+      reviewThreads(first: 100) {
+        totalCount
+        nodes {
+          isResolved
+          comments(first: 100) { totalCount nodes { author { login } createdAt } }
+        }
+      }
+    }
+  }
+}

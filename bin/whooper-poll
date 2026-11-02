@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Lists the user's review work in <state>/poll/<UTC start time>.json and prints that path, where
+# <state> is $XDG_STATE_HOME/whooper (default ~/.local/state/whooper).
+#
+# A Haiku run reads the ask channel from <state>/poll/cursor (the last 24 hours without one) and
+# reports the posts that ask the user for a review. lib/whooper.py checks those against the run's
+# transcript, this script fetches the PRs they link, and lib/whooper.py combines them with
+# <state>/poll/github.json from whooper-fetch. The cursor moves to this poll's start time only after
+# the output is written. Read-only toward GitHub and Slack.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+eval "$(python3 -I "$root/lib/whooper.py" env)"
+poll="$WHOOPER_STATE/poll"
+mkdir -p "$poll"
+# One clock read for both, in a form BSD and GNU date share.
+read -r started stamp <<<"$(date -u '+%s %Y%m%dT%H%M%SZ')"
+if [[ -f "$poll/cursor" ]]; then
+  oldest="$(<"$poll/cursor")"
+else
+  oldest="$((started - 86400))"
+fi
+transcript="$poll/$stamp.transcript.jsonl"
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+slack="mcp__claude_ai_Slack__slack"
+# The claude.ai Slack connector loads only with user settings, so the run turns off what those
+# settings and the CLI add: hooks, every MCP server but the Slack connector (matched by URL),
+# CLAUDE.md files, auto-memory, skills, and every built-in tool but ToolSearch. dontAsk denies
+# any tool not allowed here, and the Slack writes are also denied by name, which holds even if a
+# user setting someday allows them.
+CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude -p "$(python3 -I "$root/lib/whooper.py" prompt poll)
+
+channel_id: $WHOOPER_ASK_CHANNEL
+user_id: $WHOOPER_SLACK_USER
+oldest: $oldest" \
+  --model "$WHOOPER_POLL_MODEL" \
+  --setting-sources user \
+  --settings '{"disableAllHooks": true, "allowedMcpServers": [{"serverUrl": "https://mcp.slack.com/mcp"}]}' \
+  --tools ToolSearch --disable-slash-commands --no-session-persistence \
+  --permission-mode dontAsk \
+  --allowedTools "ToolSearch ${slack}_read_channel" \
+  --disallowedTools "${slack}_add_reaction ${slack}_create_canvas ${slack}_update_canvas ${slack}_schedule_message ${slack}_send_message_draft" \
+  --json-schema "$(<"$root/schemas/slack-asks.json")" \
+  --output-format stream-json --verbose > "$transcript"
+
+python3 -I "$root/lib/whooper.py" asks "$transcript" "$oldest" > "$work/asks.json"
+# lib/whooper.py passed only plain URLs of PRs in the configured orgs that the asking post links.
+jq -r '[.[].pr_urls[]] | unique[]' "$work/asks.json" | "$root/bin/whooper-prs" > "$work/slack-prs.json"
+
+python3 -I "$root/lib/whooper.py" items "$poll/github.json" \
+  "$work/asks.json" "$work/slack-prs.json" > "$poll/$stamp.json.tmp"
+mv "$poll/$stamp.json.tmp" "$poll/$stamp.json"
+echo "$started" > "$poll/cursor"
+echo "$poll/$stamp.json"

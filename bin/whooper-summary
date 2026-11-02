@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Posts a run's summary to the summary channel after bin/whooper-post has handled the run, or with
+# --print only prints it:
+#
+#   whooper-summary <run-id> [--print]
+#
+# lib/whooper.py composes the text from the run's records. A Haiku run then sends it with
+# slack_schedule_message, the connector's only way to send, set for 3 minutes from now.
+# hooks/slack-guard.sh lets that call through once, and only with the summary channel, this exact
+# text and time, and no thread. The run's transcript is <run dir>/summary.transcript.jsonl.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+eval "$(python3 -I "$root/lib/whooper.py" env)"
+data="$WHOOPER_STATE"
+usage="usage: whooper-summary <run-id> [--print]"
+
+die() {
+  echo "whooper-summary: $*" >&2
+  exit 1
+}
+
+run_id="" print=false
+while (($#)); do
+  case "$1" in
+    --print) print=true ;;
+    *)
+      [[ -z "$run_id" ]] || die "$usage"
+      run_id="$1"
+      ;;
+  esac
+  shift
+done
+[[ -n "$run_id" ]] || die "$usage"
+run="$data/runs/$run_id"
+[[ -f "$run/post.json" ]] || die "$run has not been through bin/whooper-post"
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+python3 -I "$root/lib/whooper.py" summary "$run" > "$work/summary.txt"
+if [[ "$print" == true ]]; then
+  cat "$work/summary.txt"
+  echo
+  exit
+fi
+
+post_at="$(($(date +%s) + 180))"
+arguments="$(jq -n --arg channel "$WHOOPER_SUMMARY_CHANNEL" --rawfile message "$work/summary.txt" \
+  --argjson post_at "$post_at" '{channel_id: $channel, message: $message, post_at: $post_at}')"
+slack="mcp__claude_ai_Slack__slack"
+# As in bin/whooper-poll, the Slack connector loads only with user settings, so the run keeps the
+# user's hooks; only ToolSearch and the one Slack write are allowed.
+settings="$(jq -cn --arg hook "$root/hooks/slack-guard.sh" '{
+  allowedMcpServers: [{serverUrl: "https://mcp.slack.com/mcp"}],
+  hooks: {PreToolUse: [{matcher: "mcp__claude_ai_Slack__.*", hooks: [{type: "command", command: $hook}]}]}
+}')"
+WHOOPER_SUMMARY_FILE="$work/summary.txt" WHOOPER_SUMMARY_POST_AT="$post_at" \
+  CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude -p "Load ${slack}_schedule_message \
+with ToolSearch, call it once with exactly these arguments, and then stop.
+
+$arguments" \
+  --model "$WHOOPER_POLL_MODEL" \
+  --setting-sources user --settings "$settings" \
+  --tools ToolSearch --disable-slash-commands --no-session-persistence \
+  --permission-mode dontAsk \
+  --allowedTools "ToolSearch ${slack}_schedule_message" \
+  --disallowedTools "${slack}_add_reaction ${slack}_create_canvas ${slack}_update_canvas ${slack}_send_message_draft" \
+  --output-format stream-json --verbose > "$run/summary.transcript.jsonl" ||
+  die "the Haiku run failed; see $run/summary.transcript.jsonl"
+
+# The tool result of the one schedule_message call that slack-guard let through.
+jq -s -e --arg tool "${slack}_schedule_message" '
+  [.[] | .message.content[]? | select(.type == "tool_use" and .name == $tool) | .id] as $ids
+  | any(.[] | .message.content[]?; .type == "tool_result" and (.tool_use_id | IN($ids[])) and (.is_error | not))' \
+  "$run/summary.transcript.jsonl" >/dev/null ||
+  die "the summary was not scheduled; see $run/summary.transcript.jsonl"
+echo "whooper-summary: scheduled for $(date -r "$post_at" +%H:%M) in $WHOOPER_SUMMARY_CHANNEL_NAME"

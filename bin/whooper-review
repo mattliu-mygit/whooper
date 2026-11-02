@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+# Reviews one work item with an Opus run and prints the run's directory, <state>/runs/<run-id>/,
+# where <state> is $XDG_STATE_HOME/whooper (default ~/.local/state/whooper):
+#
+#   whooper-review <work-item.json> --dry-run [--as-of <ISO 8601 time with a zone>]
+#
+# The PR's repo must have a table in the config. Before the run starts, this script fetches with
+# the user's login everything the run reads: the head and merge-base commits, checked out as the
+# worktrees head/ and base/ in the run directory, and the PR's conversation as github.json. With
+# --as-of, github.json holds only what people could read before that time, for replaying a past
+# review. Then the repo's setup script, if the config names one, prepares anything else the run
+# needs, such as dependencies or databases (examples/setup.example.sh). The run itself has no
+# GitHub login and no MCP servers, so it can post nothing. bin/whooper-classify <run dir> then
+# applies rule v1 to its findings.
+#
+# On exit, finished or not, the repo's teardown script runs, the worktrees and PR lock go away,
+# and a run that did not finish counts as a failure in its <state>/prs record. Runs take --dry-run until a live run has a
+# way to add :eyes: to the ask it takes.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+eval "$(python3 -I "$root/lib/whooper.py" env)"
+data="$WHOOPER_STATE"
+usage="usage: whooper-review <work-item.json> --dry-run [--as-of <time>]"
+
+die() {
+  echo "whooper-review: $*" >&2
+  exit 1
+}
+
+item="" dry_run=false as_of=""
+while (($#)); do
+  case "$1" in
+    --dry-run) dry_run=true ;;
+    --as-of)
+      (($# > 1)) || die "$usage"
+      as_of="$2"
+      shift
+      ;;
+    *)
+      [[ -z "$item" ]] || die "$usage"
+      item="$1"
+      ;;
+  esac
+  shift
+done
+[[ -f "$item" ]] || die "$usage"
+[[ "$dry_run" == true ]] || die "a live run has no way to add :eyes: to its ask yet; pass --dry-run"
+if [[ -n "$as_of" ]] &&
+  ! python3 -I -c 'import datetime, sys; assert datetime.datetime.fromisoformat(sys.argv[1]).tzinfo' "$as_of" 2>/dev/null; then
+  die "--as-of takes an ISO 8601 time with a zone, such as 2031-01-02T03:04:05Z"
+fi
+IFS=$'\t' read -r repo pr head_sha base_ref kind source tagged reason < <(
+  jq -r '[.repo, .pr, .head_sha, .base_ref, .kind, .source, (.slack.tagged_user | tostring), .reason] | @tsv' "$item")
+# Sets WHOOPER_REPO_CLONE, WHOOPER_REPO_SETUP, and WHOOPER_REPO_TEARDOWN, or fails for a repo the
+# config does not list.
+eval "$(python3 -I "$root/lib/whooper.py" repo "$repo")"
+core="$WHOOPER_REPO_CLONE"
+[[ -d "$core/.git" ]] || die "no clone of $repo at $core; see README.md"
+[[ "$kind" == first_review ]] || die "re-checks come in phase 4"
+[[ "$pr" =~ ^[0-9]+$ && "$head_sha" =~ ^[0-9a-f]{40}$ ]] || die "$item needs a PR number and a full head_sha"
+# base_ref names a branch, or for a replay the commit the base branch pointed at then.
+git -C "$core" check-ref-format --branch "$base_ref" >/dev/null || die "base_ref $base_ref is not a branch or commit"
+
+run_id="$(date -u +%Y%m%dT%H%M%SZ)-$pr"
+run="$data/runs/$run_id"
+lock="$data/locks/${repo/\//-}-$pr"
+mkdir -p "$data/locks"
+if ! mkdir "$lock" 2>/dev/null; then
+  holder="$(cat "$lock/pid" 2>/dev/null || true)"
+  if [[ -n "$holder" ]] && kill -0 "$holder" 2>/dev/null; then
+    die "process $holder is already reviewing $repo#$pr"
+  fi
+  rm -rf "$lock"
+  mkdir "$lock"
+fi
+echo "$$" > "$lock/pid"
+
+# The unfiltered GitHub data stays here, outside the run directory the model reads.
+work="$(mktemp -d)"
+finished=false
+claude_pid=""
+cleanup() {
+  local status=$?
+  if [[ -n "$claude_pid" ]]; then
+    kill "$claude_pid" 2>/dev/null || true
+    wait "$claude_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$WHOOPER_REPO_TEARDOWN" && -n "${WHOOPER_RUN_ID:-}" ]]; then
+    "$WHOOPER_REPO_TEARDOWN" || echo "whooper-review: $WHOOPER_REPO_TEARDOWN failed" >&2
+  fi
+  for tree in head base; do
+    if [[ -d "$run/$tree" ]]; then
+      git -C "$core" worktree remove --force "$run/$tree" || true
+    fi
+    git -C "$core" update-ref -d "refs/whooper/$run_id/$tree" 2>/dev/null || true
+  done
+  rm -rf "$work" "$run/tmp"
+  if [[ "$finished" != true ]]; then
+    python3 -I "$root/lib/whooper.py" record "$data" "$item" failed || true
+  fi
+  rm -rf "$lock"
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM HUP
+
+mkdir -p "$run/tmp"
+python3 -I "$root/lib/whooper.py" record "$data" "$item" running
+
+git -C "$core" fetch --quiet --no-write-fetch-head origin \
+  "$head_sha:refs/whooper/$run_id/head" "$base_ref:refs/whooper/$run_id/base"
+merge_base="$(git -C "$core" merge-base "refs/whooper/$run_id/head" "refs/whooper/$run_id/base")"
+# Checking out both trees fetches every file in them, so the run can read both without a login.
+git -C "$core" worktree add --quiet --detach "$run/head" "$head_sha"
+git -C "$core" worktree add --quiet --detach "$run/base" "$merge_base"
+jq --arg run_id "$run_id" --arg merge_base "$merge_base" --arg as_of "$as_of" \
+  '. + {run_id: $run_id, merge_base: $merge_base, as_of: (if $as_of == "" then null else $as_of end), dry_run: true}' \
+  "$item" > "$run/run.json"
+
+if gh api graphql -F query=@"$root/queries/conversation.graphql" \
+  -f owner="${repo%/*}" -f name="${repo#*/}" -F number="$pr" > "$work/conversation.json" &&
+  python3 -I "$root/lib/whooper.py" conversation "$work/conversation.json" ${as_of:+"$as_of"} > "$work/github.json"; then
+  mv "$work/github.json" "$run/github.json"
+  github="$run/github.json${as_of:+, which holds only what existed before $as_of}"
+else
+  echo "whooper-review: the GitHub fetch failed, so no finding of this run can auto-post" >&2
+  github="missing, because the GitHub fetch failed"
+fi
+
+# The repo's setup script gets the run's paths and changed files, may append KEY=value lines for
+# the run's environment to WHOOPER_SETUP_ENV, and prints what the run can use for the prompt.
+# Exporting the paths here also gives them to the teardown script.
+git -C "$core" diff --name-only "$merge_base" "$head_sha" > "$work/changed.txt"
+: > "$work/setup.env"
+export WHOOPER_RUN_ID="$run_id" WHOOPER_RUN="$run" WHOOPER_HEAD="$run/head" WHOOPER_BASE="$run/base" \
+  WHOOPER_CHANGED="$work/changed.txt" WHOOPER_SETUP_ENV="$work/setup.env"
+setup="none"
+if [[ -n "$WHOOPER_REPO_SETUP" ]]; then
+  setup="$("$WHOOPER_REPO_SETUP")" || die "$WHOOPER_REPO_SETUP failed"
+  set -a
+  source "$work/setup.env"
+  set +a
+fi
+
+untagged=""
+if [[ "$source" == slack_ask && "$tagged" == false ]]; then
+  untagged="
+- The work came from an untagged team ask: decide first whether the PR is small or mechanical."
+fi
+prompt="$(python3 -I "$root/lib/whooper.py" prompt review "$repo")
+
+## This run
+
+- Pull request: https://github.com/$repo/pull/$pr, base $base_ref. Why it is $WHOOPER_GITHUB_LOGIN's work: $reason$untagged
+- Head: $head_sha, checked out in $run/head, the working directory.
+- Merge base: $merge_base, checked out in $run/base.
+- Run directory: $run. Write log.md there.
+- github.json: $github
+- Repository setup: $setup"
+
+# GitHub refuses the run: gh sends the token "disabled", and git's credential helper (gh) hands git
+# the same. --strict-mcp-config loads no MCP servers, so the run has no Slack tools, and the Slack
+# writes are also denied by name. The tool-use-id hook shows the run the IDs a finding cites.
+slack="mcp__claude_ai_Slack__slack"
+settings="$(jq -cn --arg hook "$root/hooks/tool-use-id.sh" \
+  '[{matcher: "Bash", hooks: [{type: "command", command: $hook}]}] as $bash | {hooks: {PostToolUse: $bash, PostToolUseFailure: $bash}}')"
+(
+  cd "$run/head"
+  exec env GH_TOKEN=disabled GIT_SSH_COMMAND=false GIT_TERMINAL_PROMPT=0 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 \
+    TMPDIR="$run/tmp" claude -p "$prompt" \
+    --model "$WHOOPER_REVIEW_MODEL" \
+    --setting-sources user --settings "$settings" --strict-mcp-config \
+    --tools Bash,Read,Edit,Write,Task,Skill \
+    --permission-mode auto --permission-prompts none --max-budget-usd "$WHOOPER_REVIEW_BUDGET_USD" \
+    --add-dir "$run" \
+    --disallowedTools "${slack}_add_reaction ${slack}_create_canvas ${slack}_update_canvas ${slack}_schedule_message ${slack}_send_message_draft" \
+    --json-schema "$(<"$root/schemas/findings.json")" \
+    --no-session-persistence --output-format stream-json --verbose --include-hook-events \
+    > "$run/transcript.jsonl" 2> "$run/stderr.log"
+) &
+# Waiting on a background run lets an interrupt reach the cleanup at once.
+claude_pid=$!
+# set -e would stop the script at a failed wait, before it says where the run's errors are.
+claude_exit=0
+wait "$claude_pid" || claude_exit=$?
+claude_pid=""
+
+jq -e -c 'select(.type == "result" and .subtype == "success" and .structured_output != null) | .structured_output' \
+  "$run/transcript.jsonl" > "$work/findings.json" ||
+  die "the review run exited $claude_exit without findings; see $run/stderr.log and $run/transcript.jsonl"
+mv "$work/findings.json" "$run/findings.json"
+[[ -f "$run/log.md" ]] || echo "whooper-review: the run wrote no log.md" >&2
+jq -r 'select(.type == "result") | "whooper-review: $\(.total_cost_usd) in \(.duration_ms / 60000 | floor) minutes, \(.num_turns) turns"' \
+  "$run/transcript.jsonl" >&2
+finished=true
+echo "$run"

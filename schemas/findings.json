@@ -1,0 +1,50 @@
+{
+  "type": "object",
+  "required": ["status", "skip_reason", "findings"],
+  "additionalProperties": false,
+  "properties": {
+    "status": { "enum": ["reviewed", "skipped"] },
+    "skip_reason": { "type": "string", "description": "Why an untagged team ask was skipped; empty when reviewed." },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id", "path", "line", "side", "in_diff", "title", "draft", "kind", "rule_v1", "head_run", "base_run", "observed"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string" },
+          "path": { "type": "string", "description": "Repository-relative path of the file the comment goes on." },
+          "line": { "type": "integer", "minimum": 1 },
+          "side": { "enum": ["LEFT", "RIGHT"], "description": "RIGHT for a line of the head, LEFT for a deleted line." },
+          "in_diff": { "type": "boolean", "description": "The line is inside a hunk of git diff <merge base> HEAD -- <path>." },
+          "title": { "type": "string" },
+          "draft": { "type": "string", "description": "The comment as the user would post it, with no marker or support label." },
+          "kind": { "enum": ["caller_visible_bug", "ci_failure", "nit", "question", "other"] },
+          "nit_kind": {
+            "enum": [
+              "codeowners_no_effect", "docstring_contradicts_code", "public_doc_contradicts_code", "redundant_code", "wording", "other"
+            ],
+            "description": "Only for kind nit."
+          },
+          "rule_v1": {
+            "type": "object",
+            "required": ["ran_and_saw_failure", "caller_or_ci_visible", "introduced_by_pr", "not_already_raised", "not_pr_text"],
+            "additionalProperties": false,
+            "properties": {
+              "ran_and_saw_failure": { "type": "boolean" },
+              "caller_or_ci_visible": { "type": "boolean" },
+              "introduced_by_pr": { "type": "boolean" },
+              "not_already_raised": { "type": "boolean" },
+              "not_pr_text": { "type": "boolean" }
+            }
+          },
+          "head_run": { "type": "string", "description": "tool_use_id of the Bash call that showed the failure at the head, or empty." },
+          "base_run": { "type": "string", "description": "tool_use_id of the same probe's Bash call at the merge base, or empty." },
+          "observed": { "type": "string", "description": "Exact text from the head_run output that shows the failure and is absent from the base_run output, or empty." }
+        }
+      }
+    }
+  }
+}

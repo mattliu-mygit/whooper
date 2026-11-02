@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Writes the user's open GitHub review work in the configured orgs to <state>/poll/github.json:
+# every open PR whose review requests name the user, and every open PR by someone else that the
+# user reviewed, each as queries/pr.graphql returns it. Read-only.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+eval "$(python3 -I "$root/lib/whooper.py" env)"
+out="$WHOOPER_STATE/poll/github.json"
+mkdir -p "$WHOOPER_STATE/poll"
+
+# Each search returns at most 100 PRs. Raise --limit if one ever returns 100.
+for org in $WHOOPER_ORGS; do
+  gh search prs "user-review-requested:$WHOOPER_GITHUB_LOGIN" --owner "$org" --state open --limit 100 \
+    --json url --jq '.[].url'
+  gh search prs --reviewed-by "$WHOOPER_GITHUB_LOGIN" --owner "$org" --state open --limit 100 \
+    --json url --jq '.[].url' -- "-author:$WHOOPER_GITHUB_LOGIN"
+done | sort -u | "$root/bin/whooper-prs" > "$out.tmp"
+mv "$out.tmp" "$out"

@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Applies rule v1 to a finished review run: whooper-classify <run dir>.
+#
+# Writes each finding's verdict to <run dir>/verdicts.json: auto_post, shadow_nit for every nit, or
+# digest. Appends the digest and shadow_nit findings to <state>/digest.jsonl, marks the run's
+# <state>/prs record done, and prints one line per finding with the checks it failed.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+(($# == 1)) || { echo "usage: whooper-classify <run dir>" >&2; exit 1; }
+eval "$(python3 -I "$root/lib/whooper.py" env)"
+exec python3 -I "$root/lib/whooper.py" classify "$WHOOPER_STATE" "$1"

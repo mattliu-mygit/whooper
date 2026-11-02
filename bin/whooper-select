@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Prints the newest poll's work items that no record under <state>/prs marks as handled, one JSON
+# object per line, and the dropped items with their reasons on stderr.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+eval "$(python3 -I "$root/lib/whooper.py" env)"
+exec python3 -I "$root/lib/whooper.py" select "$WHOOPER_STATE"

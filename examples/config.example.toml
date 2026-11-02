@@ -1,0 +1,44 @@
+# Whooper's settings. Copy this file to ~/.config/whooper/config.toml (or set WHOOPER_CONFIG to its
+# path) and replace every value. Everything that identifies you, your company, or your repos lives
+# here, not in the code.
+
+[user]
+name = "Sam"                       # how prompts refer to you, as in "the comment as Sam would post it"
+github_login = "sam-example"
+
+[github]
+orgs = ["example-org"]             # searches, Slack links, and links in drafts stay inside these orgs
+# Bot accounts that review PRs. A point one of them already raised does not auto-post again.
+review_bots = [
+  { login = "ci-review-bot", label = "the CI review bot" },
+  { login = "assistant-bot", label = "the coding assistant" },
+]
+
+[slack]
+workspace_url = "https://example.slack.com"
+user_id = "U0000000000"            # your member ID: profile, "...", Copy member ID
+ask_channel = "C0000000001"        # where teammates ask you for reviews
+summary_channel = "C0000000002"    # a private channel for Whooper's summaries
+summary_channel_name = "#whooper"
+# Senders whose posts are never review asks. Senders with a slack-bots.com address are skipped too.
+bots = [
+  { name = "pr_digest_bot", label = "daily PR digests" },
+  { name = "Slackbot", label = "Slackbot" },
+]
+
+[models]
+poll = "claude-haiku-5-5"
+review = "claude-opus-5-5"
+
+[review]
+budget_usd = 15
+# Skills each review run loads, from ~/.claude/skills. skills/ in this repo has public versions.
+skills = ["multi-angle-review", "code-shape-and-runtime-review"]
+
+# One table per repo Whooper reviews. Paths are relative to this file's directory. All three are
+# optional: setup and teardown run around each review (see examples/setup.example.sh), and notes
+# is Markdown added to the review prompt (see examples/repo-notes.example.md).
+[repos."example-org/example-repo"]
+setup = "setup.sh"
+teardown = "teardown.sh"
+notes = "repo-notes.md"

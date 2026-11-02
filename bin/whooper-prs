@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Reads pull request URLs on stdin, one per line, and prints a JSON array of those PRs as
+# queries/pr.graphql returns them. A URL that names no pull request is left out. Read-only.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+while IFS= read -r url; do
+  gh api graphql -F query=@"$root/queries/pr.graphql" -f url="$url" \
+    --jq '.data.resource | select(.url != null)'
+done | jq -s .

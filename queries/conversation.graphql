@@ -1,0 +1,42 @@
+# One pull request's text and conversation, which lib/whooper.py turns into a review run's
+# github.json. Each list is one page of 100, and lib/whooper.py fails on a longer list. The body's
+# edits hold every version of it, so a replay can read the body as it was at its cutoff.
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      url
+      number
+      title
+      body
+      author { login }
+      userContentEdits(first: 100) { totalCount nodes { editedAt diff } }
+      reviews(first: 100) {
+        totalCount
+        nodes {
+          author { login }
+          state
+          submittedAt
+          body
+          commit { oid }
+          comments(first: 100) {
+            totalCount
+            nodes {
+              databaseId
+              replyTo { databaseId }
+              author { login }
+              createdAt
+              lastEditedAt
+              path
+              originalLine
+              originalStartLine
+              originalCommit { oid }
+              diffHunk
+              body
+            }
+          }
+        }
+      }
+      comments(first: 100) { totalCount nodes { author { login } createdAt lastEditedAt body } }
+    }
+  }
+}
