@@ -675,6 +675,17 @@ class WriteRecordTest(unittest.TestCase):
             # whooper-select reads the same record.
             self.assertEqual(select_work([item], prs, second)[0], [])
 
+    def test_stale_keeps_the_approval_done_recorded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            prs, now = Path(tmp), datetime(2031, 8, 1, 17, 0, tzinfo=timezone.utc)
+            item = work_item(kind="first_review")
+            approval = {"verdict": "approve_once_ci_passes", "reason": "Ran the package tests."}
+            write_record(prs, item, "running", now)
+            write_record(prs, item, "done", now, approval)
+            write_record(prs, item, "stale", now)
+            path = prs / "example-org-example-repo-12" / "head3.first_review.json"
+            self.assertEqual(json.loads(path.read_text())["approval"], approval)
+
 
 T = datetime(2031, 7, 19, 21, 35, 4, tzinfo=timezone.utc)
 
@@ -883,7 +894,8 @@ class PostTest(unittest.TestCase):
         self.item = {"run_id": self.run.name, "repo": "example-org/example-repo", "pr": 12, "head_sha": "h1", "kind": "first_review",
                      "dry_run": True, "as_of": None}
         (self.run / "run.json").write_text(json.dumps(self.item))
-        (self.run / "findings.json").write_text(json.dumps({"status": "reviewed", "skip_reason": "", "findings": []}))
+        approval = {"verdict": "look_first", "reason": "The question needs the author's answer."}
+        (self.run / "findings.json").write_text(json.dumps({"status": "reviewed", "skip_reason": "", "approval": approval, "findings": []}))
         self.write_verdicts(finding())
 
     def write_verdicts(self, auto_post):
@@ -967,6 +979,7 @@ class PostTest(unittest.TestCase):
                 self.post(**post_args)
                 text = summary_text(self.run)
                 self.assertTrue(text.startswith("Whooper reviewed https://github.com/example-org/example-repo/pull/12 at h1 (dry run)."), text)
+                self.assertIn("\nLook first: The question needs the author's answer.\n", text)
                 for line in want:
                     self.assertIn(line, text)
 

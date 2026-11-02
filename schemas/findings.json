@@ -1,10 +1,19 @@
 {
   "type": "object",
-  "required": ["status", "skip_reason", "findings"],
+  "required": ["status", "skip_reason", "approval", "findings"],
   "additionalProperties": false,
   "properties": {
     "status": { "enum": ["reviewed", "skipped"] },
     "skip_reason": { "type": "string", "description": "Why an untagged team ask was skipped; empty when reviewed." },
+    "approval": {
+      "type": "object",
+      "required": ["verdict", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "verdict": { "enum": ["approve_once_ci_passes", "look_first"] },
+        "reason": { "type": "string", "description": "What the verdict rests on: what was checked, and what was not." }
+      }
+    },
     "findings": {
       "type": "array",
       "items": {

@@ -105,6 +105,11 @@ worktree's path replaced by the base worktree's, succeeded, and did not print `o
 output the transcript holds in full. Every nit is `shadow_nit`, and everything else is `digest`. A
 skipped run gets no verdicts.
 
+Each run also returns `approval`: `approve_once_ci_passes` when the run found nothing that needs the
+author and checked enough to trust the change, otherwise `look_first`, with a reason that says what
+the run did and did not check. The run cannot see CI, so no verdict covers it. The approval goes
+into the PR record and the summary. It is the run's judgment, and Whooper never approves on GitHub.
+
 ## Approvals
 
 The poll's Haiku run sees only ToolSearch and the Slack connector's tools, may call only ToolSearch
@@ -132,7 +137,8 @@ after a poll writes its output, so an interrupted poll is simply repeated.
 - `prs/<owner>-<repo>-<pr>/<head>.<kind>.json`: a record of work on one head:
   `{"status": "running" | "done" | "failed" | "stale", "failures": <n>, "started_at": "<ISO 8601 time>"}`.
   whooper-review writes running when it starts and failed, with one more failure, when it stops
-  without findings. whooper-classify writes done, and whooper-post writes stale when the head moved.
+  without findings. whooper-classify writes done with the run's `approval`, and whooper-post writes
+  stale when the head moved.
   whooper-select drops an item whose record is done or running or has failed 3 times, and a
   re-check of a PR that already has 3 re-check records for other heads started today (local time).
 - `locks/<owner>-<repo>-<pr>/pid`: the process ID of the review that holds the PR. A lock whose

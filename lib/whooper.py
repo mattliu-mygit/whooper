@@ -355,21 +355,25 @@ def record_path(prs_dir, item):
     return prs_dir / f"{item['repo'].replace('/', '-')}-{item['pr']}" / f"{item['head_sha']}.{item['kind']}.json"
 
 
-def write_record(prs_dir, item, status, now):
+def write_record(prs_dir, item, status, now, approval=None):
     """Records a review run's status for the item's head and kind.
 
     running starts a run at now. failed counts one more failure at this head and done keeps the
-    count, so whooper-select stops retrying a head after MAX_FAILURES.
+    count, so whooper-select stops retrying a head after MAX_FAILURES. classify passes the run's
+    approval with done, and later statuses for the same head keep it.
     """
     path = record_path(prs_dir, item)
     started_at = now.isoformat(timespec="seconds")
     old = json.loads(path.read_text()) if path.exists() else {"failures": 0, "started_at": started_at}
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({
+    record = {
         "status": status,
         "failures": old["failures"] + (status == "failed"),
         "started_at": started_at if status == "running" else old["started_at"],
-    }))
+    }
+    if approval := approval or old.get("approval"):
+        record["approval"] = approval
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record))
 
 
 def conversation(pr, as_of=None):
@@ -545,6 +549,9 @@ def review_request(head_sha, posts):
     }
 
 
+APPROVAL_TEXT = {"approve_once_ci_passes": "Approve once CI passes", "look_first": "Look first"}
+
+
 def summary_text(run_dir):
     """The summary channel's message for a run that whooper-post has handled: the PR, what posted or
     would post, how many findings wait in the digest, and where the log is."""
@@ -554,7 +561,8 @@ def summary_text(run_dir):
     item, result, post = load("run.json"), load("findings.json"), load("post.json")
     lines = [
         f"Whooper reviewed https://github.com/{item['repo']}/pull/{item['pr']} at {item['head_sha'][:12]}"
-        + (" (dry run)." if item["dry_run"] else ".")
+        + (" (dry run)." if item["dry_run"] else "."),
+        f"{APPROVAL_TEXT[result['approval']['verdict']]}: {result['approval']['reason']}",
     ]
     if result["status"] == "skipped":
         lines.append(f"Skipped: {result['skip_reason']}")
@@ -693,10 +701,12 @@ def main(command, *args):
             raise SystemExit(f"whooper-classify: {run} is already classified")
         item = load(run / "run.json")
         events = [json.loads(line) for line in (run / "transcript.jsonl").read_text().splitlines() if line]
-        verdicts = classify(load(run / "findings.json"), events, (run / "github.json").exists(), run)
+        result = load(run / "findings.json")
+        verdicts = classify(result, events, (run / "github.json").exists(), run)
         append_digest(data, run, item, [v for v in verdicts if v["verdict"] != "auto_post"])
-        write_record(data / "prs", item, "done", datetime.now(timezone.utc))
+        write_record(data / "prs", item, "done", datetime.now(timezone.utc), result["approval"])
         (run / "verdicts.json").write_text(json.dumps(verdicts, indent=2))
+        print(f"approval: {result['approval']['verdict']}: {result['approval']['reason']}")
         for v in verdicts:
             print(f"{v['verdict']}: finding {v['id']} at {v['path']}:{v['line']}: {v['title']}")
             for check in v["checks_failed"]:

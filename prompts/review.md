@@ -82,6 +82,18 @@ For each finding:
     when the facts say `github.json` is missing.
   - `not_pr_text`: the finding is not about the PR's title or body.
 
+## Approval
+
+Say whether {{user_name}} can approve the PR with confidence once CI passes. CI results are not
+available in this run, so no verdict covers them.
+- `approve_once_ci_passes`: no finding needs the author's answer or a change before merge, and you
+  read and ran enough of the change to trust that.
+- `look_first`: a finding needs an answer or a change, the run was skipped, or you could not read
+  or run enough to trust the change, such as a database path you could not exercise.
+
+`reason`: one or two sentences for {{user_name}} on what the verdict rests on: what you ran, and
+what you could not check.
+
 ## The log
 
 Before you return, write `log.md` in the run directory. A later session must be able to explain
