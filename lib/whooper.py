@@ -634,18 +634,18 @@ def main(command, *args):
         print(fill((Path(__file__).resolve().parent.parent / "prompts" / f"{name}.md").read_text(), values), end="")
     elif command == "poll-guard":
         # The poll run's hook: PostToolUse on slack_read_channel records each read and its page in
-        # reads, and PreToolUse on StructuredOutput blocks the run's answer, with exit code 2, until
+        # reads_file, and PreToolUse on StructuredOutput blocks the run's answer, with exit code 2, until
         # those reads pass channel_pages. Claude Code lets a call through when its hook fails any
         # other way, so every failure while checking blocks too.
-        reads, oldest, channel = Path(args[0]), args[1], args[2]
+        reads_file, oldest, channel = Path(args[0]), args[1], args[2]
         try:
             hook = json.load(sys.stdin)
             if hook["hook_event_name"] == "PostToolUse":
-                with open(reads, "a") as f:
+                with open(reads_file, "a") as f:
                     f.write(json.dumps([hook["tool_input"], hook["tool_response"]]) + "\n")
                 return
-            done = [json.loads(line) for line in reads.read_text().splitlines()] if reads.exists() else []
-            channel_pages(done, oldest, channel)
+            recorded = [json.loads(line) for line in reads_file.read_text().splitlines()] if reads_file.exists() else []
+            channel_pages(recorded, oldest, channel)
         except Exception as e:
             print(f"Not yet: {e}. Before you return, read the channel with slack_read_channel as the prompt "
                   "says, through the page that says no more messages remain.", file=sys.stderr)
