@@ -300,38 +300,26 @@ The goal is a diff that a reviewer holding these opinions has nothing to comment
 
 ## Choosing what to raise on a colleague's PR
 
-The checklist above finds candidates. On someone else's PR, the user posts zero to five comments, and an approval with none is common. Offer the candidates the user would raise, and list the rest under dropped, each with its reason, so the user can still pick one. When more than five qualify, offer the five the user is most likely to post and drop the rest. When nothing qualifies through the raise list below, an exception the drop list names, or "When to block", offer none and recommend approval.
+The checklist above finds candidates. On someone else's PR, an approval with no comments is common. Offer every candidate the questions below raise, with the ones the user is most likely to post first, and list the rest under dropped, each with its reason, so the user can still pick one. When the questions drop every candidate, offer none and recommend approval.
 
 Another reviewer's broader ask does not cover your narrower point. If they asked to move the tests to the public path and you found two inputs no request can produce, raise yours on its own lines: the author may not take theirs.
 
-The user raises:
+Ask these questions in order for each candidate. The user would rather delete an extra draft than miss a point, so when a question leaves you unsure, raise the candidate. A candidate on the "When to block" list above blocks, whatever the questions say.
 
-- A bug the PR introduces in what a caller, an operator, or CI sees, shown by a request, test, or mutation you ran.
-- A line that breaks a rule in an `AGENTS.md` or this repository's instructions. Quote the rule in one line.
-- A test that cannot catch the regression it is named for, with the mutation that shows it, or a reachable case no test reaches, with what a customer would see.
-- Public API text, docs, or a comment that the PR makes false.
-- An existing helper, library feature, or local form the new code could use instead, with the code.
-- A `CODEOWNERS` line that changes nothing, with a suggestion block that deletes it.
-- A check or guard the PR adds for a state the code already rules out, such as a second copy of a check the only caller makes or a negative index a library never produces. Say what rules the state out, and add an empty suggestion block that deletes it.
-- A readability change with the rewrite, when the current form makes the reader assemble pieces to see what happens.
-- A one-line idiom fix on a line the PR adds, with a suggestion block, when this skill or nearby code already names the idiom (a zero-value check written out by hand). "Cheap to change later" is not a reason to drop these.
-- Two copies that must agree on one rule, such as two paths that advance the same watermark.
-- A new sentence a reader must hold in their head to the end, such as one 40-word sentence in a public description or comment, with the split as a suggestion block.
-- New machinery that exists only to keep a behavior no caller asked for, such as a type that tracks an error's ordering. Ask whether the behavior is needed ("Does the error need to name the first bad column in spec order?") before offering a better mechanism for it.
-
-The user drops:
-
-- Findings about the PR body, title, or stack list, including counts in them. The exception is a body claim about behavior that your probe shows is false. Fold that into the comment about the behavior.
-- Rewording docs and doc comments that are true and read in one pass, or that you only find a little unclear. A true doc that reads in one pass needs no comment.
-- What another reviewer or the review bot already raised, when you can read their comment and it makes the same point at the same place. A summary that mentions the topic does not count, and neither does a different fix for the same code or a thread you cannot read. In those cases draft the point, and say in the report what the summary claimed. Reply in their thread when you have a new fact, such as a worse consequence you reproduced, or a smaller change than the one they proposed.
-- One-line style points: a blank line, two checks in one `if`, a variable used once.
-- Sharing code between copies that may change separately. Raise it only when the copies must keep agreeing.
-- Asking for a guard or a test case for an input a real request cannot produce, and test gaps that a later PR in the same stack fills. (A test that builds such an input is worth a question: it pins behavior no caller depends on.)
-- Naming opinions. Raise a name when it collides with an existing resource, or breaks the convention of its file, package, or module, or the name the standard library gives the same thing (the only identifiers in the module with a type suffix).
-- Performance, latency, or memory concerns that nobody measured. In a PR that is not about performance, measured savings such as fewer allocations are dropped too, unless they cost every developer something, like a benchmark that adds minutes to every comparison run.
-- A follow-up PR request for cleanup the PR does not need.
-- Arguing against the goal the PR states when nothing breaks, such as a cleanup sweep the author chose. Point at what the sweep missed and ask whether to include it.
-- A candidate on neither list that you judged not worth the author's time, even as a nit.
+1. **Can the author act on it in this PR, and has nobody made the point yet?** A comment can change the PR's own lines, lines the PR makes false, and places its change missed. If yes, go to question 2. If no, drop it as "already raised" or "not in this PR". Examples of no:
+   - A reviewer or the review bot made the same point at the same place, in a comment you can read. A summary that mentions the topic does not count, and neither does a different fix for the same code or a thread you cannot read. In those cases draft the point, and say in the report what the summary claimed. When your point is narrower or adds a fact, raise it, or reply in their thread.
+   - The PR body or title, a PR that already merged, or a gap that a later PR in the stack fills. When a probe shows a body claim is false, put that in the comment about the behavior.
+2. **Would a caller, an operator, someone running a tool or test, or an agent following the text get a wrong result, a hang, or a cost someone measured?** These people act on the result without asking the author. If yes, go to question 3. If the harm needs a value the code rules out, or only a test fake breaks, drop it as "nothing produces it". If no, go to question 4. Examples of yes:
+   - A fix tool that makes a call run twice.
+   - A test that hangs, or that keeps passing when its code breaks.
+   - A benchmark that adds minutes to every run, or that times the wrong work.
+   - Text that is false after the PR, or that reads two ways.
+3. **Did a request you ran show callers a wrong or changed response today?** Customers already rely on the old response. If yes, block, such as for a 422 that no longer names the bad field. If no, go to question 5.
+4. **Will the next reader or editor pay for it?** That cost comes back with every later change, and the fix is cheap now. If yes, go to question 5. If no, drop it as "not worth the author's time". This covers naming opinions, one-line style or layout, rewording text that is true, asking for more docs or tests for code that works, speed nobody measured, and arguing against a choice the PR explains. Examples of yes:
+   - The line does nothing: a check the PR adds that repeats one its only caller makes, a guard for an index nothing writes, a `CODEOWNERS` line that a broader line already covers, a new test of an input no request can produce, or machinery no caller asked for. For a check or guard the PR adds, say what already rules out the case it checks, and add an empty suggestion block that deletes it.
+   - The code redoes or departs from what the repository has: an existing helper or library rule, two copies that must agree, the naming of its file, package, or the standard library, or an `AGENTS.md` rule.
+   - The reader has to assemble it: an empty value that means success, one test that runs two paths, a long sentence.
+5. **Does the fix depend on something only the author knows, such as whether a behavior is wanted?** The diff cannot answer it. If yes, ask a question, such as "Does the error need to name the first bad column in spec order?" If no, raise it with the fix, labeled as "Writing review comments" describes.
 
 ## Writing review comments
 

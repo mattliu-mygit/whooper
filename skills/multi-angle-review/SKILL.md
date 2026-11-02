@@ -165,7 +165,7 @@ Rank by how costly the problem gets, not by line number:
 5. Missing signals and unjustified settings: a stall with no metric, two limits where only one can bind. A new setting needs a named operator action, such as turning off a cache that serves wrong results. Otherwise prefer a constant.
 6. Cleanup and conventions.
 
-**Calibrate.** In peer and co-review mode, drop a finding that is reversible, cheap to change later, and does no harm now. Cheap to change later is not enough on its own to drop a small, concrete fix on a line the PR adds, such as deleting a line with no effect or a check for a state the code rules out. When the repository's comment rules list which kinds the user raises and drops, follow that list. Self mode has no Dropped disposition. A real item is Fix here, and a candidate that is not a problem is cleared.
+**Calibrate.** In peer and co-review mode, drop a finding that is reversible, cheap to change later, and does no harm now. Cheap to change later is not enough on its own to drop a small, concrete fix on a line the PR adds, such as deleting a line with no effect or a check for a state the code rules out. When the repository's skills say how to choose which findings the user raises, follow them. Self mode has no Dropped disposition. A real item is Fix here, and a candidate that is not a problem is cleared.
 
 **Fold, do not clear.** When a larger fix would remove a smaller finding, list the smaller one inside the larger finding as a lettered sub-item ("5a. Also removes: ..."), so the user can answer "fix 5a" alone. Sub-items live in the report. The drafted comment carries only the main finding until the user asks to merge one in. "Chased and cleared" is only for candidates that turned out not to be problems.
 
