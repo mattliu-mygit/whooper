@@ -108,7 +108,9 @@ skipped run gets no verdicts.
 ## Approvals
 
 The poll's Haiku run sees only ToolSearch and the Slack connector's tools, may call only ToolSearch
-and `slack_read_channel`, and has every Slack write tool denied by name. Review runs have no GitHub
+and `slack_read_channel`, and has every Slack write tool denied by name. Its hooks (`whooper.py
+poll-guard`) record each read and block its answer until it has read the channel to the last
+page, because a run can otherwise answer without reading. The user's own hooks run in it too. Review runs have no GitHub
 login and no Slack tools, and whooper-review refuses to run without `--dry-run`. The summary run
 may call only `slack_schedule_message`, and `hooks/slack-guard.sh` blocks any other Slack call,
 any other channel, a thread, a changed text or time, and a second summary.

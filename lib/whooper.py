@@ -7,6 +7,7 @@ from the user's config file (config_path), never from this code. The bin/ script
   whooper.py repo <owner/repo>                                                     -> the repo's shell variables
   whooper.py prompt poll|review [<owner/repo>]                                     -> a prompt, filled in
   whooper.py asks <transcript.jsonl> <oldest>                                      -> asks JSON
+  whooper.py poll-guard <reads.jsonl> <oldest> < hook input                        -> the poll run's read hook
   whooper.py items <github.json> <asks.json> <slack-prs.json>                      -> {"items": [...]}
   whooper.py select <data dir>                                                     -> one work item per line
   whooper.py conversation <conversation.graphql result> [<as-of time>]             -> a run's github.json
@@ -85,6 +86,36 @@ def bot_list(bots, key):
     return ", ".join(f"{b['label']} ({b[key]})" for b in bots) or "none"
 
 
+def channel_pages(reads, oldest, channel):
+    """Returns the pages of a poll run's slack_read_channel calls, in order.
+
+    reads are (arguments, result content) pairs, where the content is a list of text blocks.
+    Raises ValueError unless the run read only the channel from oldest with no other filter,
+    followed only cursors that its pages gave, and reached the page that says no more messages
+    remain. read_asks applies this after the run, and poll-guard during it.
+    """
+    pages, cursors = [], set()
+    for args, content in reads:
+        if (args.keys() - READ_ARGS
+                or (args.get("channel_id"), args.get("oldest")) != (channel, oldest)
+                or args.get("response_format", "detailed") != "detailed"
+                or ("cursor" in args and args["cursor"] not in cursors)):
+            raise ValueError(f"the poll run called slack_read_channel with {args}")
+        # A page is JSON text with messages and pagination_info. A result too large for the CLI
+        # comes back as a plain string instead.
+        for text in (c["text"] for c in content if isinstance(content, list) and c["type"] == "text"):
+            try:
+                page = json.loads(text)
+            except ValueError:
+                continue
+            if isinstance(page, dict) and {"messages", "pagination_info"} <= page.keys():
+                pages.append(page)
+                cursors.update(re.findall(r"cursor: `([^`]+)`", page["pagination_info"]))
+    if not any("no more messages" in p["pagination_info"] for p in pages):
+        raise ValueError(f"the poll run did not read {channel} from {oldest} through its last page")
+    return pages
+
+
 def read_asks(events, oldest, channel, user, slack_url, orgs):
     """Returns the review asks a poll run reported, and a note for each ask or URL it dropped.
 
@@ -103,33 +134,17 @@ def read_asks(events, oldest, channel, user, slack_url, orgs):
     if not results or results[-1]["subtype"] != "success" or results[-1]["is_error"]:
         raise ValueError("the poll run did not succeed")
 
-    calls, pages, cursors = {}, [], set()
+    # Each read's arguments, and its content once a result that is not an error arrives.
+    reads = {}
     for e in events:
         if e["type"] not in ("assistant", "user"):
             continue
         for block in e["message"]["content"]:
             if block.get("type") == "tool_use" and block["name"] == READ_CHANNEL:
-                args = block["input"]
-                if (args.keys() - READ_ARGS
-                        or (args.get("channel_id"), args.get("oldest")) != (channel, oldest)
-                        or args.get("response_format", "detailed") != "detailed"
-                        or ("cursor" in args and args["cursor"] not in cursors)):
-                    raise ValueError(f"the poll run called slack_read_channel with {args}")
-                calls[block["id"]] = args
-            elif block.get("tool_use_id") in calls and not block.get("is_error"):
-                # A page is JSON text with messages and pagination_info. A result too large for
-                # the CLI comes back as a plain string instead, without is_error.
-                content = block["content"] if isinstance(block["content"], list) else []
-                for text in (c["text"] for c in content if c["type"] == "text"):
-                    try:
-                        page = json.loads(text)
-                    except ValueError:
-                        continue
-                    if isinstance(page, dict) and {"messages", "pagination_info"} <= page.keys():
-                        pages.append(page)
-                        cursors.update(re.findall(r"cursor: `([^`]+)`", page["pagination_info"]))
-    if not any("no more messages" in p["pagination_info"] for p in pages):
-        raise ValueError(f"the poll run did not read {channel} from {oldest} through its last page")
+                reads[block["id"]] = (block["input"], [])
+            elif block.get("tool_use_id") in reads and not block.get("is_error"):
+                reads[block["tool_use_id"]] = (reads[block["tool_use_id"]][0], block["content"])
+    pages = channel_pages(reads.values(), oldest, channel)
 
     # Each post starts with a "=== Message from <sender> ..." line, then its "Message TS:" line.
     posts = {}
@@ -617,6 +632,24 @@ def main(command, *args):
             notes = config["repos"][repo[0]].get("notes")
             values["repo_notes"] = (config["dir"] / notes).read_text().strip() if notes else "None."
         print(fill((Path(__file__).resolve().parent.parent / "prompts" / f"{name}.md").read_text(), values), end="")
+    elif command == "poll-guard":
+        # The poll run's hook: PostToolUse on slack_read_channel records each read and its page in
+        # reads, and PreToolUse on StructuredOutput blocks the run's answer, with exit code 2, until
+        # those reads pass channel_pages. Claude Code lets a call through when its hook fails any
+        # other way, so every failure while checking blocks too.
+        reads, oldest, channel = Path(args[0]), args[1], args[2]
+        try:
+            hook = json.load(sys.stdin)
+            if hook["hook_event_name"] == "PostToolUse":
+                with open(reads, "a") as f:
+                    f.write(json.dumps([hook["tool_input"], hook["tool_response"]]) + "\n")
+                return
+            done = [json.loads(line) for line in reads.read_text().splitlines()] if reads.exists() else []
+            channel_pages(done, oldest, channel)
+        except Exception as e:
+            print(f"Not yet: {e}. Before you return, read the channel with slack_read_channel as the prompt "
+                  "says, through the page that says no more messages remain.", file=sys.stderr)
+            raise SystemExit(2)
     elif command == "asks":
         config, (transcript, oldest) = load_config(), args
         events = [json.loads(line) for line in Path(transcript).read_text().splitlines() if line]

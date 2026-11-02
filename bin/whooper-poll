@@ -25,11 +25,21 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 slack="mcp__claude_ai_Slack__slack"
-# The claude.ai Slack connector loads only with user settings, so the run turns off what those
-# settings and the CLI add: hooks, every MCP server but the Slack connector (matched by URL),
-# CLAUDE.md files, auto-memory, skills, and every built-in tool but ToolSearch. dontAsk denies
-# any tool not allowed here, and the Slack writes are also denied by name, which holds even if a
-# user setting someday allows them.
+# The claude.ai Slack connector loads only with user settings, so the run turns off what else those
+# settings and the CLI add: every MCP server but the Slack connector (matched by URL), CLAUDE.md
+# files, auto-memory, skills, and every built-in tool but ToolSearch. dontAsk denies any tool not
+# allowed here, and the Slack writes are also denied by name, which holds even if a user setting
+# someday allows them. The user's hooks stay on, because the run needs its own: a run can return
+# its answer without reading the channel, so poll-guard records each read and blocks the answer
+# until the reads reach the channel's last page.
+guard="python3 -I $(printf %q "$root/lib/whooper.py") poll-guard $(printf %q "$work/reads.jsonl") $oldest $WHOOPER_ASK_CHANNEL"
+settings="$(jq -cn --arg guard "$guard" --arg read "${slack}_read_channel" '{
+  allowedMcpServers: [{serverUrl: "https://mcp.slack.com/mcp"}],
+  hooks: {
+    PostToolUse: [{matcher: $read, hooks: [{type: "command", command: $guard}]}],
+    PreToolUse: [{matcher: "StructuredOutput", hooks: [{type: "command", command: $guard}]}]
+  }
+}')"
 CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude -p "$(python3 -I "$root/lib/whooper.py" prompt poll)
 
 channel_id: $WHOOPER_ASK_CHANNEL
@@ -37,7 +47,7 @@ user_id: $WHOOPER_SLACK_USER
 oldest: $oldest" \
   --model "$WHOOPER_POLL_MODEL" \
   --setting-sources user \
-  --settings '{"disableAllHooks": true, "allowedMcpServers": [{"serverUrl": "https://mcp.slack.com/mcp"}]}' \
+  --settings "$settings" \
   --tools ToolSearch --disable-slash-commands --no-session-persistence \
   --permission-mode dontAsk \
   --allowedTools "ToolSearch ${slack}_read_channel" \

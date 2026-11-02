@@ -549,6 +549,51 @@ def work_item(kind="recheck", head="head3", number=12):
             "source": "reviewed_by_user", "slack": None, "reason": "r"}
 
 
+
+class PollGuardTest(unittest.TestCase):
+    """whooper.py poll-guard as the poll run's hooks call it: each read is recorded after it
+    returns, and the run's answer is blocked with exit code 2 until the reads reach the last page."""
+
+    def setUp(self):
+        self.reads = Path(tempfile.mkdtemp()) / "reads.jsonl"
+
+    def hook(self, payload):
+        stdin = payload if isinstance(payload, str) else json.dumps(payload)
+        return subprocess.run(["python3", "-I", str(ROOT / "lib" / "whooper.py"), "poll-guard", str(self.reads), OLDEST, CHANNEL],
+                              input=stdin, capture_output=True, text=True).returncode
+
+    def after_read(self, call_input, content):
+        return self.hook({"hook_event_name": "PostToolUse", "tool_name": READ, "tool_input": call_input, "tool_response": content})
+
+    def answer(self):
+        return self.hook({"hook_event_name": "PreToolUse", "tool_name": "StructuredOutput", "tool_input": {"asks": [], "not_asks": []}})
+
+    def test_answer_waits_for_the_last_page(self):
+        first, _, _ = read()
+        # The first page points at a second page with a cursor; the answer is blocked until it is read.
+        self.assertEqual(self.after_read(first, page(pagination=MORE)), 0)
+        self.assertEqual(self.answer(), 2)
+        self.assertEqual(self.after_read({**first, "cursor": "bmV4dF90czox"}, page()), 0)
+        self.assertEqual(self.answer(), 0)
+
+    def test_answer_is_blocked(self):
+        call, content, _ = read()
+        cases = [
+            ("no read at all", []),
+            ("a read of another channel", [({**call, "channel_id": "C0000000009"}, content)]),
+            ("a read with a cursor no page gave", [({**call, "cursor": "made-up"}, content)]),
+        ]
+        for name, reads in cases:
+            with self.subTest(name):
+                self.setUp()
+                for call_input, result in reads:
+                    self.after_read(call_input, result)
+                self.assertEqual(self.answer(), 2)
+
+    def test_input_it_cannot_parse_blocks(self):
+        # Claude Code would let the answer through if the hook failed with exit code 1.
+        self.assertEqual(self.hook("not json"), 2)
+
 class SelectWorkTest(unittest.TestCase):
     # 10:00 on 2031-08-01 in a UTC-7 timezone.
     now = datetime(2031, 8, 1, 10, 0, tzinfo=timezone(timedelta(hours=-7)))
