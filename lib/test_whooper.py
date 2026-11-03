@@ -8,7 +8,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-from whooper import bot_list, classify, conversation, fill, main, pr_link, poll_items, read_asks, select_work, summary_text, write_record
+from whooper import bot_list, classify, conversation, fill, main, pr_link, poll_items, read_asks, select_work, skill_hashes, summary_text, write_record
 
 LOGIN = "sam-example"
 # Every test runs on this made-up config, never on the user's own.
@@ -1092,6 +1092,31 @@ class ConfigTest(unittest.TestCase):
         ]:
             with self.subTest(url):
                 self.assertEqual(bool(link.search(url)), matches)
+
+
+class SkillHashesTest(unittest.TestCase):
+    def write(self, root, files):
+        for name, text in files.items():
+            path = Path(root) / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+
+    def test_any_file_edit_changes_only_its_own_skill_hash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.write(tmp, {"a/SKILL.md": "rule one", "b/SKILL.md": "rule two", "b/examples.md": "example"})
+            before = skill_hashes(tmp)
+            self.write(tmp, {"b/examples.md": "another example"})
+            after = skill_hashes(tmp)
+        self.assertEqual(sorted(before), ["a", "b"])
+        self.assertEqual(before["a"], after["a"])
+        self.assertNotEqual(before["b"], after["b"])
+
+    def test_same_files_in_another_folder_hash_the_same(self):
+        with tempfile.TemporaryDirectory() as live, tempfile.TemporaryDirectory() as saved:
+            files = {"a/SKILL.md": "rule one", "a/notes/extra.md": "detail"}
+            self.write(live, files)
+            self.write(Path(saved) / "v2", files)
+            self.assertEqual(skill_hashes(live)["a"], skill_hashes(Path(saved) / "v2")["a"])
 
 
 if __name__ == "__main__":

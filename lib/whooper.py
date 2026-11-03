@@ -15,8 +15,10 @@ from the user's config file (config_path), never from this code. The bin/ script
   whooper.py classify <data dir> <run dir>                                         -> verdicts, digest, record
   whooper.py post <data dir> <run dir> <head now> <review comments.json>          -> post.json, digest, record
   whooper.py summary <run dir>                                                     -> the summary channel's text
+  whooper.py skills <skills dir>                                                   -> {skill: content hash}
 """
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -592,6 +594,25 @@ def append_digest(data, run_dir, item, verdicts):
             }) + "\n")
 
 
+def skill_hashes(skills_dir):
+    """A hash of each skill folder's files by relative path and content, so a run's record names the skill
+    text it loaded. The same files give the same value wherever they sit, so a run's hash can be matched
+    against a saved copy of a skill version."""
+    hashes = {}
+    for skill in sorted(Path(skills_dir).iterdir()):
+        if not skill.is_dir():
+            continue
+        h = hashlib.sha256()
+        for dirpath, dirnames, filenames in os.walk(skill):
+            dirnames.sort()
+            for name in sorted(filenames):
+                path = Path(dirpath) / name
+                h.update(str(path.relative_to(skill)).encode() + b"\0")
+                h.update(hashlib.sha256(path.read_bytes()).hexdigest().encode())
+        hashes[skill.name] = h.hexdigest()
+    return hashes
+
+
 def main(command, *args):
     def load(path):
         return json.loads(Path(path).read_text())
@@ -742,6 +763,8 @@ def main(command, *args):
         print(f"printed the request to {request_file}" if posts else "nothing to post")
     elif command == "summary":
         sys.stdout.write(summary_text(Path(args[0]).resolve()))
+    elif command == "skills":
+        print(json.dumps(skill_hashes(args[0])))
     else:
         raise SystemExit(f"whooper.py: unknown command {command!r}")
 

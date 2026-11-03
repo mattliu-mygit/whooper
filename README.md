@@ -144,7 +144,8 @@ after a poll writes its output, so an interrupted poll is simply repeated.
 - `locks/<owner>-<repo>-<pr>/pid`: the process ID of the review that holds the PR. A lock whose
   process is gone is stale, and the next review takes it.
 - `runs/<run-id>/`: one review run, named by its UTC start time and PR number. `run.json` is the
-  work item with the run ID, merge base, and cutoff. `github.json` is the PR conversation the run
+  work item with the run ID, merge base, cutoff, and a content hash of each skill in `~/.claude/skills`,
+  so a finding traces to the skill text behind it. `github.json` is the PR conversation the run
   read, missing when the fetch failed. `transcript.jsonl` and `stderr.log` are the run,
   `findings.json` its result, `log.md` its evidence for each finding and the candidates it dropped,
   `verdicts.json` whooper-classify's output, and `post.json` and `post-request.json` whooper-post's.

@@ -114,8 +114,10 @@ merge_base="$(git -C "$core" merge-base "refs/whooper/$run_id/head" "refs/whoope
 # Checking out both trees fetches every file in them, so the run can read both without a login.
 git -C "$core" worktree add --quiet --detach "$run/head" "$head_sha"
 git -C "$core" worktree add --quiet --detach "$run/base" "$merge_base"
+# skills holds a content hash of every skill the run can load, so a finding traces to the skill version behind it.
 jq --arg run_id "$run_id" --arg merge_base "$merge_base" --arg as_of "$as_of" \
-  '. + {run_id: $run_id, merge_base: $merge_base, as_of: (if $as_of == "" then null else $as_of end), dry_run: true}' \
+  --argjson skills "$(python3 -I "$root/lib/whooper.py" skills "$HOME/.claude/skills")" \
+  '. + {run_id: $run_id, merge_base: $merge_base, as_of: (if $as_of == "" then null else $as_of end), dry_run: true, skills: $skills}' \
   "$item" > "$run/run.json"
 
 if gh api graphql -F query=@"$root/queries/conversation.graphql" \
