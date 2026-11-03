@@ -259,7 +259,7 @@ Items are tagged **Shape**, **Runtime**, or **Both**.
 ### Tests
 
 - Run one contract suite against the fake and the real stores (one helper that runs a test function against each store). Prefer hand-written fakes over mocks. A spy embeds the store and records one method's input.
-- Table tests with sentence names (`"replays the same request"`) or behavior-sentence test names (`TestRecountRecordsAFailureAfterTheCallerCancels`), one behavior each. Black-box `package x_test`: match the directory. When most test files in a directory are external, a new one there reaches unexported code through an `export_test.go` alias. Storage and benchmark directories may be mostly in-package, so match those too.
+- Table tests with sentence names (`"replays the same request"`) or behavior-sentence test names (`TestRecountRecordsAFailureAfterTheCallerCancels`), one behavior each. Put a new test file in the external `_test` package, and test through the package's exported API or its callers. A test-only alias is a last resort: first check whether an exported caller shows the behavior, and if callers need guarantees on the function itself, export the real function. Add an alias only when neither keeps the coverage, and give the reason in the PR description. Aliases the package already has do not justify a new one. Storage and benchmark directories may be mostly in-package, so match those too.
 - Wait on events, not sleeps. Root-cause flakes instead of retrying them. Turn a lesson into a repository check.
 - Delete tests that pin error strings, and helpers that peek at the database with raw SQL.
 - Test a schema by running the migration and querying the resulting schema (sort key, nullability, TTL), not by reading the migration file.
