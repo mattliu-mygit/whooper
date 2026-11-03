@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Runs one review on Devin: agents/devin/review <prompt file>.
+#
+# bin/whooper-review starts this in the PR's head worktree with no GitHub login and the run's
+# variables (README.md, "How a review run works"). The run loads what a normal session there loads:
+# the user's rules, skills, and hooks, the PR's own .devin/ and .claude/ files, and MCP servers. Its
+# config is the user's ~/.config/devin/config.json plus Whooper's two additions, written into the run
+# directory because the CLI rewrites the file it is given:
+#   - hooks/tool-use-id.sh after each exec call, which shows the run the IDs a finding cites;
+#   - deny rules for every tool of the two Slack servers Devin can load, so the run can post
+#     nothing. Deny rules hold in --permission-mode dangerous, which approves every other call.
+#
+# The run writes findings.json itself. This writes transcript.json (the run's ATIF export),
+# stdout.log, and stderr.log to $WHOOPER_RUN, prints the cost line in ACUs, Devin's billing unit,
+# and exits with the CLI's exit code.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+run="$WHOOPER_RUN"
+user_config="$HOME/.config/devin/config.json"
+[[ -f "$user_config" ]] || user_config=/dev/null
+jq -n --slurpfile user "$user_config" --arg hook "$root/hooks/tool-use-id.sh" '
+  ($user[0] // {})
+  | .hooks.PostToolUse += [{matcher: "exec", hooks: [{type: "command", command: $hook}]}]
+  | .permissions.deny += ["mcp__slack-remote__*", "mcp__slack__*"]' > "$run/devin-config.json"
+
+started="$(date +%s)"
+status=0
+# Devin Desktop sets ACP_BACKEND in its shells, and the CLI ignores its own login while it is set.
+env -u ACP_BACKEND devin -p --prompt-file "$1" --config "$run/devin-config.json" \
+  --model "$WHOOPER_DEVIN_REVIEW_MODEL" --permission-mode dangerous --respect-workspace-trust false \
+  --export "$run/transcript.json" > "$run/stdout.log" 2> "$run/stderr.log" || status=$?
+
+if [[ -f "$run/transcript.json" ]]; then
+  jq -r --argjson minutes "$((($(date +%s) - started) / 60))" '
+    [.steps[] | select(.source == "agent")] as $turns
+    | "whooper-review: \([$turns[].extra.committed_acu_cost // 0] | add // 0 | . * 1000 | round / 1000) ACU in \($minutes) minutes, \($turns | length) turns"' \
+    "$run/transcript.json" >&2
+fi
+exit "$status"

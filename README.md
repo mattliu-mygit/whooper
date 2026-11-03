@@ -1,20 +1,22 @@
 # Whooper
 
 Whooper finds the pull requests one GitHub user is expected to review or re-check, and reviews
-them with Claude Code runs. It reads the user's review requests on GitHub and review asks in one
+them with coding-agent runs; the config picks the agent, and `agents/` has a folder per agent. It reads the user's review requests on GitHub and review asks in one
 Slack channel, reviews each PR in a sandboxed run, sorts the findings by a strict rule, writes the
 GitHub review it would post, and sends a summary to a private Slack channel. Live posting to GitHub
 is not turned on yet, and nothing runs on a schedule.
 
 ## Set it up
 
-Whooper needs `gh` and `claude` logged in (the claude.ai Slack connector must be connected), `jq`,
-`git`, `docker`, and Python 3.11 or later as `python3`.
+Whooper needs `gh` logged in, [slackdump](https://github.com/rusq/slackdump) logged in to the
+Slack workspace (`slackdump workspace new <name>`, through a browser), the CLI of each agent the
+config's `[jobs]` names logged in (`devin auth login`; `claude`, whose summary uses the claude.ai
+Slack connector), `jq`, `git`, `docker`, and Python 3.11 or later as `python3`.
 
 1. Copy `examples/config.example.toml` to `~/.config/whooper/config.toml` and fill it in. Everything
    that identifies you, your company, or your repos lives there: your GitHub login and name, the
-   GitHub orgs, the Slack workspace and channels, the bots on both sides, the models, the skills a
-   review loads, and one table per repo.
+   GitHub orgs, the Slack workspace and channels, the bots on both sides, the agent each job runs
+   on and each agent's models, the skills a review loads, and one table per repo.
 2. For each repo, optionally copy `examples/setup.example.sh`, `teardown.example.sh`, and
    `repo-notes.example.md` next to the config and name them in the repo's table. Setup prepares
    what a review needs beyond the two checkouts, such as dependencies or a database; teardown
@@ -37,7 +39,7 @@ from `~/.claude/skills`, so copy them there or point the config at your own.
 
 ```sh
 bin/whooper-fetch   # GitHub reads -> <state>/poll/github.json
-bin/whooper-poll    # a Haiku run reads Slack -> <state>/poll/<UTC start time>.json, and prints that path
+bin/whooper-poll    # slackdump reads Slack, an agent picks the asks -> <state>/poll/<UTC start time>.json
 bin/whooper-select  # prints the newest poll's items that no record marks as handled, one per line
 ```
 
@@ -47,7 +49,7 @@ To review one work item, save it as a file and run:
 bin/whooper-review <work-item.json> --dry-run [--as-of <ISO 8601 time>]   # prints the run directory
 bin/whooper-classify <run directory>                                       # verdicts, digest, record
 bin/whooper-post <run id> --print     # writes the review it would post to post-request.json
-bin/whooper-summary <run id> --print  # prints the summary; without --print, sends it to the summary channel
+bin/whooper-summary <run id> --print  # prints the summary; without --print, the summary agent delivers it
 ```
 
 `--as-of` replays a past review: `github.json` then holds only what people could read on the PR
@@ -56,8 +58,10 @@ before that time.
 whooper-post re-reads the PR first. It posts nothing when the head moved, and it moves to the
 digest any finding whose line got a new review comment since the run started, or whose draft
 @-mentions someone or links outside the configured orgs. Live posting is not built yet.
-whooper-summary sends through a Haiku run whose only Slack call, `slack_schedule_message`,
-`hooks/slack-guard.sh` pins to the composed text, channel, and time.
+whooper-summary delivers through the agent `[jobs] summary` names. On Claude, a Haiku run sends
+it, and its only Slack call, `slack_schedule_message`, is pinned by `hooks/slack-guard.sh` to the
+composed text, channel, and time. Devin cannot reach Slack, so it writes `summary.md` in the run
+directory instead.
 
 Tests: `python3 -I -m unittest discover -s lib`. They run on a made-up config and never read yours.
 
@@ -75,34 +79,44 @@ posts only. Only PRs in the configured GitHub orgs count. Each item is one PR an
   replied since the user's latest review.
 
 A PENDING review or a thread reply does not count as reviewing. Slack text is untrusted: an ask
-must name a post the Haiku run actually read that no bot wrote, and only plain
+must name a post slackdump read that no bot wrote, and only plain
 `https://github.com/<org>/<repo>/pull/<n>` URLs in a configured org that appear in that post reach
 `gh`. `lib/whooper.py` reads whether a post mentions the user and has :eyes: from the post itself.
-It fails the poll, so the cursor stays, when the run read the channel with any argument besides
-`channel_id`, `oldest`, `limit`, a `cursor` from an earlier page, and the default
-`response_format`, or when the run left out a post by someone else that mentions the user next to
-a PR link.
+It fails the poll, so the cursor stays, when slackdump or the run fails, when the run's answer does
+not fit `schemas/slack-asks.json`, or when the run left out a post by someone else that mentions
+the user next to a PR link.
 
 ## How a review run works
 
 whooper-review takes the PR's lock, then fetches with the user's login everything the run will
 read: the head and the merge base of the head and `base_ref`, checked out as two worktrees, and the
 PR's conversation as `github.json`. Then it runs the repo's setup script, if the config names one,
-which may add variables to the run's environment and prints a paragraph for the prompt. Then a
-Claude run follows `prompts/review.md`, filled in from the config, from the head worktree and
-returns `schemas/findings.json`.
+which may add variables to the run's environment and prints a paragraph for the prompt. Then the
+agent that `[jobs] review` names runs from the head worktree through its launcher,
+`agents/<agent>/review`. The run follows `prompts/review.md`, filled in from the config with that
+agent's tool names and saved as `prompt.md` in the run directory, and leaves `findings.json`, which
+must fit `schemas/findings.json`. A run that passes `[review] timeout_minutes` is stopped, and when
+whooper-review exits it stops the run and every process the run started.
 
-The run gets `GH_TOKEN=disabled`, so `gh` and git's `gh` credential helper fail, and no MCP
-servers, so it has no Slack tools. It loads user settings only (`--setting-sources user`), so the
-PR's `.claude/` settings, hooks, and skills do not load. `hooks/tool-use-id.sh` shows it the
-tool-use ID of each Bash call, which a finding cites as proof. A run can still write outside its
+`agents/claude/review` runs `claude -p`, which returns the findings as structured output, and
+reports the run's cost in dollars, capped by `[agents.claude] budget_usd`. `agents/devin/review`
+runs `devin -p` in `dangerous` permission mode, so no tool call waits for an approval; the run
+writes `findings.json` itself, and the cost line is in ACUs, Devin's billing unit. Its config for
+the run, saved as `devin-config.json`, is your `~/.config/devin/config.json` plus Whooper's hook and
+deny rules for every Slack tool, which hold in that mode.
+
+The run gets `GH_TOKEN=disabled`, so `gh` and git's `gh` credential helper fail. Otherwise it loads
+what a normal session in the head worktree loads: user settings, and the PR's own settings, hooks,
+rules, skills, and MCP servers, so a PR's hook runs on this machine with your logins. Each launcher
+denies the Slack writes by name, so the run can post nothing. `hooks/tool-use-id.sh` shows it the
+tool-use ID of each shell call, which a finding cites as proof. A run can still write outside its
 directory, for example to language package caches.
 
 whooper-classify marks a finding `auto_post` only when every rule v1 answer is true, its line is in
 the diff, `github.json` was fetched, and the run's main session, not a subagent, backs it with two
-Bash calls: `head_run` printed `observed`, and `base_run` ran the same command with the head
-worktree's path replaced by the base worktree's, succeeded, and did not print `observed` in an
-output the transcript holds in full. Every nit is `shadow_nit`, and everything else is `digest`. A
+shell calls that each finished inside the call: `head_run` printed `observed`, and `base_run` ran
+the same command with the head worktree's path replaced by the base worktree's, succeeded, and did
+not print `observed` in an output the transcript holds in full. Every nit is `shadow_nit`, and everything else is `digest`. A
 skipped run gets no verdicts.
 
 Each run also returns `approval`: `approve_once_ci_passes` when the run found nothing that needs the
@@ -112,11 +126,10 @@ into the PR record and the summary. It is the run's judgment, and Whooper never 
 
 ## Approvals
 
-The poll's Haiku run sees only ToolSearch and the Slack connector's tools, may call only ToolSearch
-and `slack_read_channel`, and has every Slack write tool denied by name. Its hooks (`whooper.py
-poll-guard`) record each read and block its answer until it has read the channel to the last
-page, because a run can otherwise answer without reading. The user's own hooks run in it too. Review runs have no GitHub
-login and no Slack tools, and whooper-review refuses to run without `--dry-run`. The summary run
+The poll's run gets the channel's posts in its prompt and no way to act: Claude gets no tools, and
+Devin starts in an empty directory in accept-edits mode, where anything but writing its answer
+needs an approval nobody gives. slackdump only reads. Review runs have no GitHub
+login and every Slack write denied, and whooper-review refuses to run without `--dry-run`. The summary run
 may call only `slack_schedule_message`, and `hooks/slack-guard.sh` blocks any other Slack call,
 any other channel, a thread, a changed text or time, and a second summary.
 
@@ -131,7 +144,8 @@ after a poll writes its output, so an interrupted poll is simply repeated.
 
 - `poll/github.json`: whooper-fetch's latest output, one entry per PR as `queries/pr.graphql`
   returns it.
-- `poll/<time>.json`: a poll's work items. `poll/<time>.transcript.jsonl` is its Haiku run.
+- `poll/<time>.json`: a poll's work items. `poll/<time>.prompt.md`, `.answer.json`, and
+  `.transcript.jsonl` (Claude) or `.transcript.json` (Devin) are its run.
 - `poll/cursor`: the Unix time the next poll reads Slack from, which is the last successful poll's
   start time. Without it a poll reads the last 24 hours.
 - `prs/<owner>-<repo>-<pr>/<head>.<kind>.json`: a record of work on one head:
@@ -144,10 +158,12 @@ after a poll writes its output, so an interrupted poll is simply repeated.
 - `locks/<owner>-<repo>-<pr>/pid`: the process ID of the review that holds the PR. A lock whose
   process is gone is stale, and the next review takes it.
 - `runs/<run-id>/`: one review run, named by its UTC start time and PR number. `run.json` is the
-  work item with the run ID, merge base, cutoff, and a content hash of each skill in `~/.claude/skills`,
-  so a finding traces to the skill text behind it. `github.json` is the PR conversation the run
-  read, missing when the fetch failed. `transcript.jsonl` and `stderr.log` are the run,
-  `findings.json` its result, `log.md` its evidence for each finding and the candidates it dropped,
+  work item with the run ID, merge base, cutoff, agent, and a content hash of each skill in
+  `~/.claude/skills`, so a finding traces to the skill text behind it. `github.json` is the PR
+  conversation the run read, missing when the fetch failed. `prompt.md` is the prompt the run got.
+  The transcript (`transcript.jsonl` for Claude, the ATIF export `transcript.json` for Devin, with
+  `devin-config.json` and `stdout.log`) and `stderr.log` are the run, `findings.json` its result
+  (`findings.invalid.json` when it did not fit the schema), `log.md` its evidence for each finding and the candidates it dropped,
   `verdicts.json` whooper-classify's output, and `post.json` and `post-request.json` whooper-post's.
   The worktrees `head/` and `base/` exist only while the run does.
 - `digest.jsonl`: one line per finding that waits for the user, with its run.

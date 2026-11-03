@@ -8,7 +8,9 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-from whooper import bot_list, classify, conversation, fill, main, pr_link, poll_items, read_asks, select_work, skill_hashes, summary_text, write_record
+from whooper import (REVIEW_WORDING, bot_list, check_schema, claude_shell_calls, classify, conversation,
+                     devin_shell_calls, fill, main, pr_link, poll_items, read_asks, select_work, skill_hashes,
+                     slack_posts, summary_text, write_record)
 
 LOGIN = "sam-example"
 # Every test runs on this made-up config, never on the user's own.
@@ -27,14 +29,24 @@ user_id = "U0000000000"
 ask_channel = "C0000000001"
 summary_channel = "C0000000002"
 summary_channel_name = "#whooper"
-bots = [{ name = "pr_digest_bot", label = "PR digests" }, { name = "Slackbot", label = "Slackbot" }]
+slackdump_workspace = "example"
 
-[models]
-poll = "poll-model"
-review = "review-model"
+[jobs]
+review = "claude"
+poll = "claude"
+summary = "claude"
+
+[agents.claude]
+review_model = "review-model"
+poll_model = "poll-model"
+budget_usd = 15
+
+[agents.devin]
+review_model = "devin-review-model"
+poll_model = "devin-poll-model"
 
 [review]
-budget_usd = 15
+timeout_minutes = 45
 skills = ["review-skill", "language-skill"]
 
 [repos."example-org/example-repo"]
@@ -336,63 +348,32 @@ CHANNEL = "C0000000001"
 USER = "U0000000000"
 SLACK_URL = "https://example.slack.com"
 ORGS = ["example-org", "sample-org"]
-READ = "mcp__claude_ai_Slack__slack_read_channel"
 OLDEST = "1943117600"
-ASKER = "Alex Asker <alex@example.com> (U0000000001)"
-TEAMMATE = "Bob Teammate <bob@example.com> (U0000000002)"
-SELF = "Sam Reviewer <sam@example.com> (U0000000000)"
-PR_BOT = "pr_bot <botuser-T0000000000-A0000000000@slack-bots.com> (U07ABCDEF12)"
+ASKER, TEAMMATE = "U0000000001", "U0000000002"
 
 
-def post(ts, text, sender=ASKER):
-    """One post as slack_read_channel prints it."""
-    return f"=== Message from {sender} at 2031-07-30 09:20:37 PDT === \nMessage TS: {ts}\n{text}\n\n\n"
+def message(ts, text, user=ASKER, reactions=(), **fields):
+    """One message as slackdump dumps it."""
+    out = {"type": "message", "ts": ts, "user": user, "text": text, **fields}
+    if reactions:
+        out["reactions"] = [{"name": name, "count": 1, "users": [TEAMMATE]} for name in reactions]
+    return out
 
 
 POST_TS = "1943194837.000100"
-POST = post(POST_TS, (
+POST = message(POST_TS, (
     "<@U0000000000|Sam Reviewer> can you take a look?\n"
     "• <https://github.com/example-org/example-repo/pull/21|feat(app): add a settings page #21>\n"
-    "• <http://github.com/example-org/example-repo/pull/22|#22>\n"
-    "Reactions: eyes (1)"
-))
-LAST_PAGE = "There are no more messages available.\n"
-MORE = "There are more messages available. To view the next page, use cursor: `bmV4dF90czox`"
+    "• <http://github.com/example-org/example-repo/pull/22|#22>"
+), reactions=["eyes"])
+DIGEST_TS = "1943197600.000001"
+BOT_DIGEST = message(DIGEST_TS, "• <https://github.com/example-org/example-repo/pull/34|#34>", user="U07ABCDEF12",
+                     bot_id="B0000000001", bot_profile={"name": "pr_bot"})
 
 
-def page(posts=POST, pagination=LAST_PAGE):
-    """A slack_read_channel result as the connector returns it: JSON text that escapes "/" as "\\/"."""
-    text = json.dumps({"messages": f"Channel: #pr-reviews ({CHANNEL})\n\n{posts}",
-                       "pagination_info": pagination})
-    return [{"type": "text", "text": text.replace("/", "\\/")}]
-
-
-def read(content=None, is_error=None, **input_overrides):
-    """One slack_read_channel call and its result. content is the result's content."""
-    return {"channel_id": CHANNEL, "oldest": OLDEST, "limit": 20, **input_overrides}, content or page(), is_error
-
-
-def transcript(asks, reads=None, result_subtype="success", not_asks=()):
-    """Stream-json events of a poll run that loads the read tool, makes the reads, and returns asks."""
-    reads = [read()] if reads is None else reads
-    events = [
-        {"type": "system", "subtype": "init"},
-        {"type": "assistant", "message": {"content": [
-            {"type": "tool_use", "id": "toolu_0", "name": "ToolSearch", "input": {"query": f"select:{READ}"}}]}},
-        {"type": "user", "message": {"content": [
-            {"type": "tool_result", "tool_use_id": "toolu_0", "content": [{"type": "tool_reference", "tool_name": READ}]}]}},
-    ]
-    for n, (call_input, content, is_error) in enumerate(reads, 1):
-        events += [
-            {"type": "assistant", "message": {"content": [
-                {"type": "tool_use", "id": f"toolu_{n}", "name": READ, "input": call_input}]}},
-            {"type": "user", "message": {"content": [
-                {"type": "tool_result", "tool_use_id": f"toolu_{n}", "is_error": is_error, "content": content}]}},
-        ]
-    output = {"asks": asks, "not_asks": list(not_asks)} if result_subtype == "success" else None
-    events.append({"type": "result", "subtype": result_subtype, "is_error": result_subtype != "success",
-                   "structured_output": output})
-    return events
+def posts(*messages):
+    """The ask channel's posts, as whooper-poll gives them to the run and to read_asks."""
+    return slack_posts({"channel_id": CHANNEL, "name": "pr-reviews", "messages": list(messages or [POST])}, OLDEST)
 
 
 def model_ask(**overrides):
@@ -405,13 +386,44 @@ def model_ask(**overrides):
     return out
 
 
+def asks_of(channel_posts, asks, not_asks=()):
+    return read_asks(channel_posts, {"asks": asks, "not_asks": list(not_asks)}, OLDEST, CHANNEL, USER, SLACK_URL, ORGS)
+
+
 # Alex's post, reported as not an ask, for tests about other posts.
 ASKER_NOT_ASK = {"ts": POST_TS, "reason": "Not an ask."}
 
 
+class SlackPostsTest(unittest.TestCase):
+    def test_keeps_each_top_level_post_since_oldest(self):
+        reply = message("1943194900.000200", "<@U0000000000> also #23", thread_ts=POST_TS)
+        old = message("1943017600.000001", "<https://github.com/example-org/example-repo/pull/9|#9>")
+        malformed = message("1943194837", "<https://github.com/example-org/example-repo/pull/9|#9>")
+        self.assertEqual(posts({**POST, "slackdump_thread_replies": [reply]}, old, malformed), [{
+            "ts": POST_TS, "user": ASKER, "bot": False, "text": POST["text"], "reactions": ["eyes"]}])
+
+    def test_a_shared_message_counts_as_part_of_the_post(self):
+        bump = message(DIGEST_TS, "bump on this one", attachments=[{
+            "from_url": "https://example.slack.com/archives/C0000000009/p1943190000000001",
+            "text": "alex requested review on <https://github.com/example-org/example-repo/pull/60|#60>"}])
+        asks, problems = asks_of(posts(bump), [model_ask(ts=DIGEST_TS, pr_urls=[
+            "https://github.com/example-org/example-repo/pull/60"])])
+        self.assertEqual((problems, [a["pr_urls"] for a in asks]),
+                         ([], [["https://github.com/example-org/example-repo/pull/60"]]))
+
+    def test_marks_what_bots_wrote(self):
+        for name, m in [
+            ("an app or integration", BOT_DIGEST),
+            ("a bot message", message(DIGEST_TS, "digest", subtype="bot_message")),
+            ("Slackbot", message(DIGEST_TS, "reminder", user="USLACKBOT")),
+        ]:
+            with self.subTest(name):
+                self.assertTrue(posts(m)[0]["bot"])
+
+
 class ReadAsksTest(unittest.TestCase):
     def test_ask_gets_a_permalink_built_from_its_ts(self):
-        asks, problems = read_asks(transcript([model_ask()]), OLDEST, CHANNEL, USER, SLACK_URL, ORGS)
+        asks, problems = asks_of(posts(), [model_ask()])
         self.assertEqual(problems, [])
         self.assertEqual(asks, [{
             "ts": POST_TS,
@@ -423,23 +435,9 @@ class ReadAsksTest(unittest.TestCase):
         }])
 
     def test_http_link_in_the_post_grounds_an_https_url(self):
-        asks, problems = read_asks(transcript([model_ask(pr_urls=["https://github.com/example-org/example-repo/pull/22"])]),
-                                   OLDEST, CHANNEL, USER, SLACK_URL, ORGS)
+        asks, problems = asks_of(posts(), [model_ask(pr_urls=["https://github.com/example-org/example-repo/pull/22"])])
         self.assertEqual(problems, [])
         self.assertEqual(asks[0]["pr_urls"], ["https://github.com/example-org/example-repo/pull/22"])
-
-    def test_asks_from_every_page_count_once_the_last_page_is_read(self):
-        reads = [
-            read(content=page(pagination=MORE)),
-            # detailed is the format that shows reactions, and the default.
-            read(content=page(posts=post("1943207600.000001", "<https://github.com/example-org/example-repo/pull/7|#7>")),
-                 cursor="bmV4dF90czox", response_format="detailed"),
-        ]
-        asks, problems = read_asks(
-            transcript([model_ask(), model_ask(ts="1943207600.000001", pr_urls=["https://github.com/example-org/example-repo/pull/7"])], reads),
-            OLDEST, CHANNEL, USER, SLACK_URL, ORGS)
-        self.assertEqual(problems, [])
-        self.assertEqual([a["ts"] for a in asks], [POST_TS, "1943207600.000001"])
 
     def test_untrusted_pr_urls_are_dropped(self):
         for url, in_post in [
@@ -452,96 +450,65 @@ class ReadAsksTest(unittest.TestCase):
             ("https://github.com/example-org/example-repo/pull/2", False),
         ]:
             with self.subTest(url):
-                content = page(posts=f"{POST}\n{url}" if in_post else POST)
-                asks, problems = read_asks(transcript([model_ask(pr_urls=[url])], [read(content=content)]),
-                                           OLDEST, CHANNEL, USER, SLACK_URL, ORGS)
+                post = {**POST, "text": f"{POST['text']}\n{url}"} if in_post else POST
+                asks, problems = asks_of(posts(post), [model_ask(pr_urls=[url])])
                 self.assertEqual(asks, [])
                 self.assertTrue(problems)
 
     def test_pr_url_must_be_linked_by_the_post_that_asks(self):
         # The bot's digest links #34, but Alex's post does not.
-        digest = post("1943197600.000001", "• <https://github.com/example-org/example-repo/pull/34|#34>", sender=PR_BOT)
         urls = ["https://github.com/example-org/example-repo/pull/21", "https://github.com/example-org/example-repo/pull/34"]
-        asks, problems = read_asks(transcript([model_ask(pr_urls=urls)], [read(content=page(POST + digest))]),
-                                   OLDEST, CHANNEL, USER, SLACK_URL, ORGS)
+        asks, problems = asks_of(posts(POST, BOT_DIGEST), [model_ask(pr_urls=urls)])
         self.assertEqual([a["pr_urls"] for a in asks], [["https://github.com/example-org/example-repo/pull/21"]])
         self.assertEqual(problems, [f"dropped PR URL 'https://github.com/example-org/example-repo/pull/34' from ask {POST_TS}"])
 
-    def test_ask_must_be_a_post_the_run_read_since_oldest(self):
-        for name, ts, posts in [
-            ("not in the read output", "1943195599.000001", POST),
-            ("malformed", "1943194837", POST + post("1943194837", "<https://github.com/example-org/example-repo/pull/21|#21>")),
-            ("only in a post's text", "1943207600.123456", POST + "\nsee 1943207600.123456"),
-            # A real post, so only the time check can drop it.
-            ("before oldest", "1943017600.000001",
-             POST + post("1943017600.000001", "<https://github.com/example-org/example-repo/pull/21|#21>")),
+    def test_ask_must_be_one_of_the_channels_posts_since_oldest(self):
+        link = "<https://github.com/example-org/example-repo/pull/21|#21>"
+        for name, ts, extra in [
+            ("not a post", "1943195599.000001", []),
+            ("malformed", "1943194837", [message("1943194837", link)]),
+            ("before oldest", "1943017600.000001", [message("1943017600.000001", link)]),
         ]:
             with self.subTest(name):
-                events = transcript([model_ask(ts=ts)], [read(content=page(posts))], not_asks=[ASKER_NOT_ASK])
-                asks, problems = read_asks(events, OLDEST, CHANNEL, USER, SLACK_URL, ORGS)
+                asks, problems = asks_of(posts(POST, *extra), [model_ask(ts=ts)], not_asks=[ASKER_NOT_ASK])
                 self.assertEqual(asks, [])
                 self.assertTrue(problems)
 
     def test_mention_and_eyes_are_read_from_the_post(self):
-        eyes_no_mention = post("1943197600.000001",
-                               "<https://github.com/example-org/example-repo/pull/50|#50>\nReactions: squirrel (1), eyes (2)", sender=TEAMMATE)
-        mention_no_eyes = post("1943197601.000001",
-                               "<@U0000000000> <https://github.com/example-org/example-repo/pull/51|#51>\nReactions: eyes-closed (1)")
+        eyes_no_mention = message("1943197600.000001", "<https://github.com/example-org/example-repo/pull/50|#50>",
+                                  user=TEAMMATE, reactions=["squirrel", "eyes"])
+        mention_no_eyes = message("1943197601.000001", "<@U0000000000> <https://github.com/example-org/example-repo/pull/51|#51>",
+                                  reactions=["eyes-closed"])
         model_asks = [
             model_ask(ts="1943197600.000001", pr_urls=["https://github.com/example-org/example-repo/pull/50"]),
             model_ask(ts="1943197601.000001", pr_urls=["https://github.com/example-org/example-repo/pull/51"]),
         ]
-        posts = POST + eyes_no_mention + mention_no_eyes
-        asks, problems = read_asks(transcript(model_asks, [read(content=page(posts))], not_asks=[ASKER_NOT_ASK]),
-                                   OLDEST, CHANNEL, USER, SLACK_URL, ORGS)
+        asks, problems = asks_of(posts(POST, eyes_no_mention, mention_no_eyes), model_asks, not_asks=[ASKER_NOT_ASK])
         self.assertEqual(problems, [])
         self.assertEqual([(a["ts"], a["tagged_user"], a["has_eyes"]) for a in asks],
                          [("1943197600.000001", False, True), ("1943197601.000001", True, False)])
 
     def test_ask_from_a_bot_is_dropped(self):
-        digest = post("1943197600.000001", "• <https://github.com/example-org/example-repo/pull/34|#34>", sender=PR_BOT)
-        bot_ask = model_ask(ts="1943197600.000001", pr_urls=["https://github.com/example-org/example-repo/pull/34"])
-        asks, problems = read_asks(transcript([bot_ask], [read(content=page(POST + digest))], not_asks=[ASKER_NOT_ASK]),
-                                   OLDEST, CHANNEL, USER, SLACK_URL, ORGS)
+        bot_ask = model_ask(ts=DIGEST_TS, pr_urls=["https://github.com/example-org/example-repo/pull/34"])
+        asks, problems = asks_of(posts(POST, BOT_DIGEST), [bot_ask], not_asks=[ASKER_NOT_ASK])
         self.assertEqual(asks, [])
-        self.assertEqual(problems, ["dropped ask 1943197600.000001: a bot wrote it"])
+        self.assertEqual(problems, [f"dropped ask {DIGEST_TS}: a bot wrote it"])
 
     def test_every_post_that_mentions_the_user_next_to_a_pr_link_is_answered(self):
         link = "<@U0000000000|Sam Reviewer> <https://github.com/example-org/example-repo/pull/50|#50>"
-        for name, posts, not_asks, raises in [
-            ("left out", POST, [], True),
-            ("reported as not an ask", POST, [ASKER_NOT_ASK], False),
-            ("written by the user", post("1943197600.000001", link, sender=SELF), [], False),
-            ("written by a bot", post("1943197600.000001", link, sender=PR_BOT), [], False),
-            ("no PR link", post("1943197600.000001", "<@U0000000000|Sam Reviewer> lunch?"), [], False),
+        for name, channel_posts, not_asks, raises in [
+            ("left out", posts(), [], True),
+            ("reported as not an ask", posts(), [ASKER_NOT_ASK], False),
+            ("written by the user", posts(message(DIGEST_TS, link, user=USER)), [], False),
+            ("written by a bot", posts(message(DIGEST_TS, link, bot_id="B0000000001")), [], False),
+            ("no PR link", posts(message(DIGEST_TS, "<@U0000000000|Sam Reviewer> lunch?")), [], False),
         ]:
             with self.subTest(name):
-                events = transcript([], [read(content=page(posts))], not_asks=not_asks)
                 if raises:
                     with self.assertRaises(ValueError):
-                        read_asks(events, OLDEST, CHANNEL, USER, SLACK_URL, ORGS)
+                        asks_of(channel_posts, [], not_asks)
                 else:
-                    self.assertEqual(read_asks(events, OLDEST, CHANNEL, USER, SLACK_URL, ORGS), ([], []))
-
-    def test_failed_run_raises(self):
-        # The CLI's reply when a read is too large: a string, not marked as an error.
-        too_large = "Error: result (103,864 characters across 1 line) exceeds maximum allowed tokens."
-        for name, reads, subtype in [
-            ("result is an error", [read()], "error_during_execution"),
-            ("never read", [], "success"),
-            ("read failed", [read(is_error=True)], "success"),
-            ("read result too large", [read(content=too_large)], "success"),
-            ("stopped before the last page", [read(content=page(pagination=MORE))], "success"),
-            ("read the wrong channel", [read(channel_id="C000")], "success"),
-            ("read from a later time", [read(oldest="1943217600")], "success"),
-            ("also read the user's DMs", [read(), read(channel_id=USER)], "success"),
-            ("read up to an end time", [read(latest="1943197600")], "success"),
-            ("read without reactions", [read(response_format="concise")], "success"),
-            ("followed a cursor no page gave", [read(content=page(pagination=MORE)), read(cursor="b3RoZXI=")], "success"),
-        ]:
-            with self.subTest(name):
-                with self.assertRaises(ValueError):
-                    read_asks(transcript([model_ask()], reads, subtype), OLDEST, CHANNEL, USER, SLACK_URL, ORGS)
+                    self.assertEqual(asks_of(channel_posts, [], not_asks), ([], []))
 
 
 def work_item(kind="recheck", head="head3", number=12):
@@ -549,50 +516,6 @@ def work_item(kind="recheck", head="head3", number=12):
             "source": "reviewed_by_user", "slack": None, "reason": "r"}
 
 
-
-class PollGuardTest(unittest.TestCase):
-    """whooper.py poll-guard as the poll run's hooks call it: each read is recorded after it
-    returns, and the run's answer is blocked with exit code 2 until the reads reach the last page."""
-
-    def setUp(self):
-        self.reads = Path(tempfile.mkdtemp()) / "reads.jsonl"
-
-    def hook(self, payload):
-        stdin = payload if isinstance(payload, str) else json.dumps(payload)
-        return subprocess.run(["python3", "-I", str(ROOT / "lib" / "whooper.py"), "poll-guard", str(self.reads), OLDEST, CHANNEL],
-                              input=stdin, capture_output=True, text=True).returncode
-
-    def after_read(self, call_input, content):
-        return self.hook({"hook_event_name": "PostToolUse", "tool_name": READ, "tool_input": call_input, "tool_response": content})
-
-    def answer(self):
-        return self.hook({"hook_event_name": "PreToolUse", "tool_name": "StructuredOutput", "tool_input": {"asks": [], "not_asks": []}})
-
-    def test_answer_waits_for_the_last_page(self):
-        first, _, _ = read()
-        # The first page points at a second page with a cursor; the answer is blocked until it is read.
-        self.assertEqual(self.after_read(first, page(pagination=MORE)), 0)
-        self.assertEqual(self.answer(), 2)
-        self.assertEqual(self.after_read({**first, "cursor": "bmV4dF90czox"}, page()), 0)
-        self.assertEqual(self.answer(), 0)
-
-    def test_answer_is_blocked(self):
-        call, content, _ = read()
-        cases = [
-            ("no read at all", []),
-            ("a read of another channel", [({**call, "channel_id": "C0000000009"}, content)]),
-            ("a read with a cursor no page gave", [({**call, "cursor": "made-up"}, content)]),
-        ]
-        for name, reads in cases:
-            with self.subTest(name):
-                self.setUp()
-                for call_input, result in reads:
-                    self.after_read(call_input, result)
-                self.assertEqual(self.answer(), 2)
-
-    def test_input_it_cannot_parse_blocks(self):
-        # Claude Code would let the answer through if the hook failed with exit code 1.
-        self.assertEqual(self.hook("not json"), 2)
 
 class SelectWorkTest(unittest.TestCase):
     # 10:00 on 2031-08-01 in a UTC-7 timezone.
@@ -829,13 +752,97 @@ def finding(**overrides):
     return out
 
 
+class ClaudeShellCallsTest(unittest.TestCase):
+    def test_lists_only_the_main_sessions_bash_calls(self):
+        self.assertEqual(sorted(claude_shell_calls(EVENTS)), sorted([
+            "toolu_head", "toolu_base", "toolu_cp", "toolu_base_build", "toolu_base_long", "toolu_head_cwd",
+            "toolu_base_cwd"]))
+
+    def test_reads_each_calls_command_output_and_outcome(self):
+        calls = claude_shell_calls(EVENTS)
+        self.assertEqual(calls["toolu_head"], {"command": PROBE.format(f"{RUN}/head"), "output": HEAD_FAILS,
+                                               "ok": False, "cut": False, "finished": True})
+        # Text blocks join into one output.
+        self.assertEqual(calls["toolu_base"]["output"], f"ok  \t{API}\t0.4s")
+        self.assertTrue(calls["toolu_base"]["ok"])
+        self.assertTrue(calls["toolu_base_long"]["cut"])
+
+
+def exec_step(call_id, output, command="", function="exec", workdir=None):
+    """One agent step of a Devin ATIF export: one tool call and its result."""
+    arguments = {"command": command, **({"workdir": workdir} if workdir else {})}
+    return {"source": "agent", "tool_calls": [{"tool_call_id": call_id, "function_name": function, "arguments": arguments}],
+            "observation": {"results": [{"source_call_id": call_id, "content": output}]}}
+
+
+def exec_output(output, exit_code):
+    """What exec reports for a command that finished."""
+    return f"Output from command in shell 5fae99:\n{output}\n\n\nExit code: {exit_code}"
+
+
+HEAD_FAILS_EXEC = exec_output(f"--- FAIL: TestCreateOrder\n    got status 500, want 422\nFAIL\t{API}\t0.5s", 1)
+# The same calls as EVENTS, as a Devin run's export records them. A subagent's calls are never in it.
+EXPORT = {"schema_version": "ATIF-v1.7", "steps": [
+    {"source": "user", "message": "the review prompt"},
+    exec_step("toolu_head", HEAD_FAILS_EXEC, PROBE.format(f"{RUN}/head")),
+    exec_step("toolu_base", exec_output(f"ok  \t{API}\t0.4s", 0), PROBE.format(f"{RUN}/base")),
+    exec_step("toolu_read", "got status 500, want 422", function="read"),
+    exec_step("toolu_cp", exec_output("", 0),
+              f"cp {RUN}/head/services/orders/internal/api/orders_test.go {RUN}/base/services/orders/internal/api/"),
+    exec_step("toolu_base_build", exec_output(
+        f"# {API} [{API}.test]\ninternal/api/orders_test.go:40:9: undefined: newOrderRequest\nFAIL\t{API} [build failed]", 1),
+        PROBE.format(f"{RUN}/base")),
+    # exec keeps the start and end of a long output and names the file with the rest.
+    exec_step("toolu_base_long", "Output from command in shell 5fae99. The full terminal output is being written live to "
+              "/tmp/devin-overflows-502/shell-5fae99/content.txt; read or grep it for anything omitted below. Preview:\n"
+              "<file-view>\n    1|=== RUN   TestCreateOrder\n</file-view>\n\nExit code: 0", PROBE.format(f"{RUN}/base")),
+    exec_step("toolu_head_cwd", HEAD_FAILS_EXEC, "go test -run TestCreateOrder ./internal/api"),
+    exec_step("toolu_base_cwd", exec_output(f"ok  \t{API}\t0.4s", 0), "go test -run TestCreateOrder ./internal/api"),
+    # A probe silent for 10 seconds, which exec moved to the background.
+    exec_step("toolu_base_bg", "No output produced after 10.0 seconds. Command running in background with ID: 21d1ae. "
+              "Run get_output with timeout if you need to wait.", PROBE.format(f"{RUN}/base")),
+    exec_step("toolu_task", "Subagent agent_id=b147292a completed successfully: the test fails at the head.",
+              function="run_subagent"),
+]}
+# Each agent's shell calls for the same review, from its own transcript reader.
+CALLS = {"claude": claude_shell_calls(EVENTS), "devin": devin_shell_calls(EXPORT)}
+
+
+class DevinShellCallsTest(unittest.TestCase):
+    def test_lists_only_exec_calls(self):
+        self.assertEqual(sorted(devin_shell_calls(EXPORT)), sorted([
+            "toolu_head", "toolu_base", "toolu_cp", "toolu_base_build", "toolu_base_long", "toolu_head_cwd",
+            "toolu_base_cwd", "toolu_base_bg"]))
+
+    def test_reads_each_calls_outcome_from_execs_report(self):
+        calls = devin_shell_calls(EXPORT)
+        self.assertEqual(calls["toolu_head"], {"command": PROBE.format(f"{RUN}/head"), "output": HEAD_FAILS_EXEC,
+                                               "ok": False, "cut": False, "finished": True})
+        self.assertTrue(calls["toolu_base"]["ok"])
+        self.assertEqual((calls["toolu_base_long"]["ok"], calls["toolu_base_long"]["cut"]), (True, True))
+        self.assertEqual((calls["toolu_base_bg"]["ok"], calls["toolu_base_bg"]["finished"]), (False, False))
+
+    def test_a_result_too_large_for_the_transcript_finished_but_is_cut(self):
+        output = ("Output from command in shell 11f977:\nPROBE status=422 body=...\n... (1422 lines shown).\n"
+                  "<truncation_notice>\nFull output written to: /tmp/devin-overflows-502/4c5282b9/content.txt\n"
+                  "</truncation_notice>")
+        call = devin_shell_calls({"steps": [exec_step("call_1", output, PROBE.format(f"{RUN}/head"))]})["call_1"]
+        self.assertEqual((call["finished"], call["cut"], call["ok"]), (True, True, False))
+
+    def test_a_workdir_reads_as_a_cd(self):
+        export = {"steps": [exec_step("call_1", exec_output("ok", 0), "go test ./internal/api", workdir=f"{RUN}/head")]}
+        self.assertEqual(devin_shell_calls(export)["call_1"]["command"], f"cd {RUN}/head && go test ./internal/api")
+
+
 class ClassifyTest(unittest.TestCase):
-    def verdict(self, f, fetched=True):
-        [out] = classify({"status": "reviewed", "skip_reason": "", "findings": [f]}, EVENTS, fetched, RUN)
-        return out["verdict"], out["checks_failed"]
+    def verdicts(self, f, fetched=True):
+        """The finding's verdict and failed checks under each agent's reader."""
+        result = {"status": "reviewed", "skip_reason": "", "findings": [f]}
+        return {agent: (out["verdict"], out["checks_failed"])
+                for agent, calls in CALLS.items() for [out] in [classify(result, calls, fetched, RUN)]}
 
     def test_all_checks_pass_is_auto_post(self):
-        self.assertEqual(self.verdict(finding()), ("auto_post", []))
+        self.assertEqual(self.verdicts(finding()), {agent: ("auto_post", []) for agent in CALLS})
 
     def test_any_failed_check_sends_the_finding_to_the_digest(self):
         cases = [
@@ -845,22 +852,23 @@ class ClassifyTest(unittest.TestCase):
             ("line outside the diff", finding(in_diff=False), True),
             ("head_run names no tool call", finding(head_run="toolu_missing"), True),
             ("head_run names a Read call", finding(head_run="toolu_read"), True),
-            ("head_run names a subagent's Bash call", finding(head_run="toolu_sub_head"), True),
+            ("head_run names a subagent's call", finding(head_run="toolu_sub_head"), True),
             ("base_run names no tool call", finding(base_run=""), True),
             ("base_run names a Read call", finding(base_run="toolu_read"), True),
             ("base_run names another command", finding(base_run="toolu_cp"), True),
             ("the probe names no worktree", finding(head_run="toolu_head_cwd", base_run="toolu_base_cwd"), True),
             ("base_run failed", finding(base_run="toolu_base_build"), True),
             ("base_run's output was cut", finding(base_run="toolu_base_long"), True),
+            ("base_run went to the background", finding(base_run="toolu_base_bg"), True),
             ("observed is not in the head output", finding(observed="got status 400"), True),
             ("observed is also in the base output", finding(observed="services/orders/internal/api"), True),
             ("the GitHub fetch failed", finding(), False),
         ]
         for name, f, fetched in cases:
-            with self.subTest(name):
-                verdict, failed = self.verdict(f, fetched)
-                self.assertEqual(verdict, "digest")
-                self.assertEqual(len(failed), 1, failed)
+            for agent, (verdict, failed) in self.verdicts(f, fetched).items():
+                with self.subTest(name, agent=agent):
+                    self.assertEqual(verdict, "digest")
+                    self.assertEqual(len(failed), 1, failed)
 
     def test_every_nit_is_a_shadow_nit(self):
         for name, f in [
@@ -868,12 +876,50 @@ class ClassifyTest(unittest.TestCase):
             ("fails a check", finding(kind="nit", nit_kind="wording", in_diff=False)),
         ]:
             with self.subTest(name):
-                self.assertEqual(self.verdict(f)[0], "shadow_nit")
+                self.assertEqual({v for v, _ in self.verdicts(f).values()}, {"shadow_nit"})
 
     def test_skipped_run_has_no_verdicts(self):
         # The schema allows findings on a skipped run, and a skipped PR gets no comments.
         result = {"status": "skipped", "skip_reason": "not small", "findings": [finding()]}
-        self.assertEqual(classify(result, EVENTS, True, RUN), [])
+        for agent, calls in CALLS.items():
+            with self.subTest(agent):
+                self.assertEqual(classify(result, calls, True, RUN), [])
+
+
+class CheckSchemaTest(unittest.TestCase):
+    SCHEMA = json.loads((ROOT / "schemas" / "findings.json").read_text())
+
+    def result(self, **overrides):
+        out = {"status": "reviewed", "skip_reason": "", "findings": [finding()],
+               "approval": {"verdict": "look_first", "reason": "Ran the api tests; no database path."}}
+        out.update(overrides)
+        return out
+
+    def test_a_result_that_fits_passes(self):
+        check_schema(self.result(), self.SCHEMA)
+
+    def test_each_break_is_caught(self):
+        no_approval = self.result()
+        del no_approval["approval"]
+        for name, value in [
+            ("a required key is missing", no_approval),
+            ("a value is outside its enum", self.result(status="done")),
+            ("an unexpected key", self.result(extra="x")),
+            ("a string where an integer belongs", self.result(findings=[finding(line="88")])),
+            ("true where an integer belongs", self.result(findings=[finding(line=True)])),
+            ("an integer below its minimum", self.result(findings=[finding(line=0)])),
+            ("an integer where a boolean belongs", self.result(findings=[finding(in_diff=1)])),
+        ]:
+            with self.subTest(name), self.assertRaises(ValueError):
+                check_schema(value, self.SCHEMA)
+
+    def test_the_check_command_fails_on_a_file_that_does_not_fit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "findings.json"
+            for text in [json.dumps(self.result(status="done")), "not JSON"]:
+                path.write_text(text)
+                with self.subTest(text), self.assertRaises(SystemExit):
+                    main("check", str(ROOT / "schemas" / "findings.json"), str(path))
 
 
 def review_comment(path="services/orders/internal/api/orders.go", line=88, start_line=None, side="RIGHT",
@@ -1057,22 +1103,45 @@ class ConfigTest(unittest.TestCase):
         finally:
             os.environ["WHOOPER_CONFIG"] = test_config
         self.assertIn("WHOOPER_ORGS=example-org\n", env)
+        self.assertIn("WHOOPER_REVIEW_AGENT=devin\n", env)
         self.assertIn(f"WHOOPER_REPO_SETUP={ROOT / 'examples' / 'setup.sh'}\n", repo)
+
+    def test_each_agents_settings_are_exported_for_its_launcher(self):
+        env = self.command("env")
+        for line in ["export WHOOPER_CLAUDE_REVIEW_MODEL=review-model\n", "export WHOOPER_CLAUDE_BUDGET_USD=15\n",
+                     "export WHOOPER_DEVIN_REVIEW_MODEL=devin-review-model\n"]:
+            self.assertIn(line, env)
+
+    def test_a_job_on_an_agent_without_a_launcher_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.toml"
+            config.write_text(CONFIG.replace('[jobs]\nreview = "claude"', '[jobs]\nreview = "nobody"'))
+            os.environ["WHOOPER_CONFIG"], test_config = str(config), os.environ["WHOOPER_CONFIG"]
+            try:
+                with self.assertRaises(SystemExit):
+                    self.command("env")
+            finally:
+                os.environ["WHOOPER_CONFIG"] = test_config
 
     def test_a_repo_missing_from_the_config_fails(self):
         with self.assertRaises(SystemExit):
             self.command("repo", "other-org/example-repo")
 
     def test_prompts_are_filled_from_the_config(self):
-        review = self.command("prompt", "review", "example-org/example-repo")
+        review = self.command("prompt", "review", "example-org/example-repo", "claude")
         for text in ["sam-example (Sam)", "`review-skill`, `language-skill`", "the CI review bot (ci-review-bot)",
                      "Run `make test` from the service's directory.", "as Sam would post it"]:
             self.assertIn(text, review)
-        self.assertIn("Notes for this repository:\n\nNone.", self.command("prompt", "review", "sample-org/plain-repo"))
-        self.assertIn("PR digests (pr_digest_bot), Slackbot (Slackbot)", self.command("prompt", "poll"))
-        for name in ["review", "poll"]:
-            with self.subTest(name):
-                self.assertNotIn("{{", self.command("prompt", name, "example-org/example-repo"))
+        self.assertIn("Notes for this repository:\n\nNone.",
+                      self.command("prompt", "review", "sample-org/plain-repo", "claude"))
+        self.assertNotIn("{{", self.command("prompt", "poll"))
+
+    def test_the_review_prompt_names_each_agents_tools(self):
+        for agent, wording in REVIEW_WORDING.items():
+            with self.subTest(agent):
+                review = self.command("prompt", "review", "example-org/example-repo", agent)
+                self.assertNotIn("{{", review)
+                self.assertIn(f'"{wording["shell"]} tool_use_id <id> ran: <command>"', review)
 
     def test_a_placeholder_without_a_value_fails(self):
         with self.assertRaises(SystemExit):

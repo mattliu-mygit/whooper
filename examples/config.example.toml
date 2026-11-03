@@ -20,18 +20,26 @@ user_id = "U0000000000"            # your member ID: profile, "...", Copy member
 ask_channel = "C0000000001"        # where teammates ask you for reviews
 summary_channel = "C0000000002"    # a private channel for Whooper's summaries
 summary_channel_name = "#whooper"
-# Senders whose posts are never review asks. Senders with a slack-bots.com address are skipped too.
-bots = [
-  { name = "pr_digest_bot", label = "daily PR digests" },
-  { name = "Slackbot", label = "Slackbot" },
-]
+slackdump_workspace = "example"    # the poll's slackdump login: slackdump workspace new <name>
 
-[models]
-poll = "claude-haiku-5-5"
-review = "claude-opus-5-5"
+# The agent each job runs on. agents/ has a folder per agent with a launcher per job it can run.
+[jobs]
+review = "devin"
+poll = "devin"
+summary = "devin"
+
+# Each agent's settings. Model names are the agent's own: Devin's names add the effort level.
+[agents.claude]
+review_model = "claude-opus-5-5"
+poll_model = "claude-haiku-5-5"    # also sends the summary
+budget_usd = 15                    # the most one review may spend
+
+[agents.devin]
+review_model = "claude-opus-5-5-high"
+poll_model = "claude-sonnet-5-5-low"
 
 [review]
-budget_usd = 15
+timeout_minutes = 45               # whooper-review stops a review that runs longer, on any agent
 # Skills each review run loads, from ~/.claude/skills. skills/ in this repo has public versions.
 skills = ["multi-angle-review", "code-shape-and-runtime-review"]
 

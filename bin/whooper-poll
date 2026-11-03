@@ -2,11 +2,14 @@
 # Lists the user's review work in <state>/poll/<UTC start time>.json and prints that path, where
 # <state> is $XDG_STATE_HOME/whooper (default ~/.local/state/whooper).
 #
-# A Haiku run reads the ask channel from <state>/poll/cursor (the last 24 hours without one) and
-# reports the posts that ask the user for a review. lib/whooper.py checks those against the run's
-# transcript, this script fetches the PRs they link, and lib/whooper.py combines them with
-# <state>/poll/github.json from whooper-fetch. The cursor moves to this poll's start time only after
-# the output is written. Read-only toward GitHub and Slack.
+# slackdump reads the ask channel through the user's Slack web login, from <state>/poll/cursor (the
+# last 24 hours without one), paging to the end itself, and lib/whooper.py turns its dump into the
+# channel's posts. The agent the config's [jobs] poll names judges which posts ask the user for a
+# review, through its launcher agents/<agent>/poll, which gives it the posts in the prompt and no
+# way to act. lib/whooper.py checks its answer against the posts, this script fetches the PRs they
+# link, and lib/whooper.py combines them with <state>/poll/github.json from whooper-fetch. The
+# cursor moves to this poll's start time only after the output is written. Read-only toward GitHub
+# and Slack.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -20,42 +23,31 @@ if [[ -f "$poll/cursor" ]]; then
 else
   oldest="$((started - 86400))"
 fi
-transcript="$poll/$stamp.transcript.jsonl"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-slack="mcp__claude_ai_Slack__slack"
-# The claude.ai Slack connector loads only with user settings, so the run turns off what else those
-# settings and the CLI add: every MCP server but the Slack connector (matched by URL), CLAUDE.md
-# files, auto-memory, skills, and every built-in tool but ToolSearch. dontAsk denies any tool not
-# allowed here, and the Slack writes are also denied by name, which holds even if a user setting
-# someday allows them. The user's hooks stay on, because the run needs its own: a run can return
-# its answer without reading the channel, so poll-guard records each read and blocks the answer
-# until the reads reach the channel's last page.
-guard="python3 -I $(printf %q "$root/lib/whooper.py") poll-guard $(printf %q "$work/reads.jsonl") $oldest $WHOOPER_ASK_CHANNEL"
-settings="$(jq -cn --arg guard "$guard" --arg read "${slack}_read_channel" '{
-  allowedMcpServers: [{serverUrl: "https://mcp.slack.com/mcp"}],
-  hooks: {
-    PostToolUse: [{matcher: $read, hooks: [{type: "command", command: $guard}]}],
-    PreToolUse: [{matcher: "StructuredOutput", hooks: [{type: "command", command: $guard}]}]
-  }
-}')"
-CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude -p "$(python3 -I "$root/lib/whooper.py" prompt poll)
+die() {
+  echo "whooper-poll: $*" >&2
+  exit 1
+}
 
-channel_id: $WHOOPER_ASK_CHANNEL
-user_id: $WHOOPER_SLACK_USER
-oldest: $oldest" \
-  --model "$WHOOPER_POLL_MODEL" \
-  --setting-sources user \
-  --settings "$settings" \
-  --tools ToolSearch --disable-slash-commands --no-session-persistence \
-  --permission-mode dontAsk \
-  --allowedTools "ToolSearch ${slack}_read_channel" \
-  --disallowedTools "${slack}_add_reaction ${slack}_create_canvas ${slack}_update_canvas ${slack}_schedule_message ${slack}_send_message_draft" \
-  --json-schema "$(<"$root/schemas/slack-asks.json")" \
-  --output-format stream-json --verbose > "$transcript"
+# slackdump takes its start time in UTC.
+from="$(python3 -I -c 'import datetime, sys
+print(datetime.datetime.fromtimestamp(int(sys.argv[1]), datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"))' "$oldest")"
+slackdump dump -workspace "$WHOOPER_SLACKDUMP_WORKSPACE" -files=false -time-from "$from" -o "$work/slack" \
+  "$WHOOPER_ASK_CHANNEL" > "$work/slackdump.log" 2>&1 || die "slackdump failed: $(tail -n 3 "$work/slackdump.log")"
+python3 -I "$root/lib/whooper.py" posts "$work/slack/$WHOOPER_ASK_CHANNEL.json" "$oldest" > "$work/posts.json"
 
-python3 -I "$root/lib/whooper.py" asks "$transcript" "$oldest" > "$work/asks.json"
+# The prompt, the answer, and the run's transcript stay next to the poll's output as its record.
+{
+  python3 -I "$root/lib/whooper.py" prompt poll
+  printf '\nuser_id: %s\n\nposts:\n\n' "$WHOOPER_SLACK_USER"
+  cat "$work/posts.json"
+} > "$poll/$stamp.prompt.md"
+"$root/agents/$WHOOPER_POLL_AGENT/poll" "$poll/$stamp.prompt.md" "$poll/$stamp.answer.json" "$poll/$stamp" ||
+  die "the $WHOOPER_POLL_AGENT poll run failed; see $poll/$stamp.*"
+python3 -I "$root/lib/whooper.py" check "$root/schemas/slack-asks.json" "$poll/$stamp.answer.json"
+python3 -I "$root/lib/whooper.py" asks "$work/posts.json" "$poll/$stamp.answer.json" "$oldest" > "$work/asks.json"
 # lib/whooper.py passed only plain URLs of PRs in the configured orgs that the asking post links.
 jq -r '[.[].pr_urls[]] | unique[]' "$work/asks.json" | "$root/bin/whooper-prs" > "$work/slack-prs.json"
 

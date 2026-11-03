@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Runs one review on Claude Code: agents/claude/review <prompt file>.
+#
+# bin/whooper-review starts this in the PR's head worktree with no GitHub login and the run's
+# variables (README.md, "How a review run works"). The run loads what a normal session there loads:
+# user and project settings, hooks, CLAUDE.md files, skills, and MCP servers. The Slack writes are
+# denied by name, so the run can post nothing. hooks/tool-use-id.sh shows it the ID of each Bash
+# call, which a finding cites.
+#
+# Writes findings.json (the run's structured output, checked against schemas/findings.json),
+# transcript.jsonl, and stderr.log to $WHOOPER_RUN, prints the cost line, and exits with the CLI's
+# exit code.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+run="$WHOOPER_RUN"
+slack="mcp__claude_ai_Slack__slack"
+settings="$(jq -cn --arg hook "$root/hooks/tool-use-id.sh" \
+  '[{matcher: "Bash", hooks: [{type: "command", command: $hook}]}] as $bash | {hooks: {PostToolUse: $bash, PostToolUseFailure: $bash}}')"
+status=0
+CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude -p "$(<"$1")" \
+  --model "$WHOOPER_CLAUDE_REVIEW_MODEL" \
+  --settings "$settings" \
+  --permission-mode auto --permission-prompts none --max-budget-usd "$WHOOPER_CLAUDE_BUDGET_USD" \
+  --add-dir "$run" \
+  --disallowedTools "${slack}_add_reaction ${slack}_create_canvas ${slack}_update_canvas ${slack}_schedule_message ${slack}_send_message_draft" \
+  --json-schema "$(<"$root/schemas/findings.json")" \
+  --no-session-persistence --output-format stream-json --verbose --include-hook-events \
+  > "$run/transcript.jsonl" 2> "$run/stderr.log" || status=$?
+
+jq -e -c 'select(.type == "result" and .subtype == "success" and .structured_output != null) | .structured_output' \
+  "$run/transcript.jsonl" > "$run/findings.json" || rm -f "$run/findings.json"
+jq -r 'select(.type == "result") | "whooper-review: $\(.total_cost_usd) in \(.duration_ms / 60000 | floor) minutes, \(.num_turns) turns"' \
+  "$run/transcript.jsonl" >&2
+exit "$status"

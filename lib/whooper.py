@@ -5,9 +5,10 @@ Every identifiable value, such as the user, the GitHub orgs, the Slack channels,
 from the user's config file (config_path), never from this code. The bin/ scripts call it as:
   whooper.py env                                                                   -> shell variables
   whooper.py repo <owner/repo>                                                     -> the repo's shell variables
-  whooper.py prompt poll|review [<owner/repo>]                                     -> a prompt, filled in
-  whooper.py asks <transcript.jsonl> <oldest>                                      -> asks JSON
-  whooper.py poll-guard <reads.jsonl> <oldest> < hook input                        -> the poll run's read hook
+  whooper.py prompt poll | review <owner/repo> <agent>                             -> a prompt, filled in
+  whooper.py check <schema.json> <value.json>                                      -> fails unless value fits schema
+  whooper.py posts <slackdump channel.json> <oldest>                               -> the channel's posts JSON
+  whooper.py asks <posts.json> <answer.json> <oldest>                              -> asks JSON
   whooper.py items <github.json> <asks.json> <slack-prs.json>                      -> {"items": [...]}
   whooper.py select <data dir>                                                     -> one work item per line
   whooper.py conversation <conversation.graphql result> [<as-of time>]             -> a run's github.json
@@ -27,10 +28,7 @@ import shlex
 import sys
 import tomllib
 
-READ_CHANNEL = "mcp__claude_ai_Slack__slack_read_channel"
-# The only slack_read_channel arguments a poll may use, with response_format only at its default,
-# detailed. Another argument such as latest would hide posts, and the concise format drops reactions.
-READ_ARGS = {"channel_id", "oldest", "limit", "cursor", "response_format"}
+ROOT = Path(__file__).resolve().parent.parent
 MAX_FAILURES = 3
 MAX_RECHECKS_PER_DAY = 3
 # Auto-post rule v1 (design question 3): a finding posts without the user only when the run answers
@@ -42,6 +40,25 @@ MARKER = "Whooper AI"
 # The lookbehind keeps email addresses and paths from counting as mentions.
 MENTION = re.compile(r"(?<![\w.@/])@[A-Za-z0-9]")
 LINK = re.compile(r"(?:https?://|www\.)[^\s)>\]]*")
+# How prompts/review.md names each agent's tools, limits, and way of returning the findings.
+REVIEW_WORDING = {
+    "claude": {
+        "shell": "Bash",
+        "skill_tool": "the Skill tool",
+        "output_limit": "the transcript keeps only a 2 KB preview of an output over 30,000 characters",
+        "probe_rule": "",
+        "answer": "Return the findings as your structured output, in the JSON format this run requires.",
+    },
+    "devin": {
+        "shell": "exec",
+        "skill_tool": "the skill tool",
+        "output_limit": "exec shows only the start and end of a long output and saves the rest to a file",
+        "probe_rule": (" Pass `timeout: 280000`, exec's longest, on every probe's exec call, so the probe finishes"
+                       " inside that call: a call that exec moves to the background does not count."),
+        "answer": (f"Then write the findings to `findings.json` in the run directory, as JSON that fits the JSON Schema"
+                   f" in `{ROOT / 'schemas' / 'findings.json'}`. A file that does not fit fails the run."),
+    },
+}
 
 
 def config_path():
@@ -83,104 +100,95 @@ def fill(template, values):
     return re.sub(r"\{\{(\w+)\}\}", value, template)
 
 
+def check_schema(value, schema, where="the value"):
+    """Raises ValueError at the first place value breaks schema. Covers the JSON Schema keywords
+    Whooper's schemas use: type, enum, minimum, properties, required, additionalProperties, and items."""
+    kind = schema.get("type")
+    types = {"object": dict, "array": list, "string": str, "integer": int, "boolean": bool}
+    # Python's True is also an int, but JSON's true is not an integer.
+    if kind and (not isinstance(value, types[kind]) or (kind == "integer" and isinstance(value, bool))):
+        raise ValueError(f"{where} is not of type {kind}")
+    if "enum" in schema and value not in schema["enum"]:
+        raise ValueError(f"{where} is {value!r}, not one of {schema['enum']}")
+    if "minimum" in schema and isinstance(value, int) and value < schema["minimum"]:
+        raise ValueError(f"{where} is below {schema['minimum']}")
+    if isinstance(value, dict):
+        properties = schema.get("properties", {})
+        if missing := [key for key in schema.get("required", []) if key not in value]:
+            raise ValueError(f"{where} lacks {', '.join(missing)}")
+        if schema.get("additionalProperties") is False and (extra := sorted(value.keys() - properties.keys())):
+            raise ValueError(f"{where} has unexpected {', '.join(extra)}")
+        for key, sub in properties.items():
+            if key in value:
+                check_schema(value[key], sub, f"{where}.{key}")
+    if isinstance(value, list) and "items" in schema:
+        for i, item in enumerate(value):
+            check_schema(item, schema["items"], f"{where}[{i}]")
+
+
 def bot_list(bots, key):
     """Names a config bot list for a prompt: "the CI review bot (ci-bot), the assistant (helper-bot)"."""
     return ", ".join(f"{b['label']} ({b[key]})" for b in bots) or "none"
 
 
-def channel_pages(reads, oldest, channel):
-    """Returns the pages of a poll run's slack_read_channel calls, in order.
+def slack_posts(dump, oldest):
+    """Returns the top-level posts at or after oldest in a channel that slackdump dumped.
 
-    reads are (arguments, result content) pairs, where the content is a list of text blocks.
-    Raises ValueError unless the run read only the channel from oldest with no other filter,
-    followed only cursors that its pages gave, and reached the page that says no more messages
-    remain. read_asks applies this after the run, and poll-guard during it.
+    dump is slackdump's JSON for one channel. Each post keeps its ts, its sender's user ID, whether
+    a bot wrote it (a bot_id, a bot message, or Slackbot), its text in Slack's markup, and the names
+    of its reactions. Thread replies, which slackdump nests under their post, are not posts.
     """
-    pages, cursors = [], set()
-    for args, content in reads:
-        if (args.keys() - READ_ARGS
-                or (args.get("channel_id"), args.get("oldest")) != (channel, oldest)
-                or args.get("response_format", "detailed") != "detailed"
-                or ("cursor" in args and args["cursor"] not in cursors)):
-            raise ValueError(f"the poll run called slack_read_channel with {args}")
-        # A page is JSON text with messages and pagination_info. A result too large for the CLI
-        # comes back as a plain string instead.
-        for text in (c["text"] for c in content if isinstance(content, list) and c["type"] == "text"):
-            try:
-                page = json.loads(text)
-            except ValueError:
-                continue
-            if isinstance(page, dict) and {"messages", "pagination_info"} <= page.keys():
-                pages.append(page)
-                cursors.update(re.findall(r"cursor: `([^`]+)`", page["pagination_info"]))
-    if not any("no more messages" in p["pagination_info"] for p in pages):
-        raise ValueError(f"the poll run did not read {channel} from {oldest} through its last page")
-    return pages
+    posts = []
+    for m in dump["messages"]:
+        ts = m.get("ts", "")
+        if not re.fullmatch(r"\d{10}\.\d{6}", ts) or int(ts.split(".")[0]) < int(oldest):
+            continue
+        posts.append({
+            "ts": ts,
+            "user": m.get("user", ""),
+            "bot": bool(m.get("bot_id")) or m.get("subtype") == "bot_message" or m.get("user") == "USLACKBOT",
+            # A post that shares another message, such as a bump of a review request, carries the
+            # shared message's text, and its PR link, in an attachment.
+            "text": "\n".join([m.get("text", "")] + [a["text"] for a in m.get("attachments") or [] if a.get("text")]),
+            "reactions": [r["name"] for r in m.get("reactions") or []],
+        })
+    return posts
 
 
-def read_asks(events, oldest, channel, user, slack_url, orgs):
+def read_asks(posts, answer, oldest, channel, user, slack_url, orgs):
     """Returns the review asks a poll run reported, and a note for each ask or URL it dropped.
 
-    events is the run's stream-json transcript. Raises ValueError unless the run succeeded, read
-    only the channel from oldest with no other filter, followed only cursors that its pages gave,
-    and reached the page that says no more messages remain, so a failed or partial read never
-    advances the cursor. Also raises when the run left out a post, not written by the user or a
-    bot, that mentions the user next to a link to a PR in orgs: each such post must be in asks or
-    not_asks.
+    posts are the ask channel's posts since oldest (slack_posts), which slackdump read to the end,
+    and answer the run's {asks, not_asks}. Raises ValueError when the run left out a post, not
+    written by the user or a bot, that mentions the user next to a link to a PR in orgs: each such
+    post must be in asks or not_asks.
 
-    An ask must name a post on those pages, at or after oldest, that no bot wrote. It keeps only
-    the URLs of PRs in orgs that the post links. Whether the post mentions the user and has :eyes: is read
-    from the post.
+    An ask must name one of those posts that no bot wrote. It keeps only the URLs of PRs in orgs that
+    the post links. Whether the post mentions the user and has :eyes: is read from the post.
     """
-    results = [e for e in events if e["type"] == "result"]
-    if not results or results[-1]["subtype"] != "success" or results[-1]["is_error"]:
-        raise ValueError("the poll run did not succeed")
-
-    # Each read's arguments, and its content once a result that is not an error arrives.
-    reads = {}
-    for e in events:
-        if e["type"] not in ("assistant", "user"):
-            continue
-        for block in e["message"]["content"]:
-            if block.get("type") == "tool_use" and block["name"] == READ_CHANNEL:
-                reads[block["id"]] = (block["input"], [])
-            elif block.get("tool_use_id") in reads and not block.get("is_error"):
-                reads[block["tool_use_id"]] = (reads[block["tool_use_id"]][0], block["content"])
-    pages = channel_pages(reads.values(), oldest, channel)
-
-    # Each post starts with a "=== Message from <sender> ..." line, then its "Message TS:" line.
-    posts = {}
-    for p in pages:
-        for post in p["messages"].split("=== Message from ")[1:]:
-            if m := re.search(r"^Message TS: (\d{10}\.\d{6})$", post, re.M):
-                posts[m[1]] = post
+    by_ts = {p["ts"]: p for p in posts}
     mention = re.compile(rf"<@{re.escape(user)}[|>]")
     link = pr_link(orgs)
-
-    def by_bot(post):
-        return "@slack-bots.com>" in post.split("\n", 1)[0]
-
-    output = results[-1]["structured_output"]
-    answered = {a["ts"] for a in output["asks"] + output["not_asks"]}
+    answered = {a["ts"] for a in answer["asks"] + answer["not_asks"]}
     missed = [
-        ts for ts, post in posts.items()
-        if ts not in answered and mention.search(post) and link.search(post)
-        and f"({user})" not in post.split("\n", 1)[0] and not by_bot(post)
+        p["ts"] for p in posts
+        if p["ts"] not in answered and mention.search(p["text"]) and link.search(p["text"])
+        and p["user"] != user and not p["bot"]
     ]
     if missed:
         raise ValueError(f"the poll run left out posts that mention {user} next to a PR link: {', '.join(missed)}")
 
     asks, problems = [], []
-    for ask in output["asks"]:
+    for ask in answer["asks"]:
         ts = ask["ts"]
-        post = posts.get(ts)
-        if post is None or int(ts.split(".")[0]) < int(oldest):
-            problems.append(f"dropped ask {ts!r}: not a post the run read since {oldest}")
+        post = by_ts.get(ts)
+        if post is None:
+            problems.append(f"dropped ask {ts!r}: not a post in the channel since {oldest}")
             continue
-        if by_bot(post):
+        if post["bot"]:
             problems.append(f"dropped ask {ts}: a bot wrote it")
             continue
-        linked = {"https://" + m[1] for m in link.finditer(post)}
+        linked = {"https://" + m[1] for m in link.finditer(post["text"])}
         urls = [url for url in ask["pr_urls"] if url in linked]
         problems += [f"dropped PR URL {url!r} from ask {ts}" for url in ask["pr_urls"] if url not in linked]
         if not urls:
@@ -189,9 +197,9 @@ def read_asks(events, oldest, channel, user, slack_url, orgs):
         asks.append({
             "ts": ts,
             "permalink": f"{slack_url}/archives/{channel}/p{ts.replace('.', '')}",
-            "tagged_user": bool(mention.search(post)),
+            "tagged_user": bool(mention.search(post["text"])),
             "pr_urls": urls,
-            "has_eyes": bool(re.search(r"^Reactions:.*\beyes \(", post, re.M)),
+            "has_eyes": "eyes" in post["reactions"],
             "reason": ask["reason"],
         })
     return asks, problems
@@ -439,25 +447,14 @@ def author_login(actor):
     return actor["login"] if actor else "ghost"
 
 
-def classify(result, events, fetched, run_dir):
-    """Returns each finding of a review run with its verdict and the checks it failed.
+def claude_shell_calls(events):
+    """Returns the Bash calls of a Claude Code run's main session, keyed by tool_use_id.
 
-    result is the run's findings.json, events its stream-json transcript, and run_dir the run
-    directory, which held the worktrees head/ and base/. fetched says whether the run's github.json
-    was written, without which nobody can tell a point was not already raised. A skipped run has
-    no verdicts.
-
-    A finding is auto_post only when every rule_v1 answer is true, its line is in the diff (GitHub
-    takes inline comments only there), fetched is true, and two Bash calls of the main session, not
-    of a subagent, back it. head_run's output contains observed. base_run ran head_run's command,
-    which names the head worktree, with the base worktree in its place; it succeeded, and its whole
-    output is in the transcript and does not contain observed. Every nit is a shadow_nit, whatever
-    its checks, and everything else goes to the digest.
+    events is the run's stream-json transcript. Each call has its command and output, ok (the call
+    did not fail), cut (the transcript kept only a preview of the output), and finished, always
+    true, because Claude Code waits for a Bash call to end.
     """
-    if result["status"] == "skipped":
-        return []
-    head_tree, base_tree = f"{run_dir}/head", f"{run_dir}/base"
-    bash = {}
+    calls = {}
     for e in events:
         # A subagent's messages carry the ID of the Task call that started it.
         if e["type"] not in ("assistant", "user") or e.get("parent_tool_use_id"):
@@ -465,13 +462,79 @@ def classify(result, events, fetched, run_dir):
         content = e["message"]["content"]
         for block in content if isinstance(content, list) else []:
             if block.get("type") == "tool_use" and block["name"] == "Bash":
-                bash[block["id"]] = {"command": block["input"]["command"], "output": "", "is_error": False}
-            elif block.get("type") == "tool_result" and block["tool_use_id"] in bash:
+                calls[block["id"]] = {"command": block["input"]["command"], "output": "", "ok": True, "cut": False,
+                                      "finished": True}
+            elif block.get("type") == "tool_result" and block["tool_use_id"] in calls:
                 output = block["content"]
-                bash[block["tool_use_id"]].update(
-                    output=output if isinstance(output, str) else "".join(part.get("text", "") for part in output),
-                    is_error=bool(block.get("is_error")),
-                )
+                output = output if isinstance(output, str) else "".join(part.get("text", "") for part in output)
+                # The CLI shows only a 2 KB preview of a successful output over 30,000 characters. It
+                # also cuts a failed call's output, which is not ok anyway.
+                calls[block["tool_use_id"]].update(output=output, ok=not block.get("is_error"),
+                                                   cut="<persisted-output>" in output)
+    return calls
+
+
+def devin_shell_calls(export):
+    """Returns the exec calls of a Devin run's main session, keyed by tool_call_id.
+
+    export is the run's ATIF trajectory from devin --export, which holds the main session's calls
+    and none of a subagent's. A call given a workdir reads as a command that starts with cd to it.
+    exec ends a finished call's output with an "Exit code: <n>" line. A call without one was moved
+    to the background or rejected, so it did not finish inside its call. A long output is cut two
+    ways, each naming the file with the rest: exec keeps only its start and end, and the CLI keeps
+    only the first lines of any tool result too large for the transcript. The second cuts off the
+    exit code line, so the call finished but its exit code is unknown and it is not ok.
+    """
+    calls = {}
+    for step in export["steps"]:
+        outputs = {r.get("source_call_id"): r.get("content") for r in (step.get("observation") or {}).get("results", [])}
+        for call in step.get("tool_calls") or []:
+            if call.get("function_name") != "exec":
+                continue
+            args = call.get("arguments") or {}
+            command = args.get("command", "")
+            if args.get("workdir"):
+                command = f"cd {args['workdir']} && {command}"
+            output = outputs.get(call["tool_call_id"]) or ""
+            if isinstance(output, list):
+                output = "".join(part.get("text", "") for part in output)
+            exit_code = re.search(r"\nExit code: (-?\d+)\s*\Z", output)
+            too_large = "<truncation_notice>" in output
+            calls[call["tool_call_id"]] = {
+                "command": command, "output": output, "ok": bool(exit_code) and exit_code[1] == "0",
+                "cut": too_large or "The full terminal output is being written live to" in output,
+                "finished": bool(exit_code) or too_large,
+            }
+    return calls
+
+
+# Each agent's reader: a review run's directory -> the shell calls of the run's main session.
+SHELL_CALLS = {
+    "claude": lambda run: claude_shell_calls(
+        [json.loads(line) for line in (run / "transcript.jsonl").read_text().splitlines() if line]),
+    "devin": lambda run: devin_shell_calls(json.loads((run / "transcript.json").read_text())),
+}
+
+
+def classify(result, calls, fetched, run_dir):
+    """Returns each finding of a review run with its verdict and the checks it failed.
+
+    result is the run's findings.json, calls the shell calls of its main session from its agent's
+    reader in SHELL_CALLS, and run_dir the run directory, which held the worktrees head/ and base/.
+    fetched says whether the run's github.json was written, without which nobody can tell a point
+    was not already raised. A skipped run has no verdicts.
+
+    A finding is auto_post only when every rule_v1 answer is true, its line is in the diff (GitHub
+    takes inline comments only there), fetched is true, and two shell calls of the main session,
+    not of a subagent, back it. head_run finished inside its call, and its output contains observed.
+    base_run ran head_run's command, which names the head worktree, with the base worktree in its
+    place; it finished inside its call and succeeded, and its whole output was kept and does not
+    contain observed. Every nit is a shadow_nit, whatever its checks, and everything else goes to
+    the digest.
+    """
+    if result["status"] == "skipped":
+        return []
+    head_tree, base_tree = f"{run_dir}/head", f"{run_dir}/base"
 
     verdicts = []
     for f in result["findings"]:
@@ -480,22 +543,24 @@ def classify(result, events, fetched, run_dir):
             failed.append("the line is outside the diff")
         if not fetched:
             failed.append("the GitHub fetch failed")
-        head, base = bash.get(f["head_run"]), bash.get(f["base_run"])
+        head, base = calls.get(f["head_run"]), calls.get(f["base_run"])
         if head is None:
-            failed.append(f"head_run {f['head_run']!r} is not a Bash call of the main session")
+            failed.append(f"head_run {f['head_run']!r} is not a shell call of the main session")
+        elif not head["finished"]:
+            failed.append("head_run did not finish inside its call")
         elif f["observed"] not in head["output"]:
             failed.append("observed is not in the head_run output")
         if base is None:
-            failed.append(f"base_run {f['base_run']!r} is not a Bash call of the main session")
+            failed.append(f"base_run {f['base_run']!r} is not a shell call of the main session")
         else:
             if head is not None and (head_tree not in head["command"]
                                      or base["command"] != head["command"].replace(head_tree, base_tree)):
                 failed.append("base_run is not head_run's command run in the base worktree")
-            if base["is_error"]:
+            if not base["finished"]:
+                failed.append("base_run did not finish inside its call")
+            elif not base["ok"]:
                 failed.append("base_run failed")
-            # The CLI shows only a 2 KB preview of a successful output over 30,000 characters. It
-            # also cuts a failed call's output, which the check above already rejects.
-            if "<persisted-output>" in base["output"]:
+            if base["cut"]:
                 failed.append("base_run's output was cut to a preview")
             elif f["observed"] in base["output"]:
                 failed.append("observed is also in the base_run output")
@@ -619,6 +684,10 @@ def main(command, *args):
 
     if command == "env":
         config = load_config()
+        # Each job runs on the agent [jobs] names, through its launcher agents/<agent>/<job>.
+        for job, agent in config["jobs"].items():
+            if not (ROOT / "agents" / agent / job).exists():
+                raise SystemExit(f"whooper: [jobs] {job} names {agent!r}, which has no agents/{agent}/{job}")
         values = {
             "WHOOPER_CONFIG_DIR": config["dir"],
             "WHOOPER_STATE": xdg_dir("XDG_STATE_HOME", ".local/state"),
@@ -629,12 +698,18 @@ def main(command, *args):
             "WHOOPER_ASK_CHANNEL": config["slack"]["ask_channel"],
             "WHOOPER_SUMMARY_CHANNEL": config["slack"]["summary_channel"],
             "WHOOPER_SUMMARY_CHANNEL_NAME": config["slack"]["summary_channel_name"],
-            "WHOOPER_POLL_MODEL": config["models"]["poll"],
-            "WHOOPER_REVIEW_MODEL": config["models"]["review"],
-            "WHOOPER_REVIEW_BUDGET_USD": config["review"]["budget_usd"],
+            "WHOOPER_SLACKDUMP_WORKSPACE": config["slack"]["slackdump_workspace"],
+            "WHOOPER_REVIEW_TIMEOUT_MINUTES": config["review"]["timeout_minutes"],
+            **{f"WHOOPER_{job.upper()}_AGENT": agent for job, agent in config["jobs"].items()},
         }
         for name, value in values.items():
             print(f"{name}={shlex.quote(str(value))}")
+        # Each agent's settings, named by agent and key: [agents.claude] review_model becomes
+        # WHOOPER_CLAUDE_REVIEW_MODEL. They are exported, because the launchers in agents/ run as
+        # child processes and read their own agent's.
+        for agent, settings in config["agents"].items():
+            for key, value in settings.items():
+                print(f"export WHOOPER_{agent.upper()}_{key.upper()}={shlex.quote(str(value))}")
     elif command == "repo":
         config, repo = load_config(), args[0]
         settings = config.get("repos", {}).get(repo)
@@ -649,45 +724,36 @@ def main(command, *args):
         for name, value in values.items():
             print(f"{name}={shlex.quote(str(value))}")
     elif command == "prompt":
-        config, (name, *repo) = load_config(), args
+        config, (name, *rest) = load_config(), args
         values = {
             "user_name": config["user"]["name"],
             "github_login": config["user"]["github_login"],
             "review_bots": bot_list(config["github"]["review_bots"], "login"),
-            "slack_bots": bot_list(config["slack"]["bots"], "name"),
             "skills": ", ".join(f"`{skill}`" for skill in config["review"]["skills"]),
         }
-        if repo:
-            notes = config["repos"][repo[0]].get("notes")
+        if name == "review":
+            repo, agent = rest
+            notes = config["repos"][repo].get("notes")
             values["repo_notes"] = (config["dir"] / notes).read_text().strip() if notes else "None."
-        print(fill((Path(__file__).resolve().parent.parent / "prompts" / f"{name}.md").read_text(), values), end="")
-    elif command == "poll-guard":
-        # The poll run's hook: PostToolUse on slack_read_channel records each read and its page in
-        # reads_file, and PreToolUse on StructuredOutput blocks the run's answer, with exit code 2, until
-        # those reads pass channel_pages. Claude Code lets a call through when its hook fails any
-        # other way, so every failure while checking blocks too.
-        reads_file, oldest, channel = Path(args[0]), args[1], args[2]
+            values.update(REVIEW_WORDING[agent])
+        print(fill((ROOT / "prompts" / f"{name}.md").read_text(), values), end="")
+    elif command == "check":
+        schema, path = args
         try:
-            hook = json.load(sys.stdin)
-            if hook["hook_event_name"] == "PostToolUse":
-                with open(reads_file, "a") as f:
-                    f.write(json.dumps([hook["tool_input"], hook["tool_response"]]) + "\n")
-                return
-            recorded = [json.loads(line) for line in reads_file.read_text().splitlines()] if reads_file.exists() else []
-            channel_pages(recorded, oldest, channel)
-        except Exception as e:
-            print(f"Not yet: {e}. Before you return, read the channel with slack_read_channel as the prompt "
-                  "says, through the page that says no more messages remain.", file=sys.stderr)
-            raise SystemExit(2)
+            check_schema(load(path), load(schema))
+        except (ValueError, OSError) as e:
+            raise SystemExit(f"whooper: {path} does not fit {schema}: {e}")
+    elif command == "posts":
+        dump, oldest = args
+        print(json.dumps(slack_posts(load(dump), oldest), indent=2))
     elif command == "asks":
-        config, (transcript, oldest) = load_config(), args
-        events = [json.loads(line) for line in Path(transcript).read_text().splitlines() if line]
+        config, (posts, answer, oldest) = load_config(), args
         slack = config["slack"]
         try:
-            asks, problems = read_asks(events, oldest, slack["ask_channel"], slack["user_id"], slack["workspace_url"],
-                                       config["github"]["orgs"])
+            asks, problems = read_asks(load(posts), load(answer), oldest, slack["ask_channel"], slack["user_id"],
+                                       slack["workspace_url"], config["github"]["orgs"])
         except ValueError as e:
-            raise SystemExit(f"whooper-poll: {e}; see {transcript}")
+            raise SystemExit(f"whooper-poll: {e}; see {answer}")
         for problem in problems:
             print(f"whooper-poll: {problem}", file=sys.stderr)
         print(json.dumps(asks, indent=2))
@@ -697,8 +763,9 @@ def main(command, *args):
         print(json.dumps({"items": poll_items(login, load(github), load(asks), load(slack_prs))}, indent=2))
     elif command == "select":
         data = Path(args[0])
-        # Poll outputs are named by their UTC start time, so the last name is the newest.
-        newest = max((data / "poll").glob("[0-9]*.json"), default=None)
+        # Poll outputs are named by their UTC start time, so the last name is the newest. The poll's
+        # records beside them (<time>.answer.json, <time>.transcript.json) do not end in Z.json.
+        newest = max((data / "poll").glob("[0-9]*Z.json"), default=None)
         if newest is None:
             raise SystemExit(f"whooper-select: no poll output in {data / 'poll'}")
         work, drops = select_work(load(newest)["items"], data / "prs", datetime.now().astimezone())
@@ -714,16 +781,21 @@ def main(command, *args):
         data, item, status = args
         write_record(Path(data) / "prs", load(item), status, datetime.now(timezone.utc))
     elif command == "classify":
-        data, run = Path(args[0]), Path(args[1]).resolve()
+        # Not resolve(): the run's commands name its directory as whooper-review printed it, and on
+        # macOS a directory under $TMPDIR resolves to another path through /private.
+        data, run = Path(args[0]), Path(os.path.abspath(args[1]))
         if not (run / "findings.json").exists():
             raise SystemExit(f"whooper-classify: {run} has no findings.json, so its review did not finish")
         # verdicts.json is written last, so a run that has it already added its findings to the digest.
         if (run / "verdicts.json").exists():
             raise SystemExit(f"whooper-classify: {run} is already classified")
         item = load(run / "run.json")
-        events = [json.loads(line) for line in (run / "transcript.jsonl").read_text().splitlines() if line]
+        # A run from before run.json recorded its agent was a claude run.
+        agent = item.get("agent", "claude")
+        if agent not in SHELL_CALLS:
+            raise SystemExit(f"whooper-classify: {run} ran on {agent}, which has no transcript reader")
         result = load(run / "findings.json")
-        verdicts = classify(result, events, (run / "github.json").exists(), run)
+        verdicts = classify(result, SHELL_CALLS[agent](run), (run / "github.json").exists(), run)
         append_digest(data, run, item, [v for v in verdicts if v["verdict"] != "auto_post"])
         write_record(data / "prs", item, "done", datetime.now(timezone.utc), result["approval"])
         (run / "verdicts.json").write_text(json.dumps(verdicts, indent=2))

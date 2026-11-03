@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Keeps a run's summary on Devin: agents/devin/summary <summary file> <run dir>.
+#
+# Devin's CLI cannot reach Slack (its MCP login fails against Slack's server), so the summary goes
+# to <run dir>/summary.md instead of the summary channel.
+set -euo pipefail
+
+cp "$1" "$2/summary.md"
+echo "whooper-summary: wrote $2/summary.md"

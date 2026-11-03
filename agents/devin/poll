@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Runs the poll's judgment on Devin: agents/devin/poll <prompt file> <answer file> <record prefix>.
+#
+# The prompt holds the ask channel's posts. The run starts in an empty directory in accept-edits
+# permission mode, so it may write files there, and anything else needs an approval that nobody
+# gives: Slack text it reads cannot make it run a command or call Slack. It writes its answer there
+# as answer.json, which moves to the answer file. Its transcript is <record prefix>.transcript.json.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+{
+  cat "$1"
+  printf '\nWrite your answer to answer.json in the working directory, and nothing else. It must be JSON that fits this JSON Schema:\n\n'
+  cat "$root/schemas/slack-asks.json"
+} > "$work/prompt.md"
+cd "$work"
+# Devin Desktop sets ACP_BACKEND in its shells, and the CLI ignores its own login while it is set.
+env -u ACP_BACKEND devin -p --prompt-file prompt.md --model "$WHOOPER_DEVIN_POLL_MODEL" \
+  --permission-mode accept-edits --respect-workspace-trust false --export "$3.transcript.json" \
+  > /dev/null 2> "$3.stderr.log"
+mv answer.json "$2"
