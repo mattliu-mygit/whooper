@@ -74,6 +74,10 @@ def connection(nodes):
     return {"totalCount": len(nodes), "nodes": nodes}
 
 
+# When the poll runs: after every review in these tests, and 4 hours after SlackItemsTest's human_review.
+NOW = datetime(2031, 7, 27, 5, 0, tzinfo=timezone.utc)
+
+
 def pr(number=1, author="alice", head="head2", state="OPEN", requested=(), reviews=(), threads=()):
     """A pull request as queries/pr.graphql returns it.
 
@@ -127,18 +131,18 @@ def kinds(items):
 
 class GitHubItemsTest(unittest.TestCase):
     def test_request_by_name_before_any_review_is_first_review(self):
-        items = poll_items(LOGIN, [pr(requested=[LOGIN])], [], [])
+        items = poll_items(LOGIN, [pr(requested=[LOGIN])], [], [], NOW)
         self.assertEqual(kinds(items), [(1, "first_review", "github_request")])
         self.assertEqual(items[0]["head_sha"], "head2")
         self.assertEqual(items[0]["base_ref"], "master")
         self.assertIsNone(items[0]["slack"])
 
     def test_team_request_is_not_work(self):
-        self.assertEqual(poll_items(LOGIN, [pr(requested=[("team", "example-team")])], [], []), [])
+        self.assertEqual(poll_items(LOGIN, [pr(requested=[("team", "example-team")])], [], [], NOW), [])
 
     def test_pending_review_does_not_count_as_reviewed(self):
         github = [pr(requested=[LOGIN], reviews=[(LOGIN, "PENDING", None, "head2")])]
-        self.assertEqual(kinds(poll_items(LOGIN, github, [], [])), [(1, "first_review", "github_request")])
+        self.assertEqual(kinds(poll_items(LOGIN, github, [], [], NOW)), [(1, "first_review", "github_request")])
 
     def test_request_by_name_after_a_review_is_recheck(self):
         # The thread has no reply, which would block a recheck without the re-request.
@@ -147,7 +151,7 @@ class GitHubItemsTest(unittest.TestCase):
             reviews=[(LOGIN, "COMMENTED", "2031-07-27T01:02:46Z", "head1")],
             threads=[(False, [(LOGIN, "2031-07-27T01:02:46Z")])],
         )]
-        self.assertEqual(kinds(poll_items(LOGIN, github, [], [])), [(1, "recheck", "github_request")])
+        self.assertEqual(kinds(poll_items(LOGIN, github, [], [], NOW)), [(1, "recheck", "github_request")])
 
     def test_only_a_thread_reply_is_not_a_review(self):
         # The user only replied "+1" in a thread Carol started on Bob's PR.
@@ -163,7 +167,7 @@ class GitHubItemsTest(unittest.TestCase):
         for name, requested, want in cases:
             with self.subTest(name):
                 github = [pr(number=7, author="bob", requested=requested, reviews=reviews, threads=threads)]
-                self.assertEqual(kinds(poll_items(LOGIN, github, [], [])), want)
+                self.assertEqual(kinds(poll_items(LOGIN, github, [], [], NOW)), want)
 
     def test_latest_opinion_approved_is_not_rechecked(self):
         cases = {
@@ -176,7 +180,7 @@ class GitHubItemsTest(unittest.TestCase):
         }
         for name, reviews in cases.items():
             with self.subTest(name):
-                self.assertEqual(poll_items(LOGIN, [pr(reviews=reviews)], [], []), [])
+                self.assertEqual(poll_items(LOGIN, [pr(reviews=reviews)], [], [], NOW), [])
 
     def test_withdrawn_approval_can_be_rechecked(self):
         cases = {
@@ -191,7 +195,7 @@ class GitHubItemsTest(unittest.TestCase):
         }
         for name, reviews in cases.items():
             with self.subTest(name):
-                self.assertEqual(kinds(poll_items(LOGIN, [pr(reviews=reviews)], [], [])), [(1, "recheck", "reviewed_by_user")])
+                self.assertEqual(kinds(poll_items(LOGIN, [pr(reviews=reviews)], [], [], NOW)), [(1, "recheck", "reviewed_by_user")])
 
     def test_recheck_triggers(self):
         review = [(LOGIN, "COMMENTED", "2031-07-27T01:02:46Z", "head1")]
@@ -211,7 +215,7 @@ class GitHubItemsTest(unittest.TestCase):
         ]
         for name, head, threads, want in cases:
             with self.subTest(name):
-                items = poll_items(LOGIN, [pr(head=head, reviews=review, threads=threads)], [], [])
+                items = poll_items(LOGIN, [pr(head=head, reviews=review, threads=threads)], [], [], NOW)
                 self.assertEqual(kinds(items), [(1, "recheck", "reviewed_by_user")] if want else [])
 
     def test_users_thread_reply_after_a_push_does_not_hide_the_push(self):
@@ -228,7 +232,7 @@ class GitHubItemsTest(unittest.TestCase):
                 (LOGIN, "2031-07-27T01:02:46Z"), ("alice", "2031-07-27T16:12:48Z"), (LOGIN, "2031-07-27T18:00:00Z"),
             ])],
         )]
-        items = poll_items(LOGIN, github, [], [])
+        items = poll_items(LOGIN, github, [], [], NOW)
         self.assertEqual(kinds(items), [(1, "recheck", "reviewed_by_user")])
         self.assertIn("from head1 to head3", items[0]["reason"])
 
@@ -241,7 +245,7 @@ class GitHubItemsTest(unittest.TestCase):
             ],
             threads=[(False, [(LOGIN, "2031-07-27T01:02:46Z"), ("alice", "2031-07-27T16:12:48Z")])],
         )]
-        self.assertEqual(poll_items(LOGIN, github, [], []), [])
+        self.assertEqual(poll_items(LOGIN, github, [], [], NOW), [])
 
     def test_latest_review_is_by_submission_time(self):
         # The API lists reviews by creation. A review started earlier can be submitted later.
@@ -252,7 +256,7 @@ class GitHubItemsTest(unittest.TestCase):
                 (LOGIN, "COMMENTED", "2031-07-27T09:00:00Z", "head1"),
             ],
         )]
-        self.assertEqual(poll_items(LOGIN, github, [], []), [])
+        self.assertEqual(poll_items(LOGIN, github, [], [], NOW), [])
 
     def test_pending_review_is_not_the_latest_review(self):
         github = [pr(
@@ -262,7 +266,7 @@ class GitHubItemsTest(unittest.TestCase):
                 (LOGIN, "PENDING", None, "head2"),
             ],
         )]
-        items = poll_items(LOGIN, github, [], [])
+        items = poll_items(LOGIN, github, [], [], NOW)
         self.assertEqual(kinds(items), [(1, "recheck", "reviewed_by_user")])
         self.assertIn("head1", items[0]["reason"])
 
@@ -270,7 +274,7 @@ class GitHubItemsTest(unittest.TestCase):
         github = [pr(reviews=[(LOGIN, "COMMENTED", "2031-07-27T01:02:46Z", "head1")])]
         github[0]["reviews"]["totalCount"] = 101
         with self.assertRaises(ValueError):
-            poll_items(LOGIN, github, [], [])
+            poll_items(LOGIN, github, [], [], NOW)
 
 
 class SlackItemsTest(unittest.TestCase):
@@ -283,7 +287,7 @@ class SlackItemsTest(unittest.TestCase):
     ]
 
     def test_tagged_ask_is_first_review_with_its_post(self):
-        items = poll_items(LOGIN, [], [ask(tagged=True)], [pr()])
+        items = poll_items(LOGIN, [], [ask(tagged=True)], [pr()], NOW)
         self.assertEqual(kinds(items), [(1, "first_review", "slack_ask")])
         self.assertEqual(items[0]["slack"], {
             "ts": "1943194837.000100",
@@ -299,20 +303,22 @@ class SlackItemsTest(unittest.TestCase):
             ("only bots and the author", False, self.non_human_reviews, True),
             ("only the user's pending review", False, [(LOGIN, "PENDING", None, "head2")], True),
             ("a human put :eyes:", True, [], False),
-            ("a human reviewed", False, [self.human_review], False),
+            ("a human reviewed in the last 8 hours", False, [self.human_review], False),
+            # More than 8 hours before NOW, so the PR is fair game again.
+            ("a human reviewed earlier", False, [("bob", "COMMENTED", "2031-07-26T20:59:59Z", "head1")], True),
         ]
         for name, eyes, reviews, taken in cases:
             with self.subTest(name):
-                items = poll_items(LOGIN, [], [ask(tagged=False, eyes=eyes)], [pr(reviews=reviews)])
+                items = poll_items(LOGIN, [], [ask(tagged=False, eyes=eyes)], [pr(reviews=reviews)], NOW)
                 self.assertEqual(kinds(items), [(1, "first_review", "slack_ask")] if taken else [])
 
     def test_tagged_ask_ignores_eyes_and_other_reviews(self):
-        items = poll_items(LOGIN, [], [ask(tagged=True, eyes=True)], [pr(reviews=[self.human_review])])
+        items = poll_items(LOGIN, [], [ask(tagged=True, eyes=True)], [pr(reviews=[self.human_review])], NOW)
         self.assertEqual(kinds(items), [(1, "first_review", "slack_ask")])
 
     def test_tagged_ask_after_the_users_review_is_recheck(self):
         reviewed = pr(reviews=[(LOGIN, "COMMENTED", "2031-07-27T01:02:46Z", "head1")])
-        self.assertEqual(kinds(poll_items(LOGIN, [], [ask()], [reviewed])), [(1, "recheck", "slack_ask")])
+        self.assertEqual(kinds(poll_items(LOGIN, [], [ask()], [reviewed], NOW)), [(1, "recheck", "slack_ask")])
 
     def test_closed_merged_and_own_prs_are_dropped(self):
         for name, data in {
@@ -321,26 +327,26 @@ class SlackItemsTest(unittest.TestCase):
             "the user's own PR": pr(author=LOGIN),
         }.items():
             with self.subTest(name):
-                self.assertEqual(poll_items(LOGIN, [], [ask()], [data]), [])
+                self.assertEqual(poll_items(LOGIN, [], [ask()], [data], NOW), [])
 
     def test_ask_for_a_pr_without_data_is_skipped(self):
-        self.assertEqual(poll_items(LOGIN, [], [ask(urls=["https://github.com/example-org/example-repo/pull/2"])], [pr()]), [])
+        self.assertEqual(poll_items(LOGIN, [], [ask(urls=["https://github.com/example-org/example-repo/pull/2"])], [pr()], NOW), [])
 
     def test_one_item_per_pr_and_kind_preferring_tagged_slack_asks(self):
         github = [pr(requested=[LOGIN])]
         asks = [ask(ts="1943194600.000001", tagged=False), ask(ts="1943194837.000100", tagged=True)]
-        items = poll_items(LOGIN, github, asks, [pr()])
+        items = poll_items(LOGIN, github, asks, [pr()], NOW)
         self.assertEqual(kinds(items), [(1, "first_review", "slack_ask")])
         self.assertEqual(items[0]["slack"]["ts"], "1943194837.000100")
 
     def test_request_by_name_wins_over_an_untagged_ask(self):
         # An untagged ask lets the review run skip a PR that is not small. A request by name does not.
-        items = poll_items(LOGIN, [pr(requested=[LOGIN])], [ask(tagged=False)], [pr()])
+        items = poll_items(LOGIN, [pr(requested=[LOGIN])], [ask(tagged=False)], [pr()], NOW)
         self.assertEqual(kinds(items), [(1, "first_review", "github_request")])
 
     def test_each_linked_pr_is_its_own_item(self):
         urls = ["https://github.com/example-org/example-repo/pull/1", "https://github.com/example-org/example-repo/pull/2"]
-        items = poll_items(LOGIN, [], [ask(urls=urls)], [pr(number=1), pr(number=2)])
+        items = poll_items(LOGIN, [], [ask(urls=urls)], [pr(number=1), pr(number=2)], NOW)
         self.assertEqual(kinds(items), [(1, "first_review", "slack_ask"), (2, "first_review", "slack_ask")])
 
 

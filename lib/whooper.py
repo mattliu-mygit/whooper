@@ -18,7 +18,7 @@ from the user's config file (config_path), never from this code. The bin/ script
   whooper.py summary <run dir>                                                     -> the summary channel's text
   whooper.py skills <skills dir>                                                   -> {skill: content hash}
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -31,6 +31,9 @@ import tomllib
 ROOT = Path(__file__).resolve().parent.parent
 MAX_FAILURES = 3
 MAX_RECHECKS_PER_DAY = 3
+# An untagged team ask leaves a PR to whoever else reviewed it in the last 8 hours. After that,
+# the PR is fair game again.
+CLAIM_HOURS = 8
 # Auto-post rule v1 (design question 3): a finding posts without the user only when the run answers
 # all of these true and the transcript backs the first and third.
 RULE_V1 = ("ran_and_saw_failure", "caller_or_ci_visible", "introduced_by_pr", "not_already_raised", "not_pr_text")
@@ -205,11 +208,11 @@ def read_asks(posts, answer, oldest, channel, user, slack_url, orgs):
     return asks, problems
 
 
-def poll_items(login, github_prs, asks, slack_prs):
+def poll_items(login, github_prs, asks, slack_prs, now):
     """Returns the review work found in GitHub data and Slack asks, one item per PR and kind.
 
     github_prs come from whooper-fetch's searches (open, not the user's). slack_prs are the PRs
-    the asks link, in the same queries/pr.graphql shape.
+    the asks link, in the same queries/pr.graphql shape. now dates the CLAIM_HOURS window.
     """
     found = []
     for pr in github_prs:
@@ -229,8 +232,9 @@ def poll_items(login, github_prs, asks, slack_prs):
             pr = prs_by_url.get(url)
             if pr is None or pr["state"] != "OPEN" or pr["author"]["login"] == login:
                 continue
-            # An untagged team ask is taken only while nobody else is looking at the PR.
-            if not ask["tagged_user"] and (ask["has_eyes"] or human_reviewed(pr)):
+            # An untagged team ask is taken only while nobody else is looking at the PR: no :eyes:,
+            # and no review by someone else in the last CLAIM_HOURS.
+            if not ask["tagged_user"] and (ask["has_eyes"] or human_reviewed_since(pr, now - timedelta(hours=CLAIM_HOURS))):
                 continue
             kind = "recheck" if user_reviews(pr, login) else "first_review"
             slack = {"ts": ask["ts"], "tagged_user": ask["tagged_user"], "permalink": ask["permalink"]}
@@ -300,11 +304,12 @@ def user_reviews(pr, login):
     return sorted(mine, key=lambda r: r["submittedAt"])
 
 
-def human_reviewed(pr):
-    """Someone other than the PR author and bot accounts submitted a review."""
+def human_reviewed_since(pr, since):
+    """Someone other than the PR author and bot accounts submitted a review at or after since."""
     author = pr["author"]["login"]
     return any(
         r["state"] != "PENDING" and r["author"]["__typename"] != "Bot" and r["author"]["login"] != author
+        and datetime.fromisoformat(r["submittedAt"]) >= since
         for r in nodes(pr["reviews"])
     )
 
@@ -760,7 +765,7 @@ def main(command, *args):
     elif command == "items":
         github, asks, slack_prs = args
         login = load_config()["user"]["github_login"]
-        print(json.dumps({"items": poll_items(login, load(github), load(asks), load(slack_prs))}, indent=2))
+        print(json.dumps({"items": poll_items(login, load(github), load(asks), load(slack_prs), datetime.now(timezone.utc))}, indent=2))
     elif command == "select":
         data = Path(args[0])
         # Poll outputs are named by their UTC start time, so the last name is the newest. The poll's
