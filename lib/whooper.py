@@ -135,39 +135,53 @@ def bot_list(bots, key):
 
 
 def slack_posts(dump, oldest):
-    """Returns the top-level posts at or after oldest in a channel that slackdump dumped.
+    """Returns the posts and thread replies in a channel that slackdump dumped that are new since oldest.
 
-    dump is slackdump's JSON for one channel. Each post keeps its ts, its sender's user ID, whether
-    a bot wrote it (a bot_id, a bot message, or Slackbot), its text in Slack's markup, and the names
-    of its reactions. Thread replies, which slackdump nests under their post, are not posts.
+    dump is slackdump's JSON for one channel, read from a day before oldest, so it also holds the
+    replies and edits that came since oldest under older posts. A message is new when it was posted
+    or last edited at or after oldest. Each one keeps its ts, the ts of the post it replies to
+    (thread_ts, for a reply), its sender's user ID, whether a bot wrote it (a bot_id, a bot message,
+    or Slackbot), its text in Slack's markup, and the names of its reactions.
     """
-    posts = []
-    for m in dump["messages"]:
-        ts = m.get("ts", "")
-        if not re.fullmatch(r"\d{10}\.\d{6}", ts) or int(ts.split(".")[0]) < int(oldest):
-            continue
-        posts.append({
-            "ts": ts,
+    def new(m):
+        times = [m["ts"], (m.get("edited") or {}).get("ts", "")]
+        return any(re.fullmatch(r"\d{10}\.\d{6}", t) and int(t.split(".")[0]) >= int(oldest) for t in times)
+
+    def post(m, thread_ts=None):
+        return {
+            "ts": m["ts"],
+            **({"thread_ts": thread_ts} if thread_ts else {}),
             "user": m.get("user", ""),
             "bot": bool(m.get("bot_id")) or m.get("subtype") == "bot_message" or m.get("user") == "USLACKBOT",
             # A post that shares another message, such as a bump of a review request, carries the
             # shared message's text, and its PR link, in an attachment.
             "text": "\n".join([m.get("text", "")] + [a["text"] for a in m.get("attachments") or [] if a.get("text")]),
             "reactions": [r["name"] for r in m.get("reactions") or []],
-        })
+        }
+
+    posts = []
+    for m in dump["messages"]:
+        if not re.fullmatch(r"\d{10}\.\d{6}", m.get("ts", "")):
+            continue
+        if new(m):
+            posts.append(post(m))
+        # slackdump lists a thread's post first among its replies.
+        posts += [post(r, m["ts"]) for r in m.get("slackdump_thread_replies") or []
+                  if r.get("ts") != m["ts"] and re.fullmatch(r"\d{10}\.\d{6}", r.get("ts", "")) and new(r)]
     return posts
 
 
 def read_asks(posts, answer, oldest, channel, user, slack_url, orgs):
     """Returns the review asks a poll run reported, and a note for each ask or URL it dropped.
 
-    posts are the ask channel's posts since oldest (slack_posts), which slackdump read to the end,
-    and answer the run's {asks, not_asks}. Raises ValueError when the run left out a post, not
-    written by the user or a bot, that mentions the user next to a link to a PR in orgs: each such
-    post must be in asks or not_asks.
+    posts are the ask channel's posts and thread replies new since oldest (slack_posts), and answer
+    the run's {asks, not_asks}. Raises ValueError when the run left out a post, not written by the
+    user, that mentions the user next to a link to a PR in orgs: each such post must be in asks or
+    not_asks.
 
-    An ask must name one of those posts that no bot wrote. It keeps only the URLs of PRs in orgs that
-    the post links. Whether the post mentions the user and has :eyes: is read from the post.
+    An ask must name one of those posts. A bot's post counts, such as a list of PRs waiting for
+    review. An ask keeps only the URLs of PRs in orgs that the post links. Whether the post mentions
+    the user and has :eyes: is read from the post.
     """
     by_ts = {p["ts"]: p for p in posts}
     mention = re.compile(rf"<@{re.escape(user)}[|>]")
@@ -175,8 +189,7 @@ def read_asks(posts, answer, oldest, channel, user, slack_url, orgs):
     answered = {a["ts"] for a in answer["asks"] + answer["not_asks"]}
     missed = [
         p["ts"] for p in posts
-        if p["ts"] not in answered and mention.search(p["text"]) and link.search(p["text"])
-        and p["user"] != user and not p["bot"]
+        if p["ts"] not in answered and mention.search(p["text"]) and link.search(p["text"]) and p["user"] != user
     ]
     if missed:
         raise ValueError(f"the poll run left out posts that mention {user} next to a PR link: {', '.join(missed)}")
@@ -188,18 +201,18 @@ def read_asks(posts, answer, oldest, channel, user, slack_url, orgs):
         if post is None:
             problems.append(f"dropped ask {ts!r}: not a post in the channel since {oldest}")
             continue
-        if post["bot"]:
-            problems.append(f"dropped ask {ts}: a bot wrote it")
-            continue
         linked = {"https://" + m[1] for m in link.finditer(post["text"])}
         urls = [url for url in ask["pr_urls"] if url in linked]
         problems += [f"dropped PR URL {url!r} from ask {ts}" for url in ask["pr_urls"] if url not in linked]
         if not urls:
             problems.append(f"dropped ask {ts}: no PR URL left")
             continue
+        permalink = f"{slack_url}/archives/{channel}/p{ts.replace('.', '')}"
+        if "thread_ts" in post:
+            permalink += f"?thread_ts={post['thread_ts']}&cid={channel}"
         asks.append({
             "ts": ts,
-            "permalink": f"{slack_url}/archives/{channel}/p{ts.replace('.', '')}",
+            "permalink": permalink,
             "tagged_user": bool(mention.search(post["text"])),
             "pr_urls": urls,
             "has_eyes": "eyes" in post["reactions"],

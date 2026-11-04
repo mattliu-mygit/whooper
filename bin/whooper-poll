@@ -31,9 +31,10 @@ die() {
   exit 1
 }
 
-# slackdump takes its start time in UTC.
+# slackdump reads from a day before the cursor, so the replies and edits that came since the cursor
+# under older posts come along; lib/whooper.py keeps only what is new. It takes its start time in UTC.
 from="$(python3 -I -c 'import datetime, sys
-print(datetime.datetime.fromtimestamp(int(sys.argv[1]), datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"))' "$oldest")"
+print(datetime.datetime.fromtimestamp(int(sys.argv[1]) - 86400, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"))' "$oldest")"
 slackdump dump -workspace "$WHOOPER_SLACKDUMP_WORKSPACE" -files=false -time-from "$from" -o "$work/slack" \
   "$WHOOPER_ASK_CHANNEL" > "$work/slackdump.log" 2>&1 || die "slackdump failed: $(tail -n 3 "$work/slackdump.log")"
 python3 -I "$root/lib/whooper.py" posts "$work/slack/$WHOOPER_ASK_CHANNEL.json" "$oldest" > "$work/posts.json"

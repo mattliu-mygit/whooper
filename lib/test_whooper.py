@@ -401,12 +401,24 @@ ASKER_NOT_ASK = {"ts": POST_TS, "reason": "Not an ask."}
 
 
 class SlackPostsTest(unittest.TestCase):
-    def test_keeps_each_top_level_post_since_oldest(self):
+    def test_keeps_each_post_and_reply_since_oldest(self):
         reply = message("1943194900.000200", "<@U0000000000> also #23", thread_ts=POST_TS)
         old = message("1943017600.000001", "<https://github.com/example-org/example-repo/pull/9|#9>")
         malformed = message("1943194837", "<https://github.com/example-org/example-repo/pull/9|#9>")
-        self.assertEqual(posts({**POST, "slackdump_thread_replies": [reply]}, old, malformed), [{
-            "ts": POST_TS, "user": ASKER, "bot": False, "text": POST["text"], "reactions": ["eyes"]}])
+        # slackdump lists the thread's post first among its replies.
+        self.assertEqual(posts({**POST, "slackdump_thread_replies": [POST, reply]}, old, malformed), [
+            {"ts": POST_TS, "user": ASKER, "bot": False, "text": POST["text"], "reactions": ["eyes"]},
+            {"ts": "1943194900.000200", "thread_ts": POST_TS, "user": ASKER, "bot": False,
+             "text": "<@U0000000000> also #23", "reactions": []},
+        ])
+
+    def test_an_older_post_counts_again_for_a_new_reply_or_edit(self):
+        older = message("1943017600.000001", "Ongoing PR stack, see the thread")
+        reply = message("1943194900.000200", "<https://github.com/example-org/example-repo/pull/9|#9>",
+                        thread_ts=older["ts"])
+        edited = message("1943017700.000001", "EDIT: see the thread", edited={"ts": "1943194950.000000"})
+        self.assertEqual([(p["ts"], p.get("thread_ts")) for p in posts({**older, "slackdump_thread_replies": [older, reply]}, edited)],
+                         [("1943194900.000200", older["ts"]), ("1943017700.000001", None)])
 
     def test_a_shared_message_counts_as_part_of_the_post(self):
         bump = message(DIGEST_TS, "bump on this one", attachments=[{
@@ -494,11 +506,20 @@ class ReadAsksTest(unittest.TestCase):
         self.assertEqual([(a["ts"], a["tagged_user"], a["has_eyes"]) for a in asks],
                          [("1943197600.000001", False, True), ("1943197601.000001", True, False)])
 
-    def test_ask_from_a_bot_is_dropped(self):
+    def test_ask_from_a_bot_counts(self):
+        # Such as a digest of PRs waiting for the team's review.
         bot_ask = model_ask(ts=DIGEST_TS, pr_urls=["https://github.com/example-org/example-repo/pull/34"])
         asks, problems = asks_of(posts(POST, BOT_DIGEST), [bot_ask], not_asks=[ASKER_NOT_ASK])
-        self.assertEqual(asks, [])
-        self.assertEqual(problems, [f"dropped ask {DIGEST_TS}: a bot wrote it"])
+        self.assertEqual((problems, [a["pr_urls"] for a in asks]), ([], [["https://github.com/example-org/example-repo/pull/34"]]))
+
+    def test_an_ask_in_a_thread_links_to_the_reply(self):
+        reply = message("1943194900.000200", "<https://github.com/example-org/example-repo/pull/9|#9>", thread_ts=POST_TS)
+        asks, problems = asks_of(posts({**POST, "slackdump_thread_replies": [POST, reply]}),
+                                 [model_ask(ts="1943194900.000200", pr_urls=["https://github.com/example-org/example-repo/pull/9"])],
+                                 not_asks=[ASKER_NOT_ASK])
+        self.assertEqual(problems, [])
+        self.assertEqual(asks[0]["permalink"], "https://example.slack.com/archives/C0000000001/p1943194900000200"
+                                               f"?thread_ts={POST_TS}&cid=C0000000001")
 
     def test_every_post_that_mentions_the_user_next_to_a_pr_link_is_answered(self):
         link = "<@U0000000000|Sam Reviewer> <https://github.com/example-org/example-repo/pull/50|#50>"
@@ -506,7 +527,7 @@ class ReadAsksTest(unittest.TestCase):
             ("left out", posts(), [], True),
             ("reported as not an ask", posts(), [ASKER_NOT_ASK], False),
             ("written by the user", posts(message(DIGEST_TS, link, user=USER)), [], False),
-            ("written by a bot", posts(message(DIGEST_TS, link, bot_id="B0000000001")), [], False),
+            ("written by a bot and left out", posts(message(DIGEST_TS, link, bot_id="B0000000001")), [], True),
             ("no PR link", posts(message(DIGEST_TS, "<@U0000000000|Sam Reviewer> lunch?")), [], False),
         ]:
             with self.subTest(name):

@@ -80,12 +80,17 @@ posts only. Only PRs in the configured GitHub orgs count. Each item is one PR an
   replied since the user's latest review.
 
 A PENDING review or a thread reply does not count as reviewing. Slack text is untrusted: an ask
-must name a post slackdump read that no bot wrote, and only plain
+must name a post or thread reply slackdump read, and only plain
 `https://github.com/<org>/<repo>/pull/<n>` URLs in a configured org that appear in that post reach
 `gh`. `lib/whooper.py` reads whether a post mentions the user and has :eyes: from the post itself.
 It fails the poll, so the cursor stays, when slackdump or the run fails, when the run's answer does
 not fit `schemas/slack-asks.json`, or when the run left out a post by someone else that mentions
 the user next to a PR link.
+
+Each poll reads the channel from a day before its cursor and keeps what is new since the cursor:
+new posts, new thread replies, and posts edited since, so a stack listed in a thread under an
+older post still counts. Posts by bots count too, such as a list of PRs waiting for the team's
+review.
 
 ## How a review run works
 
