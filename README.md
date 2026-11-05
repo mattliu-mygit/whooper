@@ -73,7 +73,7 @@ posts only. Only PRs in the configured GitHub orgs count. Each item is one PR an
 - **first_review**: a GitHub review request names the user and the user has not reviewed the PR,
   or a post in the ask channel asks the user for a review. A post that does not mention the user
   counts only while it has no :eyes: and no one but bots and the PR author has reviewed the PR in
-  the last 8 hours.
+  the last 8 hours, and only while the user has not reviewed it.
 - **recheck**: the user is requested by name again after reviewing, a post that mentions the user
   asks about a PR the user already reviewed, or the user reviewed the PR without approving, every
   thread the user started has an author reply or is resolved, and the head moved or the author

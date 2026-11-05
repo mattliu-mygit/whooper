@@ -320,6 +320,11 @@ class SlackItemsTest(unittest.TestCase):
         reviewed = pr(reviews=[(LOGIN, "COMMENTED", "2031-07-27T01:02:46Z", "head1")])
         self.assertEqual(kinds(poll_items(LOGIN, [], [ask()], [reviewed], NOW)), [(1, "recheck", "slack_ask")])
 
+    def test_untagged_ask_skips_a_pr_the_user_already_reviewed(self):
+        # Such as a daily digest that still lists a PR the user approved.
+        reviewed = pr(reviews=[(LOGIN, "APPROVED", "2031-07-27T01:02:46Z", "head2")])
+        self.assertEqual(poll_items(LOGIN, [], [ask(tagged=False)], [reviewed], NOW), [])
+
     def test_closed_merged_and_own_prs_are_dropped(self):
         for name, data in {
             "closed": pr(state="CLOSED"),

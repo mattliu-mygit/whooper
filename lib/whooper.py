@@ -249,6 +249,9 @@ def poll_items(login, github_prs, asks, slack_prs, now):
             # and no review by someone else in the last CLAIM_HOURS.
             if not ask["tagged_user"] and (ask["has_eyes"] or human_reviewed_since(pr, now - timedelta(hours=CLAIM_HOURS))):
                 continue
+            # A team ask does not ask the user again about a PR the user already reviewed.
+            if not ask["tagged_user"] and user_reviews(pr, login):
+                continue
             kind = "recheck" if user_reviews(pr, login) else "first_review"
             slack = {"ts": ask["ts"], "tagged_user": ask["tagged_user"], "permalink": ask["permalink"]}
             found.append(work_item(pr, kind, "slack_ask", ask["reason"], slack))
