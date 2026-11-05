@@ -109,7 +109,9 @@ reports the run's cost in dollars, capped by `[agents.claude] budget_usd`. `agen
 runs `devin -p` in `dangerous` permission mode, so no tool call waits for an approval; the run
 writes `findings.json` itself, and the cost line is in ACUs, Devin's billing unit. Its config for
 the run, saved as `devin-config.json`, is your `~/.config/devin/config.json` plus Whooper's hook and
-deny rules for every Slack tool, which hold in that mode.
+deny rules for every Slack tool, which hold in that mode. When the run ends, the launcher deletes its
+Devin session with `devin rm`, so runs don't fill Devin Desktop's session list; `transcript.json`
+keeps the conversation. `agents/devin/poll` does the same for each poll.
 
 The run gets `GH_TOKEN=disabled`, so `gh` and git's `gh` credential helper fail. Otherwise it loads
 what a normal session in the head worktree loads: user settings, and the PR's own settings, hooks,

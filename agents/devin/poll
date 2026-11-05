@@ -4,7 +4,8 @@
 # The prompt holds the ask channel's posts. The run starts in an empty directory in accept-edits
 # permission mode, so it may write files there, and anything else needs an approval that nobody
 # gives: Slack text it reads cannot make it run a command or call Slack. It writes its answer there
-# as answer.json, which moves to the answer file. Its transcript is <record prefix>.transcript.json.
+# as answer.json, which moves to the answer file. Its transcript is <record prefix>.transcript.json,
+# and its Devin session is deleted once it ends.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -16,8 +17,14 @@ trap 'rm -rf "$work"' EXIT
   cat "$root/schemas/slack-asks.json"
 } > "$work/prompt.md"
 cd "$work"
+status=0
 # Devin Desktop sets ACP_BACKEND in its shells, and the CLI ignores its own login while it is set.
 env -u ACP_BACKEND devin -p --prompt-file prompt.md --model "$WHOOPER_DEVIN_POLL_MODEL" \
   --permission-mode accept-edits --respect-workspace-trust false --export "$3.transcript.json" \
-  > /dev/null 2> "$3.stderr.log"
+  > /dev/null 2> "$3.stderr.log" || status=$?
+# Delete the run's Devin session so polls don't fill Devin Desktop's session list; the transcript
+# keeps the whole conversation.
+[[ -f "$3.transcript.json" ]] &&
+  devin rm "$(jq -r .session_id "$3.transcript.json")" --force > /dev/null || true
+((status == 0)) || exit "$status"
 mv answer.json "$2"

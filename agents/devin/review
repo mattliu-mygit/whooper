@@ -12,7 +12,7 @@
 #
 # The run writes findings.json itself. This writes transcript.json (the run's ATIF export),
 # stdout.log, and stderr.log to $WHOOPER_RUN, prints the cost line in ACUs, Devin's billing unit,
-# and exits with the CLI's exit code.
+# deletes the run's Devin session, and exits with the CLI's exit code.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -36,5 +36,8 @@ if [[ -f "$run/transcript.json" ]]; then
     [.steps[] | select(.source == "agent")] as $turns
     | "whooper-review: \([$turns[].extra.committed_acu_cost // 0] | add // 0 | . * 1000 | round / 1000) ACU in \($minutes) minutes, \($turns | length) turns"' \
     "$run/transcript.json" >&2
+  # Delete the run's Devin session so runs don't fill Devin Desktop's session list; transcript.json
+  # keeps the whole conversation.
+  devin rm "$(jq -r .session_id "$run/transcript.json")" --force > /dev/null || true
 fi
 exit "$status"
