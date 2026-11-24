@@ -13,7 +13,7 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 {
   cat "$1"
-  printf '\nWrite your answer to answer.json in the working directory, and nothing else. It must be JSON that fits this JSON Schema:\n\n'
+  printf '\nWrite your answer to answer.json in the working directory with your file-writing tool, and nothing else. This run rejects shell commands, so write out the whole JSON yourself instead of generating it with a script. It must be JSON that fits this JSON Schema:\n\n'
   cat "$root/schemas/slack-asks.json"
 } > "$work/prompt.md"
 cd "$work"
