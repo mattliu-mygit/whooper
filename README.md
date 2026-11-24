@@ -161,8 +161,9 @@ after a poll writes its output, so an interrupted poll is simply repeated.
   whooper-review writes running when it starts and failed, with one more failure, when it stops
   without findings. whooper-classify writes done with the run's `approval`, and whooper-post writes
   stale when the head moved.
-  whooper-select drops an item whose record is done or running or has failed 3 times, and a
-  re-check of a PR that already has 3 re-check records for other heads started today (local time).
+  whooper-select drops an item in a repo the config has no `[repos."<owner>/<repo>"]` table for,
+  an item whose record is done or running or has failed 3 times, and a re-check of a PR that
+  already has 3 re-check records for other heads started today (local time).
 - `locks/<owner>-<repo>-<pr>/pid`: the process ID of the review that holds the PR. A lock whose
   process is gone is stale, and the next review takes it.
 - `runs/<run-id>/`: one review run, named by its UTC start time and PR number. `run.json` is the

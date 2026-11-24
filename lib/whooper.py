@@ -350,12 +350,14 @@ def work_item(pr, kind, source, reason, slack=None):
     }
 
 
-def select_work(items, prs_dir, now):
-    """Splits items into work to start and (item, reason) for items already handled.
+def select_work(items, prs_dir, now, repos):
+    """Splits items into work to start and (item, reason) for items already handled or unreviewable.
 
-    prs_dir holds the records write_record writes. An item is dropped when its record is done or
-    running or has failed MAX_FAILURES times. A re-check is dropped when its PR already has
-    MAX_RECHECKS_PER_DAY re-check records for other heads started on now's local day.
+    prs_dir holds the records write_record writes, and repos is the config's [repos] table. An item
+    is dropped when repos has no table for its repo, since a review needs the repo's settings, or
+    when its record is done or running or has failed MAX_FAILURES times. A re-check is dropped when
+    its PR already has MAX_RECHECKS_PER_DAY re-check records for other heads started on now's local
+    day.
     """
     work, drops = [], []
     for item in items:
@@ -363,7 +365,9 @@ def select_work(items, prs_dir, now):
         pr_dir = path.parent
         record = json.loads(path.read_text()) if path.exists() else None
         reason = None
-        if record and record["status"] in ("done", "running"):
+        if item["repo"] not in repos:
+            reason = f"the config has no [repos.\"{item['repo']}\"] table"
+        elif record and record["status"] in ("done", "running"):
             reason = f"{record['status']} at this head"
         elif record and record["failures"] >= MAX_FAILURES:
             reason = f"failed {record['failures']} times at this head"
@@ -789,7 +793,8 @@ def main(command, *args):
         newest = max((data / "poll").glob("[0-9]*Z.json"), default=None)
         if newest is None:
             raise SystemExit(f"whooper-select: no poll output in {data / 'poll'}")
-        work, drops = select_work(load(newest)["items"], data / "prs", datetime.now().astimezone())
+        work, drops = select_work(load(newest)["items"], data / "prs", datetime.now().astimezone(),
+                                  load_config().get("repos", {}))
         for item, reason in drops:
             print(f"whooper-select: dropped {item['repo']}#{item['pr']} {item['kind']}: {reason}", file=sys.stderr)
         for item in work:

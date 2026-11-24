@@ -543,6 +543,10 @@ class ReadAsksTest(unittest.TestCase):
                     self.assertEqual(asks_of(channel_posts, [], not_asks), ([], []))
 
 
+# The repos the test config lists, as select_work gets them.
+REPOS = {"example-org/example-repo": {}, "sample-org/plain-repo": {}}
+
+
 def work_item(kind="recheck", head="head3", number=12):
     return {"kind": kind, "repo": "example-org/example-repo", "pr": number, "head_sha": head, "base_ref": "master",
             "source": "reviewed_by_user", "slack": None, "reason": "r"}
@@ -564,12 +568,18 @@ class SelectWorkTest(unittest.TestCase):
         path.write_text(json.dumps({"status": status, "failures": failures, "started_at": started_at}))
 
     def selected(self, item):
-        work, drops = select_work([item], self.prs, self.now)
+        work, drops = select_work([item], self.prs, self.now, REPOS)
         self.assertEqual(len(work) + len(drops), 1)
         return bool(work)
 
     def test_no_record_is_work(self):
         self.assertTrue(self.selected(work_item()))
+
+    def test_repo_the_config_does_not_list_is_dropped(self):
+        item = {**work_item(), "repo": "example-org/unlisted-repo"}
+        work, drops = select_work([item], self.prs, self.now, REPOS)
+        self.assertEqual(work, [])
+        self.assertEqual(drops, [(item, 'the config has no [repos."example-org/unlisted-repo"] table')])
 
     def test_record_at_this_head_and_kind(self):
         cases = [
@@ -628,7 +638,7 @@ class WriteRecordTest(unittest.TestCase):
                 write_record(prs, item, status, now)
                 self.assertEqual(json.loads(path.read_text()), want)
             # whooper-select reads the same record.
-            self.assertEqual(select_work([item], prs, second)[0], [])
+            self.assertEqual(select_work([item], prs, second, REPOS)[0], [])
 
     def test_stale_keeps_the_approval_done_recorded(self):
         with tempfile.TemporaryDirectory() as tmp:
