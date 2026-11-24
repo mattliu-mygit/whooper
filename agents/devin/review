@@ -26,9 +26,12 @@ jq -n --slurpfile user "$user_config" --arg hook "$root/hooks/tool-use-id.sh" '
 
 started="$(date +%s)"
 status=0
-# Devin Desktop sets ACP_BACKEND in its shells, and the CLI ignores its own login while it is set.
-env -u ACP_BACKEND devin -p --prompt-file "$1" --config "$run/devin-config.json" \
-  --model "$WHOOPER_DEVIN_REVIEW_MODEL" --permission-mode dangerous --respect-workspace-trust false \
+# Devin Desktop sets ACP_BACKEND and WINDSURF_EXT_HOST_PID in its shells. The CLI ignores its own
+# login while ACP_BACKEND is set, and its agent quits within seconds once the process named by
+# WINDSURF_EXT_HOST_PID has exited, as it does when Devin Desktop restarts or reloads.
+env -u ACP_BACKEND -u WINDSURF_EXT_HOST_PID devin -p --prompt-file "$1" \
+  --config "$run/devin-config.json" --model "$WHOOPER_DEVIN_REVIEW_MODEL" \
+  --permission-mode dangerous --respect-workspace-trust false \
   --export "$run/transcript.json" > "$run/stdout.log" 2> "$run/stderr.log" || status=$?
 
 if [[ -f "$run/transcript.json" ]]; then
