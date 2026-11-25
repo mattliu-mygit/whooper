@@ -24,6 +24,7 @@ from the user's config file (config_path), never from this code. The bin/ script
   whooper.py summary <run dir>                                                     -> the summary channel's text
   whooper.py skills <skills dir>                                                   -> {skill: content hash}
   whooper.py next-round [<Unix time the last round ended>]                         -> the next round's Unix time
+  whooper.py settings get | set <json>                                             -> settings JSON | saves the given ones
 """
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -32,8 +33,12 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import sys
+import tempfile
 import tomllib
+
+import tomlkit
 
 ROOT = Path(__file__).resolve().parent.parent
 MAX_FAILURES = 3
@@ -95,6 +100,8 @@ def xdg_dir(variable, default):
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 # whooper-run's schedule for each key the config's [schedule] leaves out.
 SCHEDULE_DEFAULTS = {"interval_minutes": 15, "start": "10:00", "end": "18:00", "days": ["mon", "tue", "wed", "thu", "fri"]}
+# whooper-poll's time limit for a poll run when the config's [poll] leaves out timeout_minutes.
+POLL_TIMEOUT_MINUTES = 10
 
 
 def read_schedule(config):
@@ -173,6 +180,78 @@ def check_schema(value, schema, where="the value"):
     if isinstance(value, list) and "items" in schema:
         for i, item in enumerate(value):
             check_schema(item, schema["items"], f"{where}[{i}]")
+
+
+def check_jobs(config):
+    """Fails unless each job in the config's [jobs] names an agent with a launcher for it,
+    agents/<agent>/<job>."""
+    for job, agent in config["jobs"].items():
+        if not (ROOT / "agents" / agent / job).exists():
+            raise SystemExit(f"whooper: [jobs] {job} names {agent!r}, which has no agents/{agent}/{job}")
+
+
+# The settings a settings form may edit, as a JSON Schema.
+SETTINGS_SCHEMA = ROOT / "schemas" / "settings.json"
+
+
+def read_settings(config):
+    """The config's values for the settings in SETTINGS_SCHEMA, with Whooper's defaults for what the
+    config leaves out, such as SCHEDULE_DEFAULTS. A setting with neither is left out."""
+    values = {**config, "schedule": {**SCHEDULE_DEFAULTS, **config.get("schedule", {})},
+              "poll": {"timeout_minutes": POLL_TIMEOUT_MINUTES, **config.get("poll", {})}}
+
+    def pick(value, schema):
+        # Only what the schema names, at every level: [agents.claude] budget_usd stays out.
+        if "properties" not in schema:
+            return value
+        return {key: pick(value[key], sub) for key, sub in schema["properties"].items() if key in value}
+
+    return pick(values, json.loads(SETTINGS_SCHEMA.read_text()))
+
+
+def write_settings(values):
+    """Saves values, part of the settings in SETTINGS_SCHEMA such as {"schedule": {"interval_minutes": 30}},
+    in the config file. Only the lines of those keys change, keeping their comments, and a table the file
+    lacks is added. Nothing is written unless the values fit the schema and the config as it would be
+    saved passes the checks Whooper runs when it starts."""
+    try:
+        check_schema(values, json.loads(SETTINGS_SCHEMA.read_text()), "settings")
+    except ValueError as e:
+        raise SystemExit(f"whooper-settings: {e}")
+
+    def merge(table, changes):
+        for key, value in changes.items():
+            if isinstance(value, dict):
+                if key not in table:
+                    table[key] = tomlkit.table()
+                merge(table[key], value)
+            # Setting a key rewrites its line, which drops comments inside a list, so a value that did
+            # not change keeps its line as it is.
+            elif table.get(key) != value:
+                table[key] = value
+
+    # A config that links into a dotfiles folder stays a link, and the file it names changes.
+    path = config_path().resolve()
+    if not path.exists():
+        raise SystemExit(f"whooper-settings: no config at {path}")
+    document = tomlkit.parse(path.read_text())
+    merge(document, values)
+    text = tomlkit.dumps(document)
+    merged = tomllib.loads(text)
+    read_schedule(merged)
+    check_jobs(merged)
+    # The new text goes to a temporary file beside the config, which then replaces it, so a failure
+    # leaves the old file whole. Nothing locks the file, so of two saves at the same moment the later
+    # one drops the other's change; add a lock if a running whooper-run starts saving settings too.
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w") as file:
+            file.write(text)
+        shutil.copymode(path, temporary)
+        os.replace(temporary, path)
+    except BaseException:
+        os.unlink(temporary)
+        raise
 
 
 def bot_list(bots, key):
@@ -756,9 +835,7 @@ def main(command, *args):
     if command == "env":
         config = load_config()
         # Each job runs on the agent [jobs] names, through its launcher agents/<agent>/<job>.
-        for job, agent in config["jobs"].items():
-            if not (ROOT / "agents" / agent / job).exists():
-                raise SystemExit(f"whooper: [jobs] {job} names {agent!r}, which has no agents/{agent}/{job}")
+        check_jobs(config)
         values = {
             "WHOOPER_CONFIG_DIR": config["dir"],
             "WHOOPER_STATE": xdg_dir("XDG_STATE_HOME", ".local/state"),
@@ -772,7 +849,7 @@ def main(command, *args):
             "WHOOPER_SLACKDUMP_WORKSPACE": config["slack"]["slackdump_workspace"],
             "WHOOPER_REVIEW_TIMEOUT_MINUTES": config["review"]["timeout_minutes"],
             # A poll run that hangs, such as on a request the network dropped, holds up the loop.
-            "WHOOPER_POLL_TIMEOUT_MINUTES": config.get("poll", {}).get("timeout_minutes", 10),
+            "WHOOPER_POLL_TIMEOUT_MINUTES": config.get("poll", {}).get("timeout_minutes", POLL_TIMEOUT_MINUTES),
             # The script whooper-run runs after each review, relative to the config's directory.
             "WHOOPER_NOTIFY": config["dir"] / config["schedule"]["notify"] if "notify" in config.get("schedule", {}) else "",
             **{f"WHOOPER_{job.upper()}_AGENT": agent for job, agent in config["jobs"].items()},
@@ -913,6 +990,17 @@ def main(command, *args):
         sys.stdout.write(summary_text(Path(args[0]).resolve()))
     elif command == "skills":
         print(json.dumps(skill_hashes(args[0])))
+    elif command == "settings":
+        if args == ("get",):
+            print(json.dumps(read_settings(load_config()), indent=2))
+        elif len(args) == 2 and args[0] == "set":
+            try:
+                values = json.loads(args[1])
+            except json.JSONDecodeError as e:
+                raise SystemExit(f"whooper-settings: the values are not JSON: {e}")
+            write_settings(values)
+        else:
+            raise SystemExit("usage: whooper-settings get | set <json>")
     elif command == "next-round":
         schedule = read_schedule(load_config())
         # A round starts interval_minutes after the last one ended, or at once when whooper-run starts.

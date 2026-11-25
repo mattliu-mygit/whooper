@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Prints or saves the settings that schemas/settings.json describes, the ones a settings form may
+# edit, in the config file:
+#
+#   whooper-settings get           prints their values as JSON, with Whooper's defaults for what the
+#                                  config leaves out
+#   whooper-settings set <json>    saves part of them, such as '{"schedule": {"interval_minutes": 30}}'
+#
+# set checks the values against the schema, and the config as it would be saved with the checks
+# Whooper runs when it starts, and only then rewrites the lines of those keys, keeping the file's
+# comments and order. On a failure it prints why and leaves the file as it was.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+exec "$root/lib/python" "$root/lib/whooper.py" settings "$@"

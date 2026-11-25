@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 from time import monotonic, sleep
+from unittest import mock
 
 from whooper import (REVIEW_WORDING, bot_list, check_schema, claude_shell_calls, classify, conversation,
                      devin_shell_calls, fill, main, next_round, pr_link, poll_items, read_asks, read_schedule,
@@ -1360,6 +1361,136 @@ class ConfigTest(unittest.TestCase):
         ]:
             with self.subTest(url):
                 self.assertEqual(bool(link.search(url)), matches)
+
+
+EXAMPLE = (ROOT / "examples" / "config.example.toml").read_text()
+
+
+class SettingsTest(unittest.TestCase):
+    """whooper.py settings, which bin/whooper-settings runs, on a config file in a throwaway folder."""
+
+    def use_config(self, text):
+        """Points WHOOPER_CONFIG at a new file holding text for the rest of the test."""
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        path = Path(folder.name) / "config.toml"
+        path.write_text(text)
+        self.enterContext(mock.patch.dict(os.environ, WHOOPER_CONFIG=str(path)))
+        return path
+
+    def settings(self, *args):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            main("settings", *args)
+        return out.getvalue()
+
+    def test_get_fills_in_whoopers_defaults(self):
+        # The test config has no [schedule] and no [poll], and budget_usd is not a form's setting.
+        self.assertEqual(json.loads(self.settings("get")), {
+            "schedule": {"interval_minutes": 15, "start": "10:00", "end": "18:00", "days": ["mon", "tue", "wed", "thu", "fri"]},
+            "poll": {"timeout_minutes": 10},
+            "jobs": {"review": "claude", "poll": "claude", "summary": "claude"},
+            "agents": {"claude": {"review_model": "review-model", "poll_model": "poll-model"},
+                       "devin": {"review_model": "devin-review-model", "poll_model": "devin-poll-model"}},
+            "review": {"timeout_minutes": 45, "skills": ["review-skill", "language-skill"]},
+        })
+
+    def test_each_job_offers_the_agents_with_a_launcher_for_it(self):
+        jobs = json.loads((ROOT / "schemas" / "settings.json").read_text())["properties"]["jobs"]["properties"]
+        for job, schema in jobs.items():
+            with self.subTest(job):
+                self.assertEqual(sorted(schema["enum"]), sorted(p.parent.name for p in (ROOT / "agents").glob(f"*/{job}")))
+
+    def test_set_changes_only_the_given_line_and_keeps_every_comment(self):
+        for values, old, new in [
+            ({"schedule": {"interval_minutes": 30}}, "interval_minutes = 15\n", "interval_minutes = 30\n"),
+            # The changed line keeps its own comment too.
+            ({"poll": {"timeout_minutes": 5}}, "timeout_minutes = 10 ", "timeout_minutes = 5 "),
+        ]:
+            with self.subTest(values):
+                path = self.use_config(EXAMPLE)
+                self.settings("set", json.dumps(values))
+                self.assertEqual(path.read_text(), EXAMPLE.replace(old, new))
+
+    def test_set_adds_a_missing_table(self):
+        path = self.use_config(CONFIG)
+        self.settings("set", '{"schedule": {"interval_minutes": 30}}')
+        self.assertEqual(path.read_text(), CONFIG + "\n[schedule]\ninterval_minutes = 30\n")
+        self.assertEqual(json.loads(self.settings("get"))["schedule"],
+                         {"interval_minutes": 30, "start": "10:00", "end": "18:00", "days": ["mon", "tue", "wed", "thu", "fri"]})
+
+    def test_saving_every_value_get_printed_changes_nothing(self):
+        # A form may send back every field, and rewriting an unchanged value could reformat its line.
+        path = self.use_config(EXAMPLE.replace('days = ["mon", "tue", "wed", "thu", "fri"]',
+                                               'days = [\n  "mon",  # standup\n  "tue", "wed", "thu", "fri",\n]'))
+        before = path.read_bytes()
+        values = self.settings("get")
+        check_schema(json.loads(values), json.loads((ROOT / "schemas" / "settings.json").read_text()))
+        self.settings("set", values)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_bad_values_are_rejected_and_leave_the_file_unchanged(self):
+        # (case, the values set is given, part of the reason it prints)
+        for name, text, why in [
+            ("no wait between rounds", '{"schedule": {"interval_minutes": 0}}', "interval_minutes is below 1"),
+            ("an interval in quotes", '{"schedule": {"interval_minutes": "30"}}', "interval_minutes is not of type integer"),
+            ("an unknown key", '{"schedule": {"interval": 30}}', "unexpected interval"),
+            ("a setting the form does not edit", '{"slack": {"ask_channel": "C0000000009"}}', "unexpected slack"),
+            ("an unknown day", '{"schedule": {"days": ["mon", "tues"]}}', "'tues'"),
+            ("an unknown agent", '{"jobs": {"review": "nobody"}}', "'nobody'"),
+            ("an end before the start", '{"schedule": {"start": "18:00", "end": "10:00"}}', "an end after its start"),
+            # The config's start is 10:00, and the check reads the config as it would be saved.
+            ("an end before the config's start", '{"schedule": {"end": "09:00"}}', "an end after its start"),
+            ("a time that is not 24-hour", '{"schedule": {"start": "9:30am"}}', "24-hour time"),
+            ("not JSON", '{"schedule": {interval_minutes: 30}}', "not JSON"),
+        ]:
+            with self.subTest(name):
+                path = self.use_config(EXAMPLE)
+                with self.assertRaises(SystemExit) as caught:
+                    self.settings("set", text)
+                self.assertIn(why, str(caught.exception))
+                self.assertEqual(path.read_bytes(), EXAMPLE.encode())
+                self.assertEqual([p.name for p in path.parent.iterdir()], ["config.toml"])
+
+    def test_set_runs_the_jobs_check_on_the_config_as_it_would_be_saved(self):
+        broken = EXAMPLE.replace('[jobs]\nreview = "devin"', '[jobs]\nreview = "nobody"')
+        path = self.use_config(broken)
+        with self.assertRaises(SystemExit) as caught:
+            self.settings("set", '{"schedule": {"interval_minutes": 30}}')
+        self.assertIn("agents/nobody/review", str(caught.exception))
+        self.assertEqual(path.read_text(), broken)
+        self.settings("set", '{"jobs": {"review": "claude"}}')
+        self.assertEqual(path.read_text(), EXAMPLE.replace('[jobs]\nreview = "devin"', '[jobs]\nreview = "claude"'))
+
+    def test_set_writes_through_a_link_and_keeps_the_files_mode(self):
+        # A config kept in a dotfiles folder is often a link to it.
+        path = self.use_config(EXAMPLE)
+        target = path.with_name("dotfiles-config.toml")
+        path.rename(target)
+        path.symlink_to(target)
+        target.chmod(0o640)
+        self.settings("set", '{"schedule": {"interval_minutes": 30}}')
+        self.assertTrue(path.is_symlink())
+        self.assertEqual(target.read_text(), EXAMPLE.replace("interval_minutes = 15\n", "interval_minutes = 30\n"))
+        self.assertEqual(target.stat().st_mode & 0o777, 0o640)
+
+    def test_a_failed_write_leaves_the_old_file_and_no_temporary_file(self):
+        path = self.use_config(EXAMPLE)
+        with mock.patch("os.replace", side_effect=OSError("disk full")), self.assertRaises(OSError):
+            self.settings("set", '{"schedule": {"interval_minutes": 30}}')
+        self.assertEqual(path.read_text(), EXAMPLE)
+        self.assertEqual([p.name for p in path.parent.iterdir()], ["config.toml"])
+
+    def test_bin_whooper_settings_runs_the_command(self):
+        path = self.use_config(EXAMPLE)
+        command = [str(ROOT / "bin" / "whooper-settings")]
+        got = subprocess.run(command + ["get"], capture_output=True, text=True, timeout=60)
+        self.assertEqual((got.returncode, json.loads(got.stdout)["schedule"]["notify"]), (0, "notify.sh"))
+        bad = subprocess.run(command + ["set", '{"poll": {"timeout_minutes": 0}}'], capture_output=True, text=True,
+                             timeout=60)
+        self.assertEqual(bad.returncode, 1)
+        self.assertIn("timeout_minutes is below 1", bad.stderr)
+        self.assertEqual(path.read_text(), EXAMPLE)
 
 
 class SkillHashesTest(unittest.TestCase):

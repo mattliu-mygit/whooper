@@ -83,6 +83,17 @@ directory instead.
 
 Tests: `lib/python -m unittest discover -s lib`. They run on a made-up config and never read yours.
 
+## Change settings
+
+`bin/whooper-settings get` prints the settings `schemas/settings.json` describes as JSON, with
+Whooper's defaults for what the config leaves out. They are the ones a settings form may edit:
+`[schedule]`, `[poll] timeout_minutes`, `[jobs]`, each agent's models, and `[review]`
+`timeout_minutes` and `skills`. `bin/whooper-settings set '{"schedule": {"interval_minutes": 30}}'`
+saves part of them. It checks the values against the schema, and the config as it would be saved
+with the checks Whooper runs when it starts, and only then rewrites the lines of those keys,
+keeping the file's comments. On a failure it prints why and leaves the file as it was. A change
+applies from the next round, except `notify`, which whooper-run reads only when it starts.
+
 ## What counts as work
 
 `lib/whooper.py` applies the rules. `prompts/poll.md` is the only judgment, and it covers Slack

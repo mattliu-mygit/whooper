@@ -1,0 +1,116 @@
+{
+  "title": "Whooper settings",
+  "description": "The settings in Whooper's config.toml that a settings form may edit. bin/whooper-settings prints and saves them.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schedule": {
+      "title": "Polling",
+      "description": "When bin/whooper-run polls: a round starts the interval after the last one ended, at or after the start and before the end, on the chosen days.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "interval_minutes": {
+          "title": "Poll every (minutes)",
+          "description": "Minutes from the end of one round to the start of the next. Each poll runs a model.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "start": {
+          "title": "Start",
+          "description": "The local time of day rounds start from, as a 24-hour time such as 10:00.",
+          "type": "string"
+        },
+        "end": {
+          "title": "End",
+          "description": "The local time of day from which no round starts, such as 18:00. It must be after the start; a round that starts before it may finish after it.",
+          "type": "string"
+        },
+        "days": {
+          "title": "Days",
+          "description": "The days rounds run on.",
+          "type": "array",
+          "items": { "enum": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] }
+        },
+        "notify": {
+          "title": "Notification script",
+          "description": "A script whooper-run runs as <script> <title> <message> when a review finishes or fails, such as one that shows a macOS notification. Relative to the config file's folder.",
+          "type": "string"
+        }
+      }
+    },
+    "poll": {
+      "title": "Poll",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "timeout_minutes": {
+          "title": "Stop a poll after (minutes)",
+          "description": "whooper-poll stops a poll run that runs longer, and the next poll reads the same posts again.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "jobs": {
+      "title": "Agents",
+      "description": "The agent each job runs on. agents/ has a folder per agent with a launcher per job it can run.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "review": { "title": "Review agent", "enum": ["claude", "devin"] },
+        "poll": { "title": "Poll agent", "description": "Reads the ask channel's posts and picks the review asks.", "enum": ["claude", "devin"] },
+        "summary": {
+          "title": "Summary agent",
+          "description": "Claude schedules the summary in the summary channel; Devin writes it to summary.md in the run's folder.",
+          "enum": ["claude", "devin"]
+        }
+      }
+    },
+    "agents": {
+      "title": "Models",
+      "description": "Each agent's models. Model names are the agent's own: Devin's names add the effort level.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "claude": {
+          "title": "Claude",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "review_model": { "title": "Review model", "type": "string" },
+            "poll_model": { "title": "Poll model", "description": "Also sends the summary.", "type": "string" }
+          }
+        },
+        "devin": {
+          "title": "Devin",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "review_model": { "title": "Review model", "type": "string" },
+            "poll_model": { "title": "Poll model", "type": "string" }
+          }
+        }
+      }
+    },
+    "review": {
+      "title": "Review runs",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "timeout_minutes": {
+          "title": "Stop a review after (minutes)",
+          "description": "whooper-review stops a review that runs longer, and counts it as a failure.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "skills": {
+          "title": "Review skills",
+          "description": "The skills each review run loads, by folder name in ~/.claude/skills.",
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}
