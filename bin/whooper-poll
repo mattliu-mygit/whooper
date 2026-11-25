@@ -24,7 +24,22 @@ else
   oldest="$((started - 86400))"
 fi
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+agent_group=""
+watchdog_pid=""
+cleanup() {
+  local status=$?
+  if [[ -n "$agent_group" ]]; then
+    kill -TERM -- "-$agent_group" 2>/dev/null || true
+    wait "$agent_group" 2>/dev/null || true
+  fi
+  if [[ -n "$watchdog_pid" ]]; then
+    kill "$watchdog_pid" 2>/dev/null || true
+  fi
+  rm -rf "$work"
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM HUP
 
 die() {
   echo "whooper-poll: $*" >&2
@@ -45,8 +60,25 @@ python3 -I "$root/lib/whooper.py" posts "$work/slack/$WHOOPER_ASK_CHANNEL.json" 
   printf '\nuser_id: %s\n\nposts:\n\n' "$WHOOPER_SLACK_USER"
   cat "$work/posts.json"
 } > "$poll/$stamp.prompt.md"
-"$root/agents/$WHOOPER_POLL_AGENT/poll" "$poll/$stamp.prompt.md" "$poll/$stamp.answer.json" "$poll/$stamp" ||
-  die "the $WHOOPER_POLL_AGENT poll run failed; see $poll/$stamp.*"
+# As in whooper-review, the launcher starts in a session of its own, so the run and everything it
+# starts form one process group that the time limit and the cleanup can stop. Without the limit, a
+# request the network dropped held the loop for 93 minutes on Nov 24, 2026.
+python3 -I -c 'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
+  "$root/agents/$WHOOPER_POLL_AGENT/poll" "$poll/$stamp.prompt.md" "$poll/$stamp.answer.json" "$poll/$stamp" < /dev/null &
+agent_group=$!
+python3 -I -c 'import os, signal, sys, time
+time.sleep(float(sys.argv[1]))
+open(sys.argv[2], "w").close()
+os.killpg(int(sys.argv[3]), signal.SIGTERM)' "$((WHOOPER_POLL_TIMEOUT_MINUTES * 60))" "$work/timed-out" "$agent_group" &
+watchdog_pid=$!
+# set -e would stop the script at a failed wait, before it says where the run's errors are.
+agent_exit=0
+wait "$agent_group" || agent_exit=$?
+kill "$watchdog_pid" 2>/dev/null || true
+watchdog_pid=""
+[[ ! -e "$work/timed-out" ]] ||
+  die "the $WHOOPER_POLL_AGENT poll run passed its $WHOOPER_POLL_TIMEOUT_MINUTES-minute limit; see $poll/$stamp.*"
+(( agent_exit == 0 )) || die "the $WHOOPER_POLL_AGENT poll run failed; see $poll/$stamp.*"
 python3 -I "$root/lib/whooper.py" check "$root/schemas/slack-asks.json" "$poll/$stamp.answer.json"
 python3 -I "$root/lib/whooper.py" asks "$work/posts.json" "$poll/$stamp.answer.json" "$oldest" > "$work/asks.json"
 # lib/whooper.py passed only plain URLs of PRs in the configured orgs that the asking post links.

@@ -1154,6 +1154,18 @@ class ConfigTest(unittest.TestCase):
                      "export WHOOPER_DEVIN_REVIEW_MODEL=devin-review-model\n"]:
             self.assertIn(line, env)
 
+    def test_polls_stop_after_ten_minutes_unless_the_config_says_otherwise(self):
+        self.assertIn("WHOOPER_POLL_TIMEOUT_MINUTES=10\n", self.command("env"))
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.toml"
+            config.write_text(CONFIG + "\n[poll]\ntimeout_minutes = 3\n")
+            os.environ["WHOOPER_CONFIG"], test_config = str(config), os.environ["WHOOPER_CONFIG"]
+            try:
+                env = self.command("env")
+            finally:
+                os.environ["WHOOPER_CONFIG"] = test_config
+        self.assertIn("WHOOPER_POLL_TIMEOUT_MINUTES=3\n", env)
+
     def test_a_job_on_an_agent_without_a_launcher_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "config.toml"

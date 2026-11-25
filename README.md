@@ -136,7 +136,9 @@ into the PR record and the summary. It is the run's judgment, and Whooper never 
 
 The poll's run gets the channel's posts in its prompt and no way to act: Claude gets no tools, and
 Devin starts in an empty directory in accept-edits mode, where anything but writing its answer
-needs an approval nobody gives. slackdump only reads. Review runs have no GitHub
+needs an approval nobody gives. A poll run that passes `[poll] timeout_minutes` (10 by default) is
+stopped with everything it started, and the cursor stays put, so the next poll reads the same posts.
+slackdump only reads. Review runs have no GitHub
 login and every Slack write denied, and whooper-review refuses to run without `--dry-run`. The summary run
 may call only `slack_schedule_message`, and `hooks/slack-guard.sh` blocks any other Slack call,
 any other channel, a thread, a changed text or time, and a second summary.

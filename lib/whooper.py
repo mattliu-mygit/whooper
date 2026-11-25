@@ -725,6 +725,8 @@ def main(command, *args):
             "WHOOPER_SUMMARY_CHANNEL_NAME": config["slack"]["summary_channel_name"],
             "WHOOPER_SLACKDUMP_WORKSPACE": config["slack"]["slackdump_workspace"],
             "WHOOPER_REVIEW_TIMEOUT_MINUTES": config["review"]["timeout_minutes"],
+            # A poll run that hangs, such as on a request the network dropped, holds up the loop.
+            "WHOOPER_POLL_TIMEOUT_MINUTES": config.get("poll", {}).get("timeout_minutes", 10),
             **{f"WHOOPER_{job.upper()}_AGENT": agent for job, agent in config["jobs"].items()},
         }
         for name, value in values.items():
