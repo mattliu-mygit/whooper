@@ -134,7 +134,7 @@ must fit `schemas/findings.json`. A run that passes `[review] timeout_minutes` i
 whooper-review exits it stops the run and every process the run started.
 
 `agents/claude/review` runs `claude -p`, which returns the findings as structured output, and
-reports the run's cost in dollars, capped by `[agents.claude] budget_usd`. `agents/devin/review`
+reports the run's cost in dollars, capped by `[agents.claude] budget_usd` when the config sets one. `agents/devin/review`
 runs `devin -p` in `dangerous` permission mode, so no tool call waits for an approval; the run
 writes `findings.json` itself, and the cost line is in ACUs, Devin's billing unit. Its config for
 the run, saved as `devin-config.json`, is your `~/.config/devin/config.json` plus Whooper's hook and

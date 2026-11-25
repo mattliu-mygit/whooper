@@ -18,10 +18,11 @@ slack="mcp__claude_ai_Slack__slack"
 settings="$(jq -cn --arg hook "$root/hooks/tool-use-id.sh" \
   '[{matcher: "Bash", hooks: [{type: "command", command: $hook}]}] as $bash | {hooks: {PostToolUse: $bash, PostToolUseFailure: $bash}}')"
 status=0
+# With no [agents.claude] budget_usd, the run has no spending limit.
 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude -p "$(<"$1")" \
   --model "$WHOOPER_CLAUDE_REVIEW_MODEL" \
   --settings "$settings" \
-  --permission-mode auto --permission-prompts none --max-budget-usd "$WHOOPER_CLAUDE_BUDGET_USD" \
+  --permission-mode auto --permission-prompts none ${WHOOPER_CLAUDE_BUDGET_USD:+--max-budget-usd "$WHOOPER_CLAUDE_BUDGET_USD"} \
   --add-dir "$run" \
   --disallowedTools "${slack}_add_reaction ${slack}_create_canvas ${slack}_update_canvas ${slack}_schedule_message ${slack}_send_message_draft" \
   --json-schema "$(<"$root/schemas/findings.json")" \

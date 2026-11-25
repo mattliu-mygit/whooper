@@ -1300,17 +1300,28 @@ class ConfigTest(unittest.TestCase):
                      "export WHOOPER_DEVIN_REVIEW_MODEL=devin-review-model\n"]:
             self.assertIn(line, env)
 
-    def test_polls_stop_after_ten_minutes_unless_the_config_says_otherwise(self):
-        self.assertIn("WHOOPER_POLL_TIMEOUT_MINUTES=10\n", self.command("env"))
+    def test_a_poll_limit_under_five_minutes_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "config.toml"
             config.write_text(CONFIG + "\n[poll]\ntimeout_minutes = 3\n")
             os.environ["WHOOPER_CONFIG"], test_config = str(config), os.environ["WHOOPER_CONFIG"]
             try:
+                with self.assertRaises(SystemExit):
+                    self.command("env")
+            finally:
+                os.environ["WHOOPER_CONFIG"] = test_config
+
+    def test_polls_stop_after_ten_minutes_unless_the_config_says_otherwise(self):
+        self.assertIn("WHOOPER_POLL_TIMEOUT_MINUTES=10\n", self.command("env"))
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.toml"
+            config.write_text(CONFIG + "\n[poll]\ntimeout_minutes = 7\n")
+            os.environ["WHOOPER_CONFIG"], test_config = str(config), os.environ["WHOOPER_CONFIG"]
+            try:
                 env = self.command("env")
             finally:
                 os.environ["WHOOPER_CONFIG"] = test_config
-        self.assertIn("WHOOPER_POLL_TIMEOUT_MINUTES=3\n", env)
+        self.assertIn("WHOOPER_POLL_TIMEOUT_MINUTES=7\n", env)
 
     def test_a_job_on_an_agent_without_a_launcher_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1366,6 +1377,30 @@ class ConfigTest(unittest.TestCase):
 EXAMPLE = (ROOT / "examples" / "config.example.toml").read_text()
 
 
+class ClaudeLauncherTest(unittest.TestCase):
+    """agents/claude/review with a fake claude on PATH that records its arguments."""
+
+    def arguments(self, **env):
+        with tempfile.TemporaryDirectory() as tmp:
+            fakes = Path(tmp) / "bin"
+            fakes.mkdir()
+            (fakes / "claude").write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$ARGS_FILE"\n')
+            (fakes / "claude").chmod(0o755)
+            prompt, run, args = Path(tmp) / "prompt.md", Path(tmp) / "run", Path(tmp) / "args"
+            prompt.write_text("Review this PR.")
+            run.mkdir()
+            base = {key: value for key, value in os.environ.items() if key != "WHOOPER_CLAUDE_BUDGET_USD"}
+            subprocess.run([str(ROOT / "agents" / "claude" / "review"), str(prompt)], cwd=tmp, capture_output=True,
+                           timeout=60, env={**base, "PATH": f"{fakes}:{os.environ['PATH']}", "ARGS_FILE": str(args),
+                                            "WHOOPER_RUN": str(run), "WHOOPER_CLAUDE_REVIEW_MODEL": "review-model", **env})
+            return args.read_text().splitlines()
+
+    def test_a_review_has_no_spending_limit_unless_the_config_sets_one(self):
+        self.assertNotIn("--max-budget-usd", self.arguments())
+        args = self.arguments(WHOOPER_CLAUDE_BUDGET_USD="15")
+        self.assertEqual(args[args.index("--max-budget-usd") + 1], "15")
+
+
 class SettingsTest(unittest.TestCase):
     """whooper.py settings, which bin/whooper-settings runs, on a config file in a throwaway folder."""
 
@@ -1385,12 +1420,12 @@ class SettingsTest(unittest.TestCase):
         return out.getvalue()
 
     def test_get_fills_in_whoopers_defaults(self):
-        # The test config has no [schedule] and no [poll], and budget_usd is not a form's setting.
+        # The test config has no [schedule] and no [poll].
         self.assertEqual(json.loads(self.settings("get")), {
             "schedule": {"interval_minutes": 15, "start": "10:00", "end": "18:00", "days": ["mon", "tue", "wed", "thu", "fri"]},
             "poll": {"timeout_minutes": 10},
             "jobs": {"review": "claude", "poll": "claude", "summary": "claude"},
-            "agents": {"claude": {"review_model": "review-model", "poll_model": "poll-model"},
+            "agents": {"claude": {"review_model": "review-model", "poll_model": "poll-model", "budget_usd": 15},
                        "devin": {"review_model": "devin-review-model", "poll_model": "devin-poll-model"}},
             "review": {"timeout_minutes": 45, "skills": ["review-skill", "language-skill"]},
         })
@@ -1411,6 +1446,13 @@ class SettingsTest(unittest.TestCase):
                 path = self.use_config(EXAMPLE)
                 self.settings("set", json.dumps(values))
                 self.assertEqual(path.read_text(), EXAMPLE.replace(old, new))
+
+    def test_a_claude_budget_is_optional_and_can_be_set(self):
+        # With no budget_usd, as in the example config, a Claude review has no spending limit.
+        self.use_config(EXAMPLE)
+        self.assertNotIn("budget_usd", json.loads(self.settings("get"))["agents"]["claude"])
+        self.settings("set", json.dumps({"agents": {"claude": {"budget_usd": 7.5}}}))
+        self.assertEqual(json.loads(self.settings("get"))["agents"]["claude"]["budget_usd"], 7.5)
 
     def test_set_adds_a_missing_table(self):
         path = self.use_config(CONFIG)
@@ -1434,6 +1476,9 @@ class SettingsTest(unittest.TestCase):
         for name, text, why in [
             ("no wait between rounds", '{"schedule": {"interval_minutes": 0}}', "interval_minutes is below 1"),
             ("an interval in quotes", '{"schedule": {"interval_minutes": "30"}}', "interval_minutes is not of type integer"),
+            # A poll takes 2 to 3 minutes, so a shorter limit would stop every poll.
+            ("a poll limit under 5 minutes", '{"poll": {"timeout_minutes": 4}}', "timeout_minutes is below 5"),
+            ("a budget of nothing", '{"agents": {"claude": {"budget_usd": 0}}}', "budget_usd is below 1"),
             ("an unknown key", '{"schedule": {"interval": 30}}', "unexpected interval"),
             ("a setting the form does not edit", '{"slack": {"ask_channel": "C0000000009"}}', "unexpected slack"),
             ("an unknown day", '{"schedule": {"days": ["mon", "tues"]}}', "'tues'"),
@@ -1489,7 +1534,7 @@ class SettingsTest(unittest.TestCase):
         bad = subprocess.run(command + ["set", '{"poll": {"timeout_minutes": 0}}'], capture_output=True, text=True,
                              timeout=60)
         self.assertEqual(bad.returncode, 1)
-        self.assertIn("timeout_minutes is below 1", bad.stderr)
+        self.assertIn("timeout_minutes is below 5", bad.stderr)
         self.assertEqual(path.read_text(), EXAMPLE)
 
 

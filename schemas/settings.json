@@ -46,9 +46,9 @@
       "properties": {
         "timeout_minutes": {
           "title": "Stop a poll after (minutes)",
-          "description": "whooper-poll stops a poll run that runs longer, and the next poll reads the same posts again.",
+          "description": "whooper-poll stops a poll run that runs longer, and the next poll reads the same posts again. At least 5: a poll takes 2 to 3 minutes.",
           "type": "integer",
-          "minimum": 1
+          "minimum": 5
         }
       }
     },
@@ -79,7 +79,8 @@
           "additionalProperties": false,
           "properties": {
             "review_model": { "title": "Review model", "type": "string" },
-            "poll_model": { "title": "Poll model", "description": "Also sends the summary.", "type": "string" }
+            "poll_model": { "title": "Poll model", "description": "Also sends the summary.", "type": "string" },
+            "budget_usd": { "title": "Most one review may spend (USD)", "description": "Leave out for no limit.", "type": "number", "minimum": 1 }
           }
         },
         "devin": {

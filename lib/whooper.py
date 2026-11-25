@@ -160,13 +160,13 @@ def check_schema(value, schema, where="the value"):
     """Raises ValueError at the first place value breaks schema. Covers the JSON Schema keywords
     Whooper's schemas use: type, enum, minimum, properties, required, additionalProperties, and items."""
     kind = schema.get("type")
-    types = {"object": dict, "array": list, "string": str, "integer": int, "boolean": bool}
-    # Python's True is also an int, but JSON's true is not an integer.
-    if kind and (not isinstance(value, types[kind]) or (kind == "integer" and isinstance(value, bool))):
+    types = {"object": dict, "array": list, "string": str, "integer": int, "number": (int, float), "boolean": bool}
+    # Python's True is also an int, but JSON's true is not a number.
+    if kind and (not isinstance(value, types[kind]) or (kind in ("integer", "number") and isinstance(value, bool))):
         raise ValueError(f"{where} is not of type {kind}")
     if "enum" in schema and value not in schema["enum"]:
         raise ValueError(f"{where} is {value!r}, not one of {schema['enum']}")
-    if "minimum" in schema and isinstance(value, int) and value < schema["minimum"]:
+    if "minimum" in schema and isinstance(value, (int, float)) and not isinstance(value, bool) and value < schema["minimum"]:
         raise ValueError(f"{where} is below {schema['minimum']}")
     if isinstance(value, dict):
         properties = schema.get("properties", {})
@@ -201,7 +201,7 @@ def read_settings(config):
               "poll": {"timeout_minutes": POLL_TIMEOUT_MINUTES, **config.get("poll", {})}}
 
     def pick(value, schema):
-        # Only what the schema names, at every level: [agents.claude] budget_usd stays out.
+        # Only what the schema names, at every level.
         if "properties" not in schema:
             return value
         return {key: pick(value[key], sub) for key, sub in schema["properties"].items() if key in value}
@@ -836,6 +836,10 @@ def main(command, *args):
         config = load_config()
         # Each job runs on the agent [jobs] names, through its launcher agents/<agent>/<job>.
         check_jobs(config)
+        poll_timeout = config.get("poll", {}).get("timeout_minutes", POLL_TIMEOUT_MINUTES)
+        # A poll takes 2 to 3 minutes, so a shorter limit would stop every poll.
+        if type(poll_timeout) is not int or poll_timeout < 5:
+            raise SystemExit(f"whooper: [poll] timeout_minutes takes a whole number of minutes, at least 5; see {config_path()}")
         values = {
             "WHOOPER_CONFIG_DIR": config["dir"],
             "WHOOPER_STATE": xdg_dir("XDG_STATE_HOME", ".local/state"),
@@ -849,7 +853,7 @@ def main(command, *args):
             "WHOOPER_SLACKDUMP_WORKSPACE": config["slack"]["slackdump_workspace"],
             "WHOOPER_REVIEW_TIMEOUT_MINUTES": config["review"]["timeout_minutes"],
             # A poll run that hangs, such as on a request the network dropped, holds up the loop.
-            "WHOOPER_POLL_TIMEOUT_MINUTES": config.get("poll", {}).get("timeout_minutes", POLL_TIMEOUT_MINUTES),
+            "WHOOPER_POLL_TIMEOUT_MINUTES": poll_timeout,
             # The script whooper-run runs after each review, relative to the config's directory.
             "WHOOPER_NOTIFY": config["dir"] / config["schedule"]["notify"] if "notify" in config.get("schedule", {}) else "",
             **{f"WHOOPER_{job.upper()}_AGENT": agent for job, agent in config["jobs"].items()},
