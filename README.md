@@ -11,7 +11,9 @@ is not turned on yet. `bin/whooper-run` repeats all of this on the schedule the 
 Whooper needs `gh` logged in, [slackdump](https://github.com/rusq/slackdump) logged in to the
 Slack workspace (`slackdump workspace new <name>`, through a browser), the CLI of each agent the
 config's `[jobs]` names logged in (`devin auth login`; `claude`, whose summary uses the claude.ai
-Slack connector), `jq`, `git`, `docker`, and Python 3.11 or later as `python3`.
+Slack connector), `jq`, `git`, `docker`, and [uv](https://docs.astral.sh/uv/). The scripts run Python
+through `lib/python`, which has uv supply Python 3.11 or later and the packages `lib/whooper.py`
+names, at the versions `lib/whooper.py.lock` pins; the first run downloads what is missing.
 
 1. Copy `examples/config.example.toml` to `~/.config/whooper/config.toml` and fill it in. Everything
    that identifies you, your company, or your repos lives there: your GitHub login and name, the
@@ -79,7 +81,7 @@ it, and its only Slack call, `slack_schedule_message`, is pinned by `hooks/slack
 composed text, channel, and time. Devin cannot reach Slack, so it writes `summary.md` in the run
 directory instead.
 
-Tests: `python3 -I -m unittest discover -s lib`. They run on a made-up config and never read yours.
+Tests: `lib/python -m unittest discover -s lib`. They run on a made-up config and never read yours.
 
 ## What counts as work
 

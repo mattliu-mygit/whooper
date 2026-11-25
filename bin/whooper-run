@@ -15,7 +15,7 @@
 set -uo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-eval "$(python3 -I "$root/lib/whooper.py" env)"
+eval "$("$root/lib/python" "$root/lib/whooper.py" env)"
 items="$WHOOPER_STATE/items"
 lock="$WHOOPER_STATE/run.lock"
 mkdir -p "$items"
@@ -49,7 +49,7 @@ trap 'exit 130' INT TERM HUP
 ended=""
 while true; do
   # lib/whooper.py reads [schedule] each time, so a change applies from the next round.
-  next="$(python3 -I "$root/lib/whooper.py" next-round ${ended:+"$ended"})" || exit 1
+  next="$("$root/lib/python" "$root/lib/whooper.py" next-round ${ended:+"$ended"})" || exit 1
   # sleep counts only time the computer is awake, so one long sleep would start the round late by
   # however long a laptop slept. Naps of at most a minute, each followed by a look at the clock,
   # start a round that came due during sleep within a minute of waking.

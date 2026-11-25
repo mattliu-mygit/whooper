@@ -12,7 +12,8 @@ set -euo pipefail
 # variable's 1, so every failure here blocks.
 trap 'status=$?; ((status == 0)) || exit 2' EXIT
 
-eval "$(python3 -I "$(dirname "$0")/../lib/whooper.py" env)"
+root="$(cd "$(dirname "$0")/.." && pwd)"
+eval "$("$root/lib/python" "$root/lib/whooper.py" env)"
 input="$(cat)"
 
 deny() {

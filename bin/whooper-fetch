@@ -5,7 +5,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-eval "$(python3 -I "$root/lib/whooper.py" env)"
+eval "$("$root/lib/python" "$root/lib/whooper.py" env)"
 out="$WHOOPER_STATE/poll/github.json"
 mkdir -p "$WHOOPER_STATE/poll"
 

@@ -21,7 +21,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-eval "$(python3 -I "$root/lib/whooper.py" env)"
+eval "$("$root/lib/python" "$root/lib/whooper.py" env)"
 data="$WHOOPER_STATE"
 usage="usage: whooper-review <work-item.json> --dry-run [--as-of <time>]"
 
@@ -49,14 +49,14 @@ done
 [[ -f "$item" ]] || die "$usage"
 [[ "$dry_run" == true ]] || die "a live run has no way to add :eyes: to its ask yet; pass --dry-run"
 if [[ -n "$as_of" ]] &&
-  ! python3 -I -c 'import datetime, sys; assert datetime.datetime.fromisoformat(sys.argv[1]).tzinfo' "$as_of" 2>/dev/null; then
+  ! "$root/lib/python" -c 'import datetime, sys; assert datetime.datetime.fromisoformat(sys.argv[1]).tzinfo' "$as_of" 2>/dev/null; then
   die "--as-of takes an ISO 8601 time with a zone, such as 2031-01-02T03:04:05Z"
 fi
 IFS=$'\t' read -r repo pr head_sha base_ref kind source tagged reason < <(
   jq -r '[.repo, .pr, .head_sha, .base_ref, .kind, .source, (.slack.tagged_user | tostring), .reason] | @tsv' "$item")
 # Sets WHOOPER_REPO_CLONE, WHOOPER_REPO_SETUP, and WHOOPER_REPO_TEARDOWN, or fails for a repo the
 # config does not list.
-eval "$(python3 -I "$root/lib/whooper.py" repo "$repo")"
+eval "$("$root/lib/python" "$root/lib/whooper.py" repo "$repo")"
 core="$WHOOPER_REPO_CLONE"
 [[ -d "$core/.git" ]] || die "no clone of $repo at $core; see README.md"
 [[ "$kind" == first_review ]] || die "re-checks come in phase 4"
@@ -104,7 +104,7 @@ cleanup() {
   done
   rm -rf "$work" "$run/tmp"
   if [[ "$finished" != true ]]; then
-    python3 -I "$root/lib/whooper.py" record "$data" "$item" failed || true
+    "$root/lib/python" "$root/lib/whooper.py" record "$data" "$item" failed || true
   fi
   rm -rf "$lock"
   exit "$status"
@@ -113,7 +113,7 @@ trap cleanup EXIT
 trap 'exit 130' INT TERM HUP
 
 mkdir -p "$run/tmp"
-python3 -I "$root/lib/whooper.py" record "$data" "$item" running
+"$root/lib/python" "$root/lib/whooper.py" record "$data" "$item" running
 
 git -C "$core" fetch --quiet --no-write-fetch-head origin \
   "$head_sha:refs/whooper/$run_id/head" "$base_ref:refs/whooper/$run_id/base"
@@ -123,14 +123,14 @@ git -C "$core" worktree add --quiet --detach "$run/head" "$head_sha"
 git -C "$core" worktree add --quiet --detach "$run/base" "$merge_base"
 # skills holds a content hash of every skill the run can load, so a finding traces to the skill version behind it.
 jq --arg run_id "$run_id" --arg merge_base "$merge_base" --arg as_of "$as_of" --arg agent "$WHOOPER_REVIEW_AGENT" \
-  --argjson skills "$(python3 -I "$root/lib/whooper.py" skills "$HOME/.claude/skills")" \
+  --argjson skills "$("$root/lib/python" "$root/lib/whooper.py" skills "$HOME/.claude/skills")" \
   '. + {run_id: $run_id, merge_base: $merge_base, as_of: (if $as_of == "" then null else $as_of end), dry_run: true,
         agent: $agent, skills: $skills}' \
   "$item" > "$run/run.json"
 
 if gh api graphql -F query=@"$root/queries/conversation.graphql" \
   -f owner="${repo%/*}" -f name="${repo#*/}" -F number="$pr" > "$work/conversation.json" &&
-  python3 -I "$root/lib/whooper.py" conversation "$work/conversation.json" ${as_of:+"$as_of"} > "$work/github.json"; then
+  "$root/lib/python" "$root/lib/whooper.py" conversation "$work/conversation.json" ${as_of:+"$as_of"} > "$work/github.json"; then
   mv "$work/github.json" "$run/github.json"
   github="$run/github.json${as_of:+, which holds only what existed before $as_of}"
 else
@@ -160,7 +160,7 @@ if [[ "$source" == slack_ask && "$tagged" == false ]]; then
 fi
 # The prompt stays in the run directory as a record of what the run was told.
 {
-  python3 -I "$root/lib/whooper.py" prompt review "$repo" "$WHOOPER_REVIEW_AGENT"
+  "$root/lib/python" "$root/lib/whooper.py" prompt review "$repo" "$WHOOPER_REVIEW_AGENT"
   cat <<EOF
 
 ## This run
@@ -180,12 +180,12 @@ EOF
 (
   cd "$run/head"
   exec env GH_TOKEN=disabled GIT_SSH_COMMAND=false GIT_TERMINAL_PROMPT=0 TMPDIR="$run/tmp" \
-    python3 -I -c 'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
+    "$root/lib/python" -c 'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
     "$root/agents/$WHOOPER_REVIEW_AGENT/review" "$run/prompt.md" < /dev/null
 ) &
 # Waiting on a background run lets an interrupt reach the cleanup at once.
 agent_group=$!
-python3 -I -c 'import os, signal, sys, time
+"$root/lib/python" -c 'import os, signal, sys, time
 time.sleep(float(sys.argv[1]))
 open(sys.argv[2], "w").close()
 os.killpg(int(sys.argv[3]), signal.SIGTERM)' "$((WHOOPER_REVIEW_TIMEOUT_MINUTES * 60))" "$work/timed-out" "$agent_group" &
@@ -201,7 +201,7 @@ watchdog_pid=""
 [[ -s "$run/findings.json" ]] ||
   die "the review run exited $agent_exit without findings; see $run/stderr.log and the transcript in $run"
 # A finding that does not fit the schema would break classify, post, and the summary later.
-python3 -I "$root/lib/whooper.py" check "$root/schemas/findings.json" "$run/findings.json" ||
+"$root/lib/python" "$root/lib/whooper.py" check "$root/schemas/findings.json" "$run/findings.json" ||
   { mv "$run/findings.json" "$run/findings.invalid.json"; die "the review run's findings.json does not fit the schema"; }
 [[ -f "$run/log.md" ]] || echo "whooper-review: the run wrote no log.md" >&2
 finished=true

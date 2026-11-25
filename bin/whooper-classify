@@ -8,5 +8,5 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 (($# == 1)) || { echo "usage: whooper-classify <run dir>" >&2; exit 1; }
-eval "$(python3 -I "$root/lib/whooper.py" env)"
-exec python3 -I "$root/lib/whooper.py" classify "$WHOOPER_STATE" "$1"
+eval "$("$root/lib/python" "$root/lib/whooper.py" env)"
+exec "$root/lib/python" "$root/lib/whooper.py" classify "$WHOOPER_STATE" "$1"

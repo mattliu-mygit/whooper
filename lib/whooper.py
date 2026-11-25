@@ -1,3 +1,9 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["tomlkit==0.15.2"]
+# ///
+# uv builds the environment lib/python runs Whooper's Python in from this block, with the versions
+# whooper.py.lock pins. Pin only releases at least a week old.
 """Whooper's exact rules: which PRs are the user's review work, which of it is already done, what a
 review run may read about a PR, which of a run's findings pass rule v1, and when whooper-run polls.
 

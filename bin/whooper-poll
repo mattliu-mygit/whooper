@@ -13,7 +13,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-eval "$(python3 -I "$root/lib/whooper.py" env)"
+eval "$("$root/lib/python" "$root/lib/whooper.py" env)"
 poll="$WHOOPER_STATE/poll"
 mkdir -p "$poll"
 # One clock read for both, in a form BSD and GNU date share.
@@ -48,25 +48,25 @@ die() {
 
 # slackdump reads from a day before the cursor, so the replies and edits that came since the cursor
 # under older posts come along; lib/whooper.py keeps only what is new. It takes its start time in UTC.
-from="$(python3 -I -c 'import datetime, sys
+from="$("$root/lib/python" -c 'import datetime, sys
 print(datetime.datetime.fromtimestamp(int(sys.argv[1]) - 86400, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"))' "$oldest")"
 slackdump dump -workspace "$WHOOPER_SLACKDUMP_WORKSPACE" -files=false -time-from "$from" -o "$work/slack" \
   "$WHOOPER_ASK_CHANNEL" > "$work/slackdump.log" 2>&1 || die "slackdump failed: $(tail -n 3 "$work/slackdump.log")"
-python3 -I "$root/lib/whooper.py" posts "$work/slack/$WHOOPER_ASK_CHANNEL.json" "$oldest" > "$work/posts.json"
+"$root/lib/python" "$root/lib/whooper.py" posts "$work/slack/$WHOOPER_ASK_CHANNEL.json" "$oldest" > "$work/posts.json"
 
 # The prompt, the answer, and the run's transcript stay next to the poll's output as its record.
 {
-  python3 -I "$root/lib/whooper.py" prompt poll
+  "$root/lib/python" "$root/lib/whooper.py" prompt poll
   printf '\nuser_id: %s\n\nposts:\n\n' "$WHOOPER_SLACK_USER"
   cat "$work/posts.json"
 } > "$poll/$stamp.prompt.md"
 # As in whooper-review, the launcher starts in a session of its own, so the run and everything it
 # starts form one process group that the time limit and the cleanup can stop. Without the limit, a
 # request the network dropped held the loop for 93 minutes on Nov 24, 2026.
-python3 -I -c 'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
+"$root/lib/python" -c 'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
   "$root/agents/$WHOOPER_POLL_AGENT/poll" "$poll/$stamp.prompt.md" "$poll/$stamp.answer.json" "$poll/$stamp" < /dev/null &
 agent_group=$!
-python3 -I -c 'import os, signal, sys, time
+"$root/lib/python" -c 'import os, signal, sys, time
 time.sleep(float(sys.argv[1]))
 open(sys.argv[2], "w").close()
 os.killpg(int(sys.argv[3]), signal.SIGTERM)' "$((WHOOPER_POLL_TIMEOUT_MINUTES * 60))" "$work/timed-out" "$agent_group" &
@@ -79,12 +79,12 @@ watchdog_pid=""
 [[ ! -e "$work/timed-out" ]] ||
   die "the $WHOOPER_POLL_AGENT poll run passed its $WHOOPER_POLL_TIMEOUT_MINUTES-minute limit; see $poll/$stamp.*"
 (( agent_exit == 0 )) || die "the $WHOOPER_POLL_AGENT poll run failed; see $poll/$stamp.*"
-python3 -I "$root/lib/whooper.py" check "$root/schemas/slack-asks.json" "$poll/$stamp.answer.json"
-python3 -I "$root/lib/whooper.py" asks "$work/posts.json" "$poll/$stamp.answer.json" "$oldest" > "$work/asks.json"
+"$root/lib/python" "$root/lib/whooper.py" check "$root/schemas/slack-asks.json" "$poll/$stamp.answer.json"
+"$root/lib/python" "$root/lib/whooper.py" asks "$work/posts.json" "$poll/$stamp.answer.json" "$oldest" > "$work/asks.json"
 # lib/whooper.py passed only plain URLs of PRs in the configured orgs that the asking post links.
 jq -r '[.[].pr_urls[]] | unique[]' "$work/asks.json" | "$root/bin/whooper-prs" > "$work/slack-prs.json"
 
-python3 -I "$root/lib/whooper.py" items "$poll/github.json" \
+"$root/lib/python" "$root/lib/whooper.py" items "$poll/github.json" \
   "$work/asks.json" "$work/slack-prs.json" > "$poll/$stamp.json.tmp"
 mv "$poll/$stamp.json.tmp" "$poll/$stamp.json"
 echo "$started" > "$poll/cursor"

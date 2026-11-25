@@ -10,7 +10,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-eval "$(python3 -I "$root/lib/whooper.py" env)"
+eval "$("$root/lib/python" "$root/lib/whooper.py" env)"
 data="$WHOOPER_STATE"
 usage="usage: whooper-summary <run-id> [--print]"
 
@@ -36,7 +36,7 @@ run="$data/runs/$run_id"
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
-python3 -I "$root/lib/whooper.py" summary "$run" > "$work/summary.txt"
+"$root/lib/python" "$root/lib/whooper.py" summary "$run" > "$work/summary.txt"
 if [[ "$print" == true ]]; then
   cat "$work/summary.txt"
   echo
