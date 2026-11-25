@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Prints Whooper's status as one JSON object, read from the files under <state> with no network
+# calls, where <state> is $XDG_STATE_HOME/whooper (default ~/.local/state/whooper):
+#
+#   whooper-status --json
+#
+#   version     1, the number of this format
+#   loop        running: whether whooper-run runs, that is, its lock's process is alive and is a
+#               whooper-run; pid: that process's ID, or null
+#   paused      whether bin/whooper-pause paused the schedule
+#   next_round  when the round whooper-run waits for starts, or null while no whooper-run waits
+#   round       running, the same check for whooper-round; started_at; reviewing: the PR the round
+#               is reviewing, or null
+#   last_round  null until a round ends, then its started_at, ended_at, result (done, poll_failed,
+#               or interrupted), selected (how many items it selected, or null when it ended before
+#               selecting), and reviews: [{pr, outcome}], where outcome is reviewed, failed, or
+#               interrupted
+#
+# A PR reads <owner>/<repo>#<number>, and times are local, in ISO 8601 with the offset.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+[[ $# == 1 && "$1" == --json ]] || { echo "usage: whooper-status --json" >&2; exit 1; }
+eval "$("$root/lib/python" "$root/lib/whooper.py" env)"
+exec "$root/lib/python" "$root/lib/whooper.py" status "$WHOOPER_STATE"

@@ -1,10 +1,11 @@
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout, suppress
 from datetime import datetime, time, timedelta, timezone
 import io
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import tempfile
 from time import monotonic, sleep
@@ -1131,52 +1132,233 @@ class SlackGuardTest(unittest.TestCase):
 
 
 class RunTest(unittest.TestCase):
-    """bin/whooper-run on the test config and a throwaway state folder, with gh, slackdump, and the
-    agent CLIs replaced by commands that fail, so even a broken check cannot reach GitHub, Slack, or
-    a model."""
+    """bin/whooper-run, whooper-round, whooper-status, whooper-pause, and whooper-resume on a copy of
+    the test config and a throwaway state folder, with gh, slackdump, and the agent CLIs replaced by
+    commands that fail unless a test says otherwise, so even a broken check cannot reach GitHub,
+    Slack, or a model. Each command runs in a process group of its own, which the test stops whole
+    when it ends."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        fakes = Path(self.tmp.name) / "bin"
-        fakes.mkdir()
+        tmp = Path(self.tmp.name)
+        self.fakes = tmp / "bin"
         for name in ["gh", "slackdump", "claude", "devin"]:
-            (fakes / name).write_text("#!/bin/sh\nexit 1\n")
-            (fakes / name).chmod(0o755)
-        self.env = {**os.environ, "PATH": f"{fakes}:{os.environ['PATH']}", "XDG_STATE_HOME": self.tmp.name}
-        self.lock = Path(self.tmp.name) / "whooper" / "run.lock"
+            self.script(self.fakes / name, "exit 1")
+        # Rounds may start at any time on any day, a minute apart. notify.sh notes each review's
+        # notification in notifications.log.
+        config = tmp / "config" / "config.toml"
+        config.parent.mkdir()
+        config.write_text(CONFIG + '\n[schedule]\ninterval_minutes = 1\nstart = "00:00"\nend = "23:59"\n'
+                          'days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]\nnotify = "notify.sh"\n')
+        self.notify, self.notifications = config.parent / "notify.sh", tmp / "notifications.log"
+        self.script(self.notify, f"printf '%s | %s\\n' \"$1\" \"$2\" >> '{self.notifications}'")
+        self.env = {**os.environ, "PATH": f"{self.fakes}:{os.environ['PATH']}", "WHOOPER_CONFIG": str(config),
+                    "XDG_STATE_HOME": self.tmp.name, "XDG_CACHE_HOME": str(tmp / "cache")}
+        self.state = tmp / "whooper"
+        self.lock = self.state / "run.lock"
 
-    def hold_lock(self, pid):
-        self.lock.mkdir(parents=True)
-        (self.lock / "pid").write_text(f"{pid}\n")
+    def script(self, path, body):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"#!/bin/sh\n{body}\n")
+        path.chmod(0o755)
+
+    def start(self, path, out=subprocess.DEVNULL):
+        process = subprocess.Popen([str(path)], env=self.env, stdout=out, stderr=subprocess.STDOUT,
+                                   start_new_session=True)
+        self.addCleanup(self.stop, process)
+        return process
+
+    def stop(self, process):
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=30)
+
+    def command(self, name, *args, env=None):
+        """Runs bin/<name> with args to its end."""
+        process = subprocess.Popen([str(ROOT / "bin" / name), *args], env={**self.env, **(env or {})},
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        self.addCleanup(self.stop, process)
+        out, err = process.communicate(timeout=60)
+        return subprocess.CompletedProcess(process.args, process.returncode, out, err)
+
+    def status(self):
+        """whooper-status --json, with times in Los Angeles."""
+        result = self.command("whooper-status", "--json", env={"TZ": "America/Los_Angeles"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def holder(self, name):
+        """Starts a script named name that waits, standing in for a running copy of that command, and
+        returns its process ID."""
+        script = Path(self.tmp.name) / "holders" / name
+        self.script(script, "sleep 30")
+        return self.start(script).pid
+
+    def hold(self, lock, pid):
+        lock.mkdir(parents=True)
+        (lock / "pid").write_text(f"{pid}\n")
+
+    def read(self, path):
+        """The file's text, or None while it does not exist."""
+        try:
+            return path.read_text()
+        except FileNotFoundError:
+            return None
+
+    def wait_for(self, condition, what):
+        # A test that starts in the day's last minute waits until 00:00 for its first round.
+        deadline = monotonic() + 90
+        while not condition():
+            if monotonic() > deadline:
+                self.fail(f"timed out waiting for {what}")
+            sleep(0.1)
+
+    def fake_one_review_request(self):
+        """Has gh report one review request, for example-org/example-repo#12, slackdump an ask channel
+        with no posts, and the Claude poll run no asks. The review then fails, since the cache holds no
+        clone of the repo."""
+        (self.fakes / "pr.json").write_text(json.dumps(pr(number=12, requested=[LOGIN])))
+        self.script(self.fakes / "gh", "\n".join([
+            'case "$*" in',
+            '  "search prs user-review-requested:sam-example --owner example-org "*)',
+            "    echo https://github.com/example-org/example-repo/pull/12 ;;",
+            '  "search prs "*) ;;',
+            '  "api graphql "*) cat "${0%/*}/pr.json" ;;',
+            "  *) exit 1 ;;",
+            "esac",
+        ]))
+        # slackdump dumps the channel, its last argument, to <channel>.json in the folder after -o.
+        self.script(self.fakes / "slackdump", "\n".join([
+            'while [ $# -gt 1 ]; do [ "$1" = -o ] && out="$2"; shift; done',
+            """mkdir -p "$out" && echo '{"messages": []}' > "$out/$1.json\"""",
+        ]))
+        # The poll's answer is the result at the end of Claude's stream-json output.
+        self.script(self.fakes / "claude",
+                    """echo '{"type": "result", "subtype": "success", "structured_output": {"asks": [], "not_asks": []}}'""")
 
     def test_refuses_to_start_while_another_whooper_run_holds_the_lock(self):
         # A script named whooper-run stands in for a copy that is already polling.
-        holder = Path(self.tmp.name) / "holder" / "whooper-run"
-        holder.parent.mkdir()
-        holder.write_text("#!/bin/sh\nsleep 30\n")
-        holder.chmod(0o755)
-        process = subprocess.Popen([str(holder)])
-        self.addCleanup(process.kill)
-        self.hold_lock(process.pid)
-        result = subprocess.run([str(ROOT / "bin" / "whooper-run")], env=self.env, capture_output=True, text=True,
-                                timeout=30)
-        self.assertEqual((result.returncode, (self.lock / "pid").read_text()), (1, f"{process.pid}\n"))
-        self.assertIn(f"process {process.pid} is already running", result.stderr)
+        holder = self.holder("whooper-run")
+        self.hold(self.lock, holder)
+        result = self.command("whooper-run")
+        self.assertEqual((result.returncode, (self.lock / "pid").read_text()), (1, f"{holder}\n"))
+        self.assertIn(f"process {holder} is already running", result.stderr)
 
     def test_takes_over_a_lock_whose_process_is_some_other_program(self):
         # After a kill -9 or a restart, the lock's process ID can belong to anything, here this test.
-        self.hold_lock(os.getpid())
-        process = subprocess.Popen([str(ROOT / "bin" / "whooper-run")], env=self.env, stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.DEVNULL)
-        self.addCleanup(process.kill)
-        deadline = monotonic() + 20
-        while (self.lock / "pid").read_text().strip() != str(process.pid) and monotonic() < deadline:
-            sleep(0.1)
-        self.assertEqual((self.lock / "pid").read_text(), f"{process.pid}\n")
+        self.hold(self.lock, os.getpid())
+        process = self.start(ROOT / "bin" / "whooper-run")
+        self.wait_for(lambda: self.read(self.lock / "pid") == f"{process.pid}\n", "whooper-run to take the lock")
         process.terminate()
         process.wait(timeout=10)
         self.assertFalse(self.lock.exists())
+
+    def test_a_round_refuses_to_start_while_another_round_runs(self):
+        holder = self.holder("whooper-round")
+        self.hold(self.state / "round.lock", holder)
+        result = self.command("whooper-round")
+        self.assertEqual((result.returncode, (self.state / "round.lock" / "pid").read_text()), (1, f"{holder}\n"))
+        self.assertIn("a round is already running", result.stderr)
+        self.assertFalse((self.state / "last-round.json").exists())
+
+    def test_a_round_reviews_each_selected_item_and_reports_how_it_ended(self):
+        self.fake_one_review_request()
+        # A lock left by a round that was killed, whose process ID now belongs to this test.
+        self.hold(self.state / "round.lock", os.getpid())
+        before = datetime.now(timezone.utc).replace(microsecond=0)
+        result = self.command("whooper-round")
+        after = datetime.now(timezone.utc)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        status = self.status()
+        last = status["last_round"]
+        started, ended = (datetime.fromisoformat(last[key]) for key in ["started_at", "ended_at"])
+        self.assertTrue(before <= started <= ended <= after, last)
+        self.assertEqual({key: last[key] for key in ["result", "selected", "reviews"]},
+                         {"result": "done", "selected": 1,
+                          "reviews": [{"pr": "example-org/example-repo#12", "outcome": "failed"}]})
+        self.assertEqual(status["round"], {"running": False, "started_at": None, "reviewing": None})
+        self.assertEqual(self.notifications.read_text(),
+                         "Whooper: example-org/example-repo#12 review failed | See whooper-round's output.\n")
+        self.assertFalse((self.state / "round.lock").exists())
+
+    def test_a_round_stopped_during_a_review_reports_that_review_as_interrupted(self):
+        self.fake_one_review_request()
+        # notify.sh notes the failed review's notification, then holds the round there.
+        self.script(self.notify, f"echo \"$1\" >> '{self.notifications}'\nsleep 30")
+        loop = self.start(ROOT / "bin" / "whooper-run")
+        self.wait_for(self.notifications.exists, "the review's notification")
+        status = self.status()
+        running = status["round"]
+        self.assertEqual((status["loop"], status["next_round"]), ({"running": True, "pid": loop.pid}, None))
+        self.assertEqual((running["running"], running["reviewing"]), (True, "example-org/example-repo#12"))
+        self.stop(loop)
+        last = self.status()["last_round"]
+        self.assertEqual((loop.returncode, last["started_at"]), (130, running["started_at"]))
+        self.assertEqual({key: last[key] for key in ["result", "selected", "reviews"]},
+                         {"result": "interrupted", "selected": 1,
+                          "reviews": [{"pr": "example-org/example-repo#12", "outcome": "interrupted"}]})
+        self.assertFalse((self.state / "round.lock").exists())
+
+    def test_status_reports_the_loop_pause_next_round_and_rounds_from_the_state_folder(self):
+        nothing = {"version": 1, "loop": {"running": False, "pid": None}, "paused": False, "next_round": None,
+                   "round": {"running": False, "started_at": None, "reviewing": None}, "last_round": None}
+        self.assertEqual(self.status(), nothing)
+        # Unix times on 2031-07-30: the next round at 10:15:00 in Los Angeles, the running round's
+        # start at 10:00:02, and the last round from 09:45:01 to 09:52:40.
+        loop, current = self.holder("whooper-run"), self.holder("whooper-round")
+        self.hold(self.lock, loop)
+        self.hold(self.state / "round.lock", current)
+        reviews = [{"pr": "sample-org/plain-repo#7", "outcome": "reviewed"}]
+        (self.state / "round.lock" / "round.json").write_text(json.dumps(
+            {"started_at": 1943197202, "selected": 2, "reviewing": "example-org/example-repo#12", "reviews": reviews}))
+        (self.state / "next-round").write_text("1943198100\n")
+        (self.state / "paused").touch()
+        (self.state / "last-round.json").write_text(json.dumps(
+            {"started_at": 1943196301, "ended_at": 1943196760, "result": "done", "selected": 1, "reviews": reviews}))
+        last_round = {"started_at": "2031-07-30T09:45:01-07:00", "ended_at": "2031-07-30T09:52:40-07:00",
+                      "result": "done", "selected": 1, "reviews": reviews}
+        self.assertEqual(self.status(), {
+            "version": 1,
+            "loop": {"running": True, "pid": loop},
+            "paused": True,
+            "next_round": "2031-07-30T10:15:00-07:00",
+            "round": {"running": True, "started_at": "2031-07-30T10:00:02-07:00",
+                      "reviewing": "example-org/example-repo#12"},
+            "last_round": last_round,
+        })
+        # Locks left by a whooper-run that is gone and by a round whose process ID now belongs to this
+        # test: nothing runs, so no round is next either.
+        gone = subprocess.Popen(["true"])
+        gone.wait()
+        (self.lock / "pid").write_text(f"{gone.pid}\n")
+        (self.state / "round.lock" / "pid").write_text(f"{os.getpid()}\n")
+        (self.state / "paused").unlink()
+        self.assertEqual(self.status(), {**nothing, "last_round": last_round})
+        usage = self.command("whooper-status")
+        self.assertEqual((usage.returncode, usage.stderr), (1, "usage: whooper-status --json\n"))
+
+    def test_whooper_run_skips_rounds_while_paused(self):
+        self.assertEqual(self.command("whooper-pause").returncode, 0)
+        log = Path(self.tmp.name) / "run.log"
+        with log.open("w") as out:
+            loop = self.start(ROOT / "bin" / "whooper-run", out)
+        # The first round is due at once.
+        self.wait_for(lambda: "skipped this round" in log.read_text(), "whooper-run to skip a round")
+        skipped = datetime.now(timezone.utc)
+        self.wait_for(lambda: self.status()["next_round"], "the next round")
+        status = self.status()
+        self.assertGreater(datetime.fromisoformat(status["next_round"]), skipped)
+        self.assertEqual({key: status[key] for key in ["loop", "paused", "round", "last_round"]},
+                         {"loop": {"running": True, "pid": loop.pid}, "paused": True,
+                          "round": {"running": False, "started_at": None, "reviewing": None}, "last_round": None})
+        self.stop(loop)
+        # Resumed, a new whooper-run runs its first round at once, and the fakes fail its poll.
+        self.assertEqual(self.command("whooper-resume").returncode, 0)
+        self.assertFalse((self.state / "paused").exists())
+        self.start(ROOT / "bin" / "whooper-run")
+        self.wait_for((self.state / "last-round.json").exists, "a round")
+        self.assertEqual(self.status()["last_round"]["result"], "poll_failed")
 
 
 DAY_NAMES = ["mon", "tue", "wed", "thu", "fri", "sat", "sun", "next mon"]

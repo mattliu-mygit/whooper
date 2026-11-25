@@ -34,7 +34,7 @@
         },
         "notify": {
           "title": "Notification script",
-          "description": "A script whooper-run runs as <script> <title> <message> when a review finishes or fails, such as one that shows a macOS notification. Relative to the config file's folder.",
+          "description": "A script whooper-round runs as <script> <title> <message> when a review finishes or fails, such as one that shows a macOS notification. Relative to the config file's folder.",
           "type": "string"
         }
       }

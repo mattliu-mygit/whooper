@@ -53,7 +53,7 @@ interval_minutes = 15
 start = "10:00"
 end = "18:00"                      # a round that starts before end may finish after it
 days = ["mon", "tue", "wed", "thu", "fri"]
-# Optional: a script whooper-run runs as <script> <title> <message> when a review finishes or
+# Optional: a script whooper-round runs as <script> <title> <message> when a review finishes or
 # fails, such as one that shows a macOS notification. Relative to this file's directory.
 notify = "notify.sh"
 

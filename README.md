@@ -39,19 +39,34 @@ from `~/.claude/skills`, so copy them there or point the config at your own.
 
 ## Run it
 
-`bin/whooper-run` runs Whooper until you stop it. Each round runs the steps below: fetch, poll,
-and select, then for each selected item a dry-run review, classify, `whooper-post --print`, and the
-summary, and it prints what each step prints. The config's `[schedule]` sets when: a round starts
-`interval_minutes` after the last one ended, the first at once, but only between `start` and `end`
-on the listed `days`, and otherwise whooper-run waits for the next start. The defaults are 15
-minutes, 10:00 to 18:00, Monday to Friday. When a review finishes or fails, whooper-run runs
-`[schedule] notify`, if the config names one, as `<notify> <title> <message>`. Only one copy runs
-at a time: whooper-run holds the lock `<state>/run.lock` and refuses to start while another
-whooper-run holds it. To run it in the background with a log:
+`bin/whooper-run` runs Whooper until you stop it. Each round is `bin/whooper-round`, which runs the
+steps below: fetch, poll, and select, then for each selected item a dry-run review, classify,
+`whooper-post --print`, and the summary, and it prints what each step prints. The config's
+`[schedule]` sets when: a round starts `interval_minutes` after the last one ended, the first at
+once, but only between `start` and `end` on the listed `days`, and otherwise whooper-run waits for
+the next start. The defaults are 15 minutes, 10:00 to 18:00, Monday to Friday. When a review
+finishes or fails, whooper-round runs `[schedule] notify`, if the config names one, as
+`<notify> <title> <message>`. Only one copy runs at a time: whooper-run holds the lock
+`<state>/run.lock` and refuses to start while another whooper-run holds it. To run it in the
+background with a log:
 
 ```sh
 bin/whooper-run >> ~/.local/state/whooper/run.log 2>&1 &
 ```
+
+Four commands work from a terminal and from Prompting Time, which runs them and watches the state
+directory for changes:
+
+```sh
+bin/whooper-round          # runs a round now, even while paused
+bin/whooper-pause          # whooper-run skips each round it comes to, and logs that it did
+bin/whooper-resume         # ends the pause
+bin/whooper-status --json  # what runs, whether Whooper is paused, the next round, and the last round
+```
+
+Only one round runs at a time: whooper-round holds the lock `<state>/round.lock`, and another
+whooper-round prints "a round is already running" and exits 1. whooper-status makes no network
+calls, and its header lists the fields it prints.
 
 To run the steps by hand:
 
@@ -92,7 +107,7 @@ Whooper's defaults for what the config leaves out. They are the ones a settings 
 saves part of them. It checks the values against the schema, and the config as it would be saved
 with the checks Whooper runs when it starts, and only then rewrites the lines of those keys,
 keeping the file's comments. On a failure it prints why and leaves the file as it was. A change
-applies from the next round, except `notify`, which whooper-run reads only when it starts.
+applies from the next round.
 
 ## What counts as work
 
@@ -175,13 +190,16 @@ any other channel, a thread, a changed text or time, and a second summary.
 ## Stop it
 
 Stop whooper-run with Ctrl-C, or with `kill -- -$(cat ~/.local/state/whooper/run.lock/pid)` when a
-shell started it in the background; either way the step it is running stops too. Interrupt any
-other script with Ctrl-C, or stop a review with `kill $(cat ~/.local/state/whooper/locks/*/pid)`.
-An interrupted review runs the teardown script, removes its worktrees and lock, and counts as a
-failure in its record. The Slack cursor moves only after a poll writes its output, so an
-interrupted poll is simply repeated.
+shell started it in the background; either way the round it is running stops too. A `kill` of
+whooper-run's process alone waits for that round to end. Interrupt any other script with Ctrl-C,
+or stop a review with `kill $(cat ~/.local/state/whooper/locks/*/pid)`. An interrupted review runs
+the teardown script, removes its worktrees and lock, and counts as a failure in its record. The
+Slack cursor moves only after a poll writes its output, so an interrupted poll is simply repeated.
 
 ## Files under the state directory
+
+whooper-run and whooper-round write each of their files through a temporary file and a rename, so a
+program watching the directory never reads half of one.
 
 - `poll/github.json`: whooper-fetch's latest output, one entry per PR as `queries/pr.graphql`
   returns it.
@@ -201,7 +219,18 @@ interrupted poll is simply repeated.
   process is gone is stale, and the next review takes it.
 - `run.lock/`: the running whooper-run's lock, with its process ID in `pid`. A lock whose process is
   gone, or is now some other program, is stale, and the next whooper-run takes it over.
-- `items/`: whooper-run's work items: `selected.jsonl`, the latest round's selection, and
+- `next-round`: the Unix time of the round whooper-run waits for, written before each wait and
+  deleted when the round is due.
+- `paused`: an empty file that whooper-pause creates and whooper-resume deletes. While it exists,
+  whooper-run skips its rounds.
+- `round.lock/`: the running whooper-round's lock, with its process ID in `pid` and the same stale
+  rule as `run.lock/`. `round.json` holds the round's start as a Unix time, how many items it
+  selected, the PR it is reviewing as `<owner>/<repo>#<number>`, and each finished review's PR and
+  outcome: `reviewed` or `failed`.
+- `last-round.json`: the last round that ended: its start and end as Unix times, its result
+  (`done`, `poll_failed`, or `interrupted`), how many items it selected, and each review's PR and
+  outcome, where a review the round stopped in is `interrupted`.
+- `items/`: whooper-round's work items: `selected.jsonl`, the latest round's selection, and
   `<owner>-<repo>-<pr>-<kind>.json`, the item a review got.
 - `runs/<run-id>/`: one review run, named by its UTC start time and PR number. `run.json` is the
   work item with the run ID, merge base, cutoff, agent, and a content hash of each skill in

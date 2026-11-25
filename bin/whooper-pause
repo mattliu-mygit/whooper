@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Pauses Whooper's schedule: creates <state>/paused, where <state> is $XDG_STATE_HOME/whooper
+# (default ~/.local/state/whooper). whooper-run skips each round it comes to while that file
+# exists, and bin/whooper-resume deletes it. bin/whooper-round run by hand still runs a round.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+eval "$("$root/lib/python" "$root/lib/whooper.py" env)"
+mkdir -p "$WHOOPER_STATE"
+# The file stays empty, so a program watching the state folder has nothing to read half of.
+touch "$WHOOPER_STATE/paused"

@@ -24,6 +24,7 @@ from the user's config file (config_path), never from this code. The bin/ script
   whooper.py summary <run dir>                                                     -> the summary channel's text
   whooper.py skills <skills dir>                                                   -> {skill: content hash}
   whooper.py next-round [<Unix time the last round ended>]                         -> the next round's Unix time
+  whooper.py status <data dir>                                                     -> whooper-status's JSON
   whooper.py settings get | set <json>                                             -> settings JSON | saves the given ones
 """
 from datetime import datetime, timedelta, timezone
@@ -34,6 +35,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 import tomllib
@@ -136,6 +138,48 @@ def next_round(schedule, earliest):
         # Today counts only while earliest is before today's end.
         if DAYS[day.weekday()] in schedule["days"] and (offset > 0 or earliest.time() < schedule["end"]):
             return max(earliest, datetime.combine(day, schedule["start"]))
+
+
+def read_status(data):
+    """Whooper's status for whooper-status --json, from the files under data, its state directory:
+    whether whooper-run and a round are running, whether Whooper is paused, when the next scheduled
+    round starts, and how the last round ended. Times are local, in ISO 8601 with the offset. It
+    reads files and asks ps about the two lock holders, and never calls GitHub, Slack, or a model."""
+    def read(path):
+        # Whooper renames each of these files into place, so a read gets a whole file or none.
+        try:
+            return path.read_text()
+        except FileNotFoundError:
+            return None
+
+    def holder(lock, name):
+        # The rule whooper-run and whooper-round apply to a lock they find: a lock whose process is
+        # gone, or is now some other program, holds nothing.
+        try:
+            pid = int(read(lock / "pid") or "")
+        except ValueError:
+            return None
+        ps = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True)
+        return pid if name in ps.stdout else None
+
+    def local(unix):
+        return datetime.fromtimestamp(unix, timezone.utc).astimezone().isoformat(timespec="seconds")
+
+    loop, current = holder(data / "run.lock", "whooper-run"), holder(data / "round.lock", "whooper-round")
+    # whooper-run writes next-round before each wait and deletes it when the round is due.
+    next_round = read(data / "next-round") if loop else None
+    record = json.loads(read(data / "round.lock" / "round.json") or "null") if current else None
+    last = json.loads(read(data / "last-round.json") or "null")
+    return {
+        "version": 1,
+        "loop": {"running": bool(loop), "pid": loop},
+        "paused": (data / "paused").exists(),
+        "next_round": local(int(next_round)) if next_round else None,
+        "round": {"running": bool(current), "started_at": local(record["started_at"]) if record else None,
+                  "reviewing": record["reviewing"] if record else None},
+        "last_round": {**last, "started_at": local(last["started_at"]), "ended_at": local(last["ended_at"])}
+                      if last else None,
+    }
 
 
 def pr_link(orgs):
@@ -854,7 +898,7 @@ def main(command, *args):
             "WHOOPER_REVIEW_TIMEOUT_MINUTES": config["review"]["timeout_minutes"],
             # A poll run that hangs, such as on a request the network dropped, holds up the loop.
             "WHOOPER_POLL_TIMEOUT_MINUTES": poll_timeout,
-            # The script whooper-run runs after each review, relative to the config's directory.
+            # The script whooper-round runs after each review, relative to the config's directory.
             "WHOOPER_NOTIFY": config["dir"] / config["schedule"]["notify"] if "notify" in config.get("schedule", {}) else "",
             **{f"WHOOPER_{job.upper()}_AGENT": agent for job, agent in config["jobs"].items()},
         }
@@ -1014,6 +1058,8 @@ def main(command, *args):
         if when > earliest:
             print(f"whooper-run: outside the [schedule] hours; next round at {when:%a %Y-%m-%d %H:%M}", file=sys.stderr)
         print(int(when.timestamp()))
+    elif command == "status":
+        print(json.dumps(read_status(Path(args[0])), indent=2))
     else:
         raise SystemExit(f"whooper.py: unknown command {command!r}")
 
