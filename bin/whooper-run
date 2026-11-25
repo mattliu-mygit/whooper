@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Runs Whooper on the config's [schedule] until stopped. Each round runs whooper-fetch,
+# whooper-poll, and whooper-select, then for each selected item a dry-run whooper-review,
+# whooper-classify, whooper-post --print, and whooper-summary, and runs [schedule] notify as
+# <notify> <title> <message> when that review finishes or fails. Nothing posts to GitHub or Slack.
+#
+# The first round starts at once and each later one interval_minutes after the last one ended; a
+# time outside the configured hours and days moves to the next start. Only one copy runs at a time:
+# whooper-run holds the lock <state>/run.lock, with its process ID in run.lock/pid, where <state> is
+# $XDG_STATE_HOME/whooper (default ~/.local/state/whooper), and refuses to start while another
+# whooper-run holds it. Stop it with Ctrl-C, or with kill -- -$(cat <state>/run.lock/pid) when a
+# shell started it in the background; either way the step it is running stops too.
+#
+# No set -e: a step that fails must not end the loop, and the next round tries again.
+set -uo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+eval "$(python3 -I "$root/lib/whooper.py" env)"
+items="$WHOOPER_STATE/items"
+lock="$WHOOPER_STATE/run.lock"
+mkdir -p "$items"
+
+notify() {
+  if [[ -n "$WHOOPER_NOTIFY" ]]; then
+    "$WHOOPER_NOTIFY" "$1" "$2" > /dev/null 2>&1 || echo "notify failed: $1"
+  fi
+}
+
+# mkdir is atomic, so of two copies started at once only one gets the lock, as in whooper-review.
+# A lock whose process is gone, or is now some other program, is stale and this run takes it over:
+# a kill -9 or a restart leaves the lock behind, and its process ID can later belong to anything.
+if ! mkdir "$lock" 2>/dev/null; then
+  holder="$(cat "$lock/pid" 2>/dev/null || true)"
+  if [[ -n "$holder" ]] && ps -o command= -p "$holder" 2>/dev/null | grep -q whooper-run; then
+    echo "whooper-run: process $holder is already running Whooper; see $lock/pid" >&2
+    exit 1
+  fi
+  rm -rf "$lock"
+  if ! mkdir "$lock" 2>/dev/null; then
+    echo "whooper-run: another copy took $lock first" >&2
+    exit 1
+  fi
+fi
+echo "$$" > "$lock/pid"
+nap=""
+trap 'rm -rf "$lock"; [[ -z "$nap" ]] || kill "$nap" 2>/dev/null || true' EXIT
+trap 'exit 130' INT TERM HUP
+
+ended=""
+while true; do
+  # lib/whooper.py reads [schedule] each time, so a change applies from the next round.
+  next="$(python3 -I "$root/lib/whooper.py" next-round ${ended:+"$ended"})" || exit 1
+  # sleep counts only time the computer is awake, so one long sleep would start the round late by
+  # however long a laptop slept. Naps of at most a minute, each followed by a look at the clock,
+  # start a round that came due during sleep within a minute of waking.
+  while now="$(date +%s)" && ((now < next)); do
+    # A nap in the background with wait lets a TERM from Prompting Time stop the loop at once.
+    sleep "$((next - now < 60 ? next - now : 60))" &
+    nap=$!
+    wait "$nap"
+  done
+
+  echo "=== $(date '+%F %T') poll"
+  if "$root/bin/whooper-fetch" && "$root/bin/whooper-poll" && "$root/bin/whooper-select" > "$items/selected.jsonl"; then
+    echo "selected: $(grep -c . "$items/selected.jsonl") item(s)"
+    while IFS= read -r item <&3; do
+      pr="$(jq -r '"\(.repo)#\(.pr)"' <<<"$item")"
+      file="$items/$(jq -r '"\(.repo | sub("/"; "-"))-\(.pr)-\(.kind)"' <<<"$item").json"
+      printf '%s\n' "$item" > "$file"
+      echo "--- review $pr $(jq -r .kind <<<"$item")"
+      if ! run="$("$root/bin/whooper-review" "$file" --dry-run < /dev/null)"; then
+        echo "review failed"
+        notify "Whooper: $pr review failed" "See whooper-run's output."
+        continue
+      fi
+      "$root/bin/whooper-classify" "$run" < /dev/null
+      "$root/bin/whooper-post" "$(basename "$run")" --print < /dev/null
+      "$root/bin/whooper-summary" "$(basename "$run")" < /dev/null
+      notify "Whooper reviewed $pr" "$(jq -r '"\(.approval.verdict | gsub("_"; " ")), \(.findings | length) finding(s). \(.approval.reason | .[0:200])"' "$run/findings.json")"
+    done 3< "$items/selected.jsonl"
+  else
+    echo "a poll step failed; trying again next round"
+  fi
+  ended="$(date +%s)"
+done

@@ -4,7 +4,7 @@ Whooper finds the pull requests one GitHub user is expected to review or re-chec
 them with coding-agent runs; the config picks the agent, and `agents/` has a folder per agent. It reads the user's review requests on GitHub and review asks in one
 Slack channel, reviews each PR in a sandboxed run, sorts the findings by a strict rule, writes the
 GitHub review it would post, and sends a summary to a private Slack channel. Live posting to GitHub
-is not turned on yet, and nothing runs on a schedule.
+is not turned on yet. `bin/whooper-run` repeats all of this on the schedule the config sets.
 
 ## Set it up
 
@@ -36,6 +36,22 @@ Whooper follows the XDG Base Directory spec: the config is under `$XDG_CONFIG_HO
 from `~/.claude/skills`, so copy them there or point the config at your own.
 
 ## Run it
+
+`bin/whooper-run` runs Whooper until you stop it. Each round runs the steps below: fetch, poll,
+and select, then for each selected item a dry-run review, classify, `whooper-post --print`, and the
+summary, and it prints what each step prints. The config's `[schedule]` sets when: a round starts
+`interval_minutes` after the last one ended, the first at once, but only between `start` and `end`
+on the listed `days`, and otherwise whooper-run waits for the next start. The defaults are 15
+minutes, 10:00 to 18:00, Monday to Friday. When a review finishes or fails, whooper-run runs
+`[schedule] notify`, if the config names one, as `<notify> <title> <message>`. Only one copy runs
+at a time: whooper-run holds the lock `<state>/run.lock` and refuses to start while another
+whooper-run holds it. To run it in the background with a log:
+
+```sh
+bin/whooper-run >> ~/.local/state/whooper/run.log 2>&1 &
+```
+
+To run the steps by hand:
 
 ```sh
 bin/whooper-fetch   # GitHub reads -> <state>/poll/github.json
@@ -145,10 +161,12 @@ any other channel, a thread, a changed text or time, and a second summary.
 
 ## Stop it
 
-Nothing is scheduled. Interrupt a running script with Ctrl-C, or stop a review with
-`kill $(cat ~/.local/state/whooper/locks/*/pid)`. An interrupted review runs the teardown script,
-removes its worktrees and lock, and counts as a failure in its record. The Slack cursor moves only
-after a poll writes its output, so an interrupted poll is simply repeated.
+Stop whooper-run with Ctrl-C, or with `kill -- -$(cat ~/.local/state/whooper/run.lock/pid)` when a
+shell started it in the background; either way the step it is running stops too. Interrupt any
+other script with Ctrl-C, or stop a review with `kill $(cat ~/.local/state/whooper/locks/*/pid)`.
+An interrupted review runs the teardown script, removes its worktrees and lock, and counts as a
+failure in its record. The Slack cursor moves only after a poll writes its output, so an
+interrupted poll is simply repeated.
 
 ## Files under the state directory
 
@@ -168,6 +186,10 @@ after a poll writes its output, so an interrupted poll is simply repeated.
   already has 3 re-check records for other heads started today (local time).
 - `locks/<owner>-<repo>-<pr>/pid`: the process ID of the review that holds the PR. A lock whose
   process is gone is stale, and the next review takes it.
+- `run.lock/`: the running whooper-run's lock, with its process ID in `pid`. A lock whose process is
+  gone, or is now some other program, is stale, and the next whooper-run takes it over.
+- `items/`: whooper-run's work items: `selected.jsonl`, the latest round's selection, and
+  `<owner>-<repo>-<pr>-<kind>.json`, the item a review got.
 - `runs/<run-id>/`: one review run, named by its UTC start time and PR number. `run.json` is the
   work item with the run ID, merge base, cutoff, agent, and a content hash of each skill in
   `~/.claude/skills`, so a finding traces to the skill text behind it. `github.json` is the PR

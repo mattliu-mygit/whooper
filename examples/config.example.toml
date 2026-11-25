@@ -46,6 +46,17 @@ timeout_minutes = 45               # whooper-review stops a review that runs lon
 # Skills each review run loads, from ~/.claude/skills. skills/ in this repo has public versions.
 skills = ["multi-angle-review", "code-shape-and-runtime-review"]
 
+# When bin/whooper-run polls: a round starts interval_minutes after the last one ended, at or after
+# start and before end (24-hour local times) on these days. These four are the defaults.
+[schedule]
+interval_minutes = 15
+start = "10:00"
+end = "18:00"                      # a round that starts before end may finish after it
+days = ["mon", "tue", "wed", "thu", "fri"]
+# Optional: a script whooper-run runs as <script> <title> <message> when a review finishes or
+# fails, such as one that shows a macOS notification. Relative to this file's directory.
+notify = "notify.sh"
+
 # One table per repo Whooper reviews. Paths are relative to this file's directory. All three are
 # optional: setup and teardown run around each review (see examples/setup.example.sh), and notes
 # is Markdown added to the review prompt (see examples/repo-notes.example.md).

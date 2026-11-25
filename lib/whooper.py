@@ -1,5 +1,5 @@
 """Whooper's exact rules: which PRs are the user's review work, which of it is already done, what a
-review run may read about a PR, and which of a run's findings pass rule v1.
+review run may read about a PR, which of a run's findings pass rule v1, and when whooper-run polls.
 
 Every identifiable value, such as the user, the GitHub orgs, the Slack channels, and the bots, comes
 from the user's config file (config_path), never from this code. The bin/ scripts call it as:
@@ -17,6 +17,7 @@ from the user's config file (config_path), never from this code. The bin/ script
   whooper.py post <data dir> <run dir> <head now> <review comments.json>          -> post.json, digest, record
   whooper.py summary <run dir>                                                     -> the summary channel's text
   whooper.py skills <skills dir>                                                   -> {skill: content hash}
+  whooper.py next-round [<Unix time the last round ended>]                         -> the next round's Unix time
 """
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -83,6 +84,45 @@ def load_config():
 def xdg_dir(variable, default):
     """Whooper's directory under an XDG base directory, such as $XDG_STATE_HOME/whooper."""
     return Path(os.environ.get(variable) or Path.home() / default) / "whooper"
+
+
+DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+# whooper-run's schedule for each key the config's [schedule] leaves out.
+SCHEDULE_DEFAULTS = {"interval_minutes": 15, "start": "10:00", "end": "18:00", "days": ["mon", "tue", "wed", "thu", "fri"]}
+
+
+def read_schedule(config):
+    """The config's [schedule], with SCHEDULE_DEFAULTS for what it leaves out and start and end as
+    times of day. Fails on a schedule that next_round cannot follow."""
+    values = {**SCHEDULE_DEFAULTS, **config.get("schedule", {})}
+    try:
+        start, end = (datetime.strptime(values[key], "%H:%M").time() for key in ("start", "end"))
+    except (TypeError, ValueError):
+        raise SystemExit(f'whooper: [schedule] start and end take a 24-hour time such as "18:00"; see {config_path()}')
+    if unknown := [day for day in values["days"] if day not in DAYS]:
+        raise SystemExit(f"whooper: [schedule] days takes names from {', '.join(DAYS)}, not {unknown}")
+    # Each poll runs a model, so 0 or less would poll nonstop. bool is an int in Python, so true would
+    # otherwise pass as 1.
+    if type(values["interval_minutes"]) is not int or values["interval_minutes"] < 1:
+        raise SystemExit(f"whooper: [schedule] interval_minutes takes a whole number of minutes, at least 1; see {config_path()}")
+    if not values["days"] or start >= end:
+        raise SystemExit(f"whooper: [schedule] needs at least one day and an end after its start; see {config_path()}")
+    return {**values, "start": start, "end": end}
+
+
+def next_round(schedule, earliest):
+    """The first time at or after earliest when whooper-run may start a round: on one of the
+    schedule's days, at or after its start and before its end. A round that starts before the end
+    may run past it.
+
+    Times are local and carry no zone, so after a daylight saving change the rounds still start at
+    the configured hour; the caller turns the result into a Unix time with the zone's rules.
+    """
+    for offset in range(8):
+        day = earliest.date() + timedelta(days=offset)
+        # Today counts only while earliest is before today's end.
+        if DAYS[day.weekday()] in schedule["days"] and (offset > 0 or earliest.time() < schedule["end"]):
+            return max(earliest, datetime.combine(day, schedule["start"]))
 
 
 def pr_link(orgs):
@@ -727,6 +767,8 @@ def main(command, *args):
             "WHOOPER_REVIEW_TIMEOUT_MINUTES": config["review"]["timeout_minutes"],
             # A poll run that hangs, such as on a request the network dropped, holds up the loop.
             "WHOOPER_POLL_TIMEOUT_MINUTES": config.get("poll", {}).get("timeout_minutes", 10),
+            # The script whooper-run runs after each review, relative to the config's directory.
+            "WHOOPER_NOTIFY": config["dir"] / config["schedule"]["notify"] if "notify" in config.get("schedule", {}) else "",
             **{f"WHOOPER_{job.upper()}_AGENT": agent for job, agent in config["jobs"].items()},
         }
         for name, value in values.items():
@@ -865,6 +907,15 @@ def main(command, *args):
         sys.stdout.write(summary_text(Path(args[0]).resolve()))
     elif command == "skills":
         print(json.dumps(skill_hashes(args[0])))
+    elif command == "next-round":
+        schedule = read_schedule(load_config())
+        # A round starts interval_minutes after the last one ended, or at once when whooper-run starts.
+        earliest = (datetime.fromtimestamp(int(args[0])) + timedelta(minutes=schedule["interval_minutes"])
+                    if args else datetime.now())
+        when = next_round(schedule, earliest)
+        if when > earliest:
+            print(f"whooper-run: outside the [schedule] hours; next round at {when:%a %Y-%m-%d %H:%M}", file=sys.stderr)
+        print(int(when.timestamp()))
     else:
         raise SystemExit(f"whooper.py: unknown command {command!r}")
 

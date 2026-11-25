@@ -1,16 +1,17 @@
 import unittest
-from contextlib import redirect_stdout
-from datetime import datetime, timedelta, timezone
+from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, time, timedelta, timezone
 import io
 import json
 import os
 from pathlib import Path
 import subprocess
 import tempfile
+from time import monotonic, sleep
 
 from whooper import (REVIEW_WORDING, bot_list, check_schema, claude_shell_calls, classify, conversation,
-                     devin_shell_calls, fill, main, pr_link, poll_items, read_asks, select_work, skill_hashes,
-                     slack_posts, summary_text, write_record)
+                     devin_shell_calls, fill, main, next_round, pr_link, poll_items, read_asks, read_schedule,
+                     select_work, skill_hashes, slack_posts, summary_text, write_record)
 
 LOGIN = "sam-example"
 # Every test runs on this made-up config, never on the user's own.
@@ -1128,6 +1129,135 @@ class SlackGuardTest(unittest.TestCase):
         self.assertEqual(self.run_hook("schedule_message", self.schedule), 2)
 
 
+class RunTest(unittest.TestCase):
+    """bin/whooper-run on the test config and a throwaway state folder, with gh, slackdump, and the
+    agent CLIs replaced by commands that fail, so even a broken check cannot reach GitHub, Slack, or
+    a model."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        fakes = Path(self.tmp.name) / "bin"
+        fakes.mkdir()
+        for name in ["gh", "slackdump", "claude", "devin"]:
+            (fakes / name).write_text("#!/bin/sh\nexit 1\n")
+            (fakes / name).chmod(0o755)
+        self.env = {**os.environ, "PATH": f"{fakes}:{os.environ['PATH']}", "XDG_STATE_HOME": self.tmp.name}
+        self.lock = Path(self.tmp.name) / "whooper" / "run.lock"
+
+    def hold_lock(self, pid):
+        self.lock.mkdir(parents=True)
+        (self.lock / "pid").write_text(f"{pid}\n")
+
+    def test_refuses_to_start_while_another_whooper_run_holds_the_lock(self):
+        # A script named whooper-run stands in for a copy that is already polling.
+        holder = Path(self.tmp.name) / "holder" / "whooper-run"
+        holder.parent.mkdir()
+        holder.write_text("#!/bin/sh\nsleep 30\n")
+        holder.chmod(0o755)
+        process = subprocess.Popen([str(holder)])
+        self.addCleanup(process.kill)
+        self.hold_lock(process.pid)
+        result = subprocess.run([str(ROOT / "bin" / "whooper-run")], env=self.env, capture_output=True, text=True,
+                                timeout=30)
+        self.assertEqual((result.returncode, (self.lock / "pid").read_text()), (1, f"{process.pid}\n"))
+        self.assertIn(f"process {process.pid} is already running", result.stderr)
+
+    def test_takes_over_a_lock_whose_process_is_some_other_program(self):
+        # After a kill -9 or a restart, the lock's process ID can belong to anything, here this test.
+        self.hold_lock(os.getpid())
+        process = subprocess.Popen([str(ROOT / "bin" / "whooper-run")], env=self.env, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL)
+        self.addCleanup(process.kill)
+        deadline = monotonic() + 20
+        while (self.lock / "pid").read_text().strip() != str(process.pid) and monotonic() < deadline:
+            sleep(0.1)
+        self.assertEqual((self.lock / "pid").read_text(), f"{process.pid}\n")
+        process.terminate()
+        process.wait(timeout=10)
+        self.assertFalse(self.lock.exists())
+
+
+DAY_NAMES = ["mon", "tue", "wed", "thu", "fri", "sat", "sun", "next mon"]
+
+
+def at(day, clock):
+    """A local time in the week of Monday 2031-07-28, such as at("wed", "12:00"). "next mon" is 2031-08-04."""
+    hours, minutes = clock.split(":")
+    return datetime(2031, 7, 28, int(hours), int(minutes)) + timedelta(days=DAY_NAMES.index(day))
+
+
+class ScheduleTest(unittest.TestCase):
+    """When whooper-run starts a round. Most cases use the default [schedule], which the test config
+    also gets by having none: 15 minutes after the last round, from 10:00 to 18:00, Monday to Friday."""
+
+    weekdays = read_schedule({})
+
+    def test_defaults(self):
+        self.assertEqual(self.weekdays, {"interval_minutes": 15, "start": time(10, 0), "end": time(18, 0),
+                                         "days": ["mon", "tue", "wed", "thu", "fri"]})
+
+    def test_inside_the_hours_a_round_starts_at_once(self):
+        for when in [at("mon", "10:00"), at("wed", "12:34"), at("fri", "17:59")]:
+            with self.subTest(when):
+                self.assertEqual(next_round(self.weekdays, when), when)
+
+    def test_outside_the_hours_a_round_waits_for_the_next_start(self):
+        for when, want in [
+            (at("wed", "09:05"), at("wed", "10:00")),
+            (at("wed", "18:00"), at("thu", "10:00")),
+            (at("wed", "23:30"), at("thu", "10:00")),
+            (at("fri", "18:00"), at("next mon", "10:00")),
+            (at("sat", "12:00"), at("next mon", "10:00")),
+            (at("sun", "09:00"), at("next mon", "10:00")),
+        ]:
+            with self.subTest(when):
+                self.assertEqual(next_round(self.weekdays, when), want)
+
+    def test_hours_and_days_come_from_the_config(self):
+        schedule = read_schedule({"schedule": {"start": "08:30", "end": "12:00", "days": ["tue", "sat"]}})
+        for when, want in [
+            (at("mon", "11:00"), at("tue", "08:30")),
+            (at("tue", "11:59"), at("tue", "11:59")),
+            (at("tue", "12:00"), at("sat", "08:30")),
+        ]:
+            with self.subTest(when):
+                self.assertEqual(next_round(schedule, when), want)
+
+    def test_the_next_round_starts_interval_minutes_after_the_last_one_ended(self):
+        # (case, when the last round ended, the next round, the line whooper-run logs when it waits for the next start)
+        for name, ended, want, note in [
+            ("a morning round", at("wed", "10:06"), at("wed", "10:21"), ""),
+            # A round may start until 18:00 and finish after it.
+            ("a round that leaves time for one more", at("wed", "17:44"), at("wed", "17:59"), ""),
+            ("the day's last round", at("wed", "17:50"), at("thu", "10:00"),
+             "whooper-run: outside the [schedule] hours; next round at Thu 2031-07-31 10:00\n"),
+            ("Friday's last round", at("fri", "17:46"), at("next mon", "10:00"),
+             "whooper-run: outside the [schedule] hours; next round at Mon 2031-08-04 10:00\n"),
+        ]:
+            with self.subTest(name):
+                out, err = io.StringIO(), io.StringIO()
+                with redirect_stdout(out), redirect_stderr(err):
+                    main("next-round", str(int(ended.timestamp())))
+                self.assertEqual((int(out.getvalue()), err.getvalue()), (int(want.timestamp()), note))
+
+    def test_a_schedule_whooper_run_cannot_follow_fails(self):
+        for name, values in [
+            ("an unknown day", {"days": ["mon", "tues"]}),
+            ("no days", {"days": []}),
+            ("a time that is not 24-hour", {"start": "9:30am"}),
+            ("an end before the start", {"start": "18:00", "end": "10:00"}),
+            ("an end at the start", {"end": "10:00"}),
+            # Each poll runs a model, so no wait between rounds would spend money nonstop.
+            ("no wait between rounds", {"interval_minutes": 0}),
+            ("a negative interval", {"interval_minutes": -30}),
+            ("an interval in quotes", {"interval_minutes": "15"}),
+            ("part of a minute", {"interval_minutes": 1.5}),
+        ]:
+            with self.subTest(name), self.assertRaises(SystemExit):
+                read_schedule({"schedule": values})
+
+
 class ConfigTest(unittest.TestCase):
     """What the config feeds: shell variables, PR links, and the prompts."""
 
@@ -1142,11 +1272,26 @@ class ConfigTest(unittest.TestCase):
         try:
             env = self.command("env")
             repo = self.command("repo", "example-org/example-repo")
+            round_at = self.command("next-round", str(int(at("wed", "10:06").timestamp())))
         finally:
             os.environ["WHOOPER_CONFIG"] = test_config
         self.assertIn("WHOOPER_ORGS=example-org\n", env)
         self.assertIn("WHOOPER_REVIEW_AGENT=devin\n", env)
+        self.assertIn(f"WHOOPER_NOTIFY={ROOT / 'examples' / 'notify.sh'}\n", env)
         self.assertIn(f"WHOOPER_REPO_SETUP={ROOT / 'examples' / 'setup.sh'}\n", repo)
+        self.assertEqual(int(round_at), int(at("wed", "10:21").timestamp()))
+
+    def test_notify_is_a_path_in_the_configs_directory_or_empty(self):
+        self.assertIn("WHOOPER_NOTIFY=''\n", self.command("env"))
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.toml"
+            config.write_text(CONFIG + '\n[schedule]\nnotify = "notify.sh"\n')
+            os.environ["WHOOPER_CONFIG"], test_config = str(config), os.environ["WHOOPER_CONFIG"]
+            try:
+                env = self.command("env")
+            finally:
+                os.environ["WHOOPER_CONFIG"] = test_config
+        self.assertIn(f"WHOOPER_NOTIFY={Path(tmp) / 'notify.sh'}\n", env)
 
     def test_each_agents_settings_are_exported_for_its_launcher(self):
         env = self.command("env")
