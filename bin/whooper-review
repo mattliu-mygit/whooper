@@ -108,6 +108,12 @@ stop_reason="the review stopped at an unexpected error; see whooper-review's err
 work="" agent_group="" watchdog_pid=""
 cleanup() {
   local status=$?
+  # bash 3.2, macOS's /bin/bash, runs this with $? at 0 when set -u stops the script on an unset
+  # variable. A review that did not finish exits 1 then, so whooper-round does not count it as
+  # reviewed.
+  if [[ "$finished" != true ]] && ((status == 0)); then
+    status=1
+  fi
   # Only the review whose process ID the lock holds has a run to clean up and a lock to remove. One
   # refused the lock below, or stopped before it took it, removes only its work folder.
   if [[ "$(cat "$lock/pid" 2>/dev/null)" != "$$" ]]; then

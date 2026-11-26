@@ -8,13 +8,21 @@
 #   $WHOOPER_SUMMARY_FILE at $WHOOPER_SUMMARY_POST_AT, once per file.
 # Exit code 2 blocks the call and shows the run the reason.
 set -euo pipefail
-# Claude Code lets a call through when its hook fails with any code but 2, such as an unset
-# variable's 1, so every failure here blocks.
-trap 'status=$?; ((status == 0)) || exit 2' EXIT
+# Claude Code lets a call through when its hook exits with any code but 2, so this hook exits 0 only
+# through allow, and the EXIT trap turns every other exit into 2: a deny, a failed command, or an
+# unset variable. The trap cannot go by $? instead, since bash 3.2, macOS's /bin/bash, runs it with
+# $? at 0 when set -u stops the script.
+allowed=false
+trap '[[ "$allowed" == true ]] || exit 2' EXIT
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 eval "$("$root/lib/python" "$root/lib/whooper.py" env)"
 input="$(cat)"
+
+allow() {
+  allowed=true
+  exit 0
+}
 
 deny() {
   echo "slack-guard: $*" >&2
@@ -28,6 +36,7 @@ case "$tool" in
     jq -e --arg channel "$WHOOPER_ASK_CHANNEL" --arg ts "$WHOOPER_ASK_TS" \
       '.tool_input == {channel_id: $channel, message_ts: $ts, emoji: "eyes"}' <<<"$input" >/dev/null ||
       deny "only eyes on message $WHOOPER_ASK_TS in $WHOOPER_ASK_CHANNEL"
+    allow
     ;;
   mcp__claude_ai_Slack__slack_schedule_message)
     [[ -n "${WHOOPER_SUMMARY_FILE:-}" ]] || deny "this run has no summary to post"
@@ -38,6 +47,7 @@ case "$tool" in
     # noclobber makes the redirect fail when the file exists, so a second identical call is blocked
     # and the channel never gets the summary twice.
     (set -o noclobber && : > "$WHOOPER_SUMMARY_FILE.scheduled") 2>/dev/null || deny "the summary was already scheduled"
+    allow
     ;;
   *) deny "$tool is not a Slack call Whooper may make" ;;
 esac

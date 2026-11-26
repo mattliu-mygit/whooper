@@ -2183,8 +2183,26 @@ class SubmitTest(unittest.TestCase):
         self.assertEqual(self.posted(), [])
 
 
+# The bashes a script's #!/usr/bin/env bash line may start, each file once whatever links lead to it:
+# /bin/bash, macOS's bash 3.2, which comes first on the PATH a Prompting Time opened from the Dock gives
+# Whooper, and each bash on PATH, since env starts the first one. The tests of a script whose exit code
+# must hold under any bash run it under each.
+BASHES = list(dict.fromkeys(
+    path.resolve()
+    for path in [Path("/bin/bash"), *(Path(entry) / "bash" for entry in os.environ["PATH"].split(os.pathsep))]
+    if os.access(path, os.X_OK)))
+
+
+def bash_folder(bash, folder):
+    """Makes folder, with a link to bash named bash in it, and returns it. While folder comes first on
+    PATH, a script's #!/usr/bin/env bash line starts that bash."""
+    folder.mkdir()
+    (folder / "bash").symlink_to(bash)
+    return folder
+
+
 class SlackGuardTest(unittest.TestCase):
-    """hooks/slack-guard.sh, fed the PreToolUse input Claude Code sends it."""
+    """hooks/slack-guard.sh, fed the PreToolUse input Claude Code sends it, under each bash in BASHES."""
 
     HOOK = ROOT / "hooks" / "slack-guard.sh"
     SLACK = "mcp__claude_ai_Slack__slack"
@@ -2193,23 +2211,42 @@ class SlackGuardTest(unittest.TestCase):
     ASK = {"channel_id": ASK_CHANNEL, "message_ts": "1761700000.000100", "emoji": "eyes"}
 
     def setUp(self):
-        self.summary = Path(tempfile.mkdtemp()) / "summary.txt"
-        self.summary.write_text("Whooper reviewed https://github.com/example-org/example-repo/pull/12 at cb54aa8.\nLog: log.md")
-        self.schedule = {"channel_id": self.SUMMARY_CHANNEL, "message": self.summary.read_text(), "post_at": 1761700180}
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        text = "Whooper reviewed https://github.com/example-org/example-repo/pull/12 at cb54aa8.\nLog: log.md"
+        self.schedule = {"channel_id": self.SUMMARY_CHANNEL, "message": text, "post_at": 1761700180}
+        # Each bash gets a folder that puts it first on PATH, and a summary file of its own, since the hook
+        # lets each file's summary through once.
+        self.folders, self.summaries = {}, {}
+        for n, bash in enumerate(BASHES):
+            self.folders[bash] = bash_folder(bash, self.tmp / f"bash-{n}")
+            self.summaries[bash] = self.tmp / f"summary-{n}.txt"
+            self.summaries[bash].write_text(text)
 
-    def run_hook(self, tool, tool_input, **env):
-        """Runs the hook with the variables a summary run sets, changed by env, where None unsets one."""
-        env = {"PATH": os.environ["PATH"], "WHOOPER_CONFIG": os.environ["WHOOPER_CONFIG"], "WHOOPER_ASK_TS": "1761700000.000100", "WHOOPER_SUMMARY_FILE": str(self.summary),
+    def run_hook(self, bash, tool, tool_input, **env):
+        """Runs the hook as Claude Code does, by its path, with bash first on PATH, and with the variables a
+        summary run sets, changed by env, where None unsets one."""
+        env = {"PATH": os.environ["PATH"], "WHOOPER_CONFIG": os.environ["WHOOPER_CONFIG"],
+               "WHOOPER_ASK_TS": "1761700000.000100", "WHOOPER_SUMMARY_FILE": str(self.summaries[bash]),
                "WHOOPER_SUMMARY_POST_AT": "1761700180", **env}
         env = {k: v for k, v in env.items() if v is not None}
+        env["PATH"] = f"{self.folders[bash]}{os.pathsep}{env['PATH']}"
         payload = json.dumps({"hook_event_name": "PreToolUse", "tool_name": f"{self.SLACK}_{tool}", "tool_input": tool_input})
         return subprocess.run([str(self.HOOK)], input=payload, env=env, capture_output=True, text=True).returncode
 
     def test_allows_eyes_on_the_ask_and_the_composed_summary(self):
-        self.assertEqual(self.run_hook("add_reaction", self.ASK), 0)
-        self.assertEqual(self.run_hook("schedule_message", self.schedule), 0)
+        for bash in BASHES:
+            with self.subTest(bash=str(bash)):
+                self.assertEqual(self.run_hook(bash, "add_reaction", self.ASK), 0)
+                self.assertEqual(self.run_hook(bash, "schedule_message", self.schedule), 0)
 
     def test_blocks_everything_else(self):
+        # With no config, lib/whooper.py env prints nothing, so the channels it sets stay unset.
+        no_config = {"WHOOPER_CONFIG": str(self.tmp / "missing.toml")}
+        # A jq that fails stands in for any command in the hook that fails where it should not.
+        fakes = self.tmp / "fakes"
+        fake(fakes / "jq", "exit 1")
+        failing_jq = {"PATH": f"{fakes}{os.pathsep}{os.environ['PATH']}"}
         cases = [
             ("wrong channel", "add_reaction", {**self.ASK, "channel_id": self.SUMMARY_CHANNEL}, {}),
             ("wrong ts", "add_reaction", {**self.ASK, "message_ts": "1761699999.000100"}, {}),
@@ -2222,16 +2259,30 @@ class SlackGuardTest(unittest.TestCase):
             ("summary in a thread", "schedule_message", {**self.schedule, "thread_ts": "1761700000.000100"}, {}),
             ("changed summary text", "schedule_message", {**self.schedule, "message": "Whooper approved this PR."}, {}),
             ("another time", "schedule_message", {**self.schedule, "post_at": 1771700180}, {}),
-            # An unset variable makes bash exit 1, which Claude Code would treat as allowing the call.
-            ("a run with no summary time", "schedule_message", self.schedule, {"WHOOPER_SUMMARY_POST_AT": None}),
+            # Each allowed call with a variable it reads unset, one its run sets or a channel. set -u stops the
+            # hook at one it does not check first: bash then exits 1, and bash 3.2 exits 0 when an EXIT trap
+            # is set, and Claude Code lets the call through after either.
+            ("eyes with WHOOPER_ASK_TS unset", "add_reaction", self.ASK, {"WHOOPER_ASK_TS": None}),
+            ("eyes with no config", "add_reaction", self.ASK, no_config),
+            ("the summary with WHOOPER_SUMMARY_FILE unset", "schedule_message", self.schedule,
+             {"WHOOPER_SUMMARY_FILE": None}),
+            ("the summary with WHOOPER_SUMMARY_POST_AT unset", "schedule_message", self.schedule,
+             {"WHOOPER_SUMMARY_POST_AT": None}),
+            ("the summary with no config", "schedule_message", self.schedule, no_config),
+            # Each allowed call when a command in the hook fails.
+            ("eyes when a command fails", "add_reaction", self.ASK, failing_jq),
+            ("the summary when a command fails", "schedule_message", self.schedule, failing_jq),
         ]
-        for name, tool, tool_input, env in cases:
-            with self.subTest(name):
-                self.assertEqual(self.run_hook(tool, tool_input, **env), 2)
+        for bash in BASHES:
+            for name, tool, tool_input, env in cases:
+                with self.subTest(name, bash=str(bash)):
+                    self.assertEqual(self.run_hook(bash, tool, tool_input, **env), 2)
 
     def test_second_summary_is_blocked(self):
-        self.assertEqual(self.run_hook("schedule_message", self.schedule), 0)
-        self.assertEqual(self.run_hook("schedule_message", self.schedule), 2)
+        for bash in BASHES:
+            with self.subTest(bash=str(bash)):
+                self.assertEqual(self.run_hook(bash, "schedule_message", self.schedule), 0)
+                self.assertEqual(self.run_hook(bash, "schedule_message", self.schedule), 2)
 
 
 class RunTest(unittest.TestCase):
@@ -3195,6 +3246,25 @@ class RunTest(unittest.TestCase):
         self.assertEqual(self.read(run / "failure.txt"),
                          "the review stopped at an unexpected error; see whooper-review's error output\n")
         self.assertEqual(json.loads((run / "failure.json").read_text()), CAUSES["unknown"])
+
+    def test_a_review_stopped_by_an_unset_variable_fails_under_each_bash(self):
+        # With no review agent in [jobs], whooper-review stops at an unset variable once its run directory
+        # exists, and bash 3.2 then runs the cleanup with $? at 0.
+        env, item, _ = self.pull_request()
+        config = Path(self.env["WHOOPER_CONFIG"])
+        config.write_text(config.read_text().replace('review = "claude"\n', ""))
+        for n, bash in enumerate(BASHES):
+            with self.subTest(bash=str(bash)):
+                folder = bash_folder(bash, Path(self.tmp.name) / f"bash-{n}")
+                result = self.command("whooper-review", str(item), "--dry-run",
+                                      env={**env, "PATH": f"{folder}{os.pathsep}{env['PATH']}"})
+                [run] = (self.state / "runs").iterdir()
+                failure = self.read(run / "failure.txt")
+                shutil.rmtree(run)
+                self.assertIn("WHOOPER_REVIEW_AGENT: unbound variable", result.stderr)
+                # whooper-round counts a review that exits 0 as reviewed.
+                self.assertEqual((result.returncode, failure),
+                                 (1, "the review stopped at an unexpected error; see whooper-review's error output\n"))
 
     def test_a_fetch_github_refuses_for_want_of_a_login_names_that_cause(self):
         env, item, _ = self.pull_request()
