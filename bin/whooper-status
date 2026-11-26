@@ -86,6 +86,38 @@
 #               when it ended before selecting; reason says why it ended so, or is null: which poll
 #               step failed, the cause reviews wait on and how many wait, or that Whooper is paused
 #
+# Beside these, the same status in Prompting Time's status format 2, which
+# schemas/prompting-time-status.json describes, for the groups and row actions
+# prompting-time-plugin.json's status declares:
+#
+#   format      2
+#   agent       Whooper's row in Prompting Time: words, such as "Running · next poll 3:45 PM" or
+#               "Can't review · Docker isn't running", and dot: error while blocked or after a failed
+#               poll, running during a round, and idle otherwise
+#   blockers    each cause that stops every review, {id, title, dot, route, action}: the cause blocked
+#               names, then each other one a PR's newest review waits or failed at; id is the cause's
+#               id, title its summary, dot error, route /causes/<id>, and action round, which reviews
+#               the waiting PRs again
+#   items       the newest review of each PR in reviews that the user did not remove, at most 50, the
+#               ones still current before the done ones and each part newest first, each {id, group,
+#               title, detail, dot, project, updated_at, route, actions}:
+#     id          the run ID
+#     group       ready (waits on the user and is safe to approve), look (waits on the user
+#                 otherwise), failed (failed at a cause of its PR's own), reviewing (runs, or waits
+#                 without a cause that stops every review), waiting (waits or failed at such a cause),
+#                 or done (submitted, skipped by the user, or reviewed and needing no one)
+#     title       the PR's title, or <owner>/<repo>#<number> without it
+#     detail      one line: the PR, its author, and where the review stands, such as
+#                 "example-repo#12 · @alice · 2 findings" or "example-repo#14 · Docker isn't running"
+#     dot         success for ready, attention for look, error for a failed review, running for one
+#                 that runs, and idle otherwise, as for a review submitted, skipped, or waiting
+#     project     null: Whooper knows no checkout of the PR's repo
+#     updated_at  when the review was submitted, or else ended, or else started
+#     route       /reviews/<run-id>, where Whooper's page shows the review
+#     actions     those of retry, skip, and remove that apply: none while the review runs, no retry
+#                 without the repo, and no skip once submitted or skipped
+#   truncated   whether items left any out to stay within 50
+#
 # Times are local, in ISO 8601 with the offset. bin/whooper-show <run-id> --json prints one review
 # in full.
 set -euo pipefail

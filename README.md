@@ -135,8 +135,22 @@ round.
 `bin/whooper-status --json` lists, as `reviews`, the review runs in `<state>/runs` that started in
 the last 30 days, newest first: each one's PR, the PR's title and author, and times, how it went, its
 verdict and number of findings, whether it is safe to approve, what whooper-submit posted, and
-whether it needs you. Prompting Time builds its "Needs you" list and its history of past reviews
-from them.
+whether it needs you.
+
+Beside those fields, whooper-status prints the same status in Prompting Time's status format 2,
+which `schemas/prompting-time-status.json` describes, a copy of Prompting Time's
+`docs/plugin-status-v2.schema.json`: `agent`, Whooper's row in Prompting Time, such as `Running ·
+next poll 3:45 PM`; `blockers`, each cause that stops every review; and `items`, the newest review of
+each PR you did not remove, at most 50, with `truncated` saying whether any were left out. Each item
+names its group among those `prompting-time-plugin.json` declares, the ones Prompting Time showed
+Whooper's reviews in before: Ready to approve, Needs a look, and Review failed, which wait on you,
+then Reviewing, Waiting, which holds the reviews a cause that stops every review stopped, and Done.
+For example, a review that ended with an `approve_once_ci_passes` verdict and one nit is in group
+`ready` with a green dot, the line `example-repo#12 · @alice · 1 finding`, the route
+`/reviews/<run-id>`, where Whooper's page shows it, and the row actions retry, skip, and remove.
+Prompting Time builds its "Needs you" list, its other sections, and its menu bar from them. The
+format 1 fields stay until Prompting Time reads format 2 alone; whooper-status's header lists each
+field of both.
 
 ```sh
 bin/whooper-show <run-id> --json   # one review in full, for its review screen

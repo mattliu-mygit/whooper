@@ -207,8 +207,9 @@ def read_status(data):
     """Whooper's status for whooper-status --json, from the files under data, its state directory:
     whether whooper-run and a round are running, whether Whooper is paused, when the next scheduled
     round starts, how the last round ended, what blocks every review (read_blocked), the reviews of
-    the last REVIEW_DAYS days (read_reviews), and the last ROUNDS_KEPT rounds (add_round), newest first. Times are local, in ISO 8601 with the
-    offset. It reads files, asks ps about the two
+    the last REVIEW_DAYS days (read_reviews), and the last ROUNDS_KEPT rounds (add_round), newest first,
+    and beside them the same status in Prompting Time's status format 2 (status_v2). Times are local, in
+    ISO 8601 with the offset. It reads files, asks ps about the two
     lock holders, and checks that the process of each review's lock exists, and never calls GitHub,
     Slack, or a model."""
     def read(path):
@@ -235,7 +236,7 @@ def read_status(data):
     last = json.loads(read(data / "last-round.json") or "null")
     rounds = [json.loads(line) for line in (read(data / "rounds.jsonl") or "").splitlines()]
     reviews = read_reviews(data, datetime.now(timezone.utc))
-    return {
+    status = {
         "version": 1,
         "loop": {"running": bool(loop), "pid": loop},
         "paused": (data / "paused").exists(),
@@ -250,6 +251,7 @@ def read_status(data):
                     "ended_at": local_time(r["ended_at"]) if r["ended_at"] is not None else None}
                    for r in reversed(rounds)],
     }
+    return {**status, **status_v2(status, datetime.now(timezone.utc).astimezone())}
 
 
 def read_blocked(reviews):
@@ -277,6 +279,157 @@ def read_blocked(reviews):
             waiting += 1
         newest.add((review["repo"], review["pr"]))
     return {**cause, "since": first["ended_at"] or first["started_at"], "waiting": waiting}
+
+
+# Status format 2, which Prompting Time reads because prompting-time-plugin.json declares
+# "status": {"format": 2, ...}, and which schemas/prompting-time-status.json describes: whooper-status
+# lists at most this many items.
+STATUS_ITEMS = 50
+
+
+def clock(when):
+    """A time of day as Prompting Time's rows show it, such as 3:45 PM."""
+    return f"{when.hour % 12 or 12}:{when:%M} {'AM' if when.hour < 12 else 'PM'}"
+
+
+def short_date(iso, now):
+    """A time from the status as a review's row says it: 3:12 PM today, Nov 24 this year, and Nov 24,
+    2025 before, local to now."""
+    when = datetime.fromisoformat(iso).astimezone(now.tzinfo)
+    if when.date() == now.date():
+        return clock(when)
+    return f"{when:%b} {when.day}" + (f", {when.year}" if when.year != now.year else "")
+
+
+def short_time(iso, now):
+    """A time from the status as Whooper's agent row says it: 3:45 PM today, and Mon 10:00 AM on another
+    day, local to now."""
+    when = datetime.fromisoformat(iso).astimezone(now.tzinfo)
+    return clock(when) if when.date() == now.date() else f"{when:%a} {clock(when)}"
+
+
+def review_group(review):
+    """The status group of a PR's newest review, by the rule Prompting Time placed Whooper's reviews with
+    before status format 2: None once the user removed it, which leaves it out of every list; ready
+    while it waits on the user's decision and is safe to approve, and look while it waits otherwise;
+    done once the user is finished with it, submitted, skipped, or reviewed and needing no one;
+    reviewing while it runs, or waits without a cause that stops every review; waiting while it waits
+    or failed at such a cause; and failed when it failed at a cause of its own PR's."""
+    if review["removed_by_user"]:
+        return None
+    finished = (review["submitted"] is not None or review["skipped_by_user"]
+                or review["outcome"] == "reviewed" and not review["needs_you"])
+    if review["outcome"] == "reviewed" and review["needs_you"] and not finished:
+        return "ready" if review["safe_to_approve"] else "look"
+    if finished:
+        return "done"
+    if review["outcome"] == "running":
+        return "reviewing"
+    blocking = review["cause"] is not None and review["cause"]["scope"] == "all"
+    if review["outcome"] == "waiting":
+        return "waiting" if blocking else "reviewing"
+    return "waiting" if blocking else "failed"
+
+
+def review_item(review, group, now):
+    """A PR's newest review as an item of status format 2, in group (review_group): its PR's title, a
+    line that names the PR, its author, and where the review stands, a dot (green when it is ready to
+    approve, orange when it needs a look, red when it failed, uncolored while it runs, and none
+    otherwise), when it last changed, the route of Whooper's page that shows it, and the row actions
+    that apply: retry, skip, and remove, each of which refuses a review that runs, retry also one
+    without run.json, which alone names the PR's repo, and skip one already submitted or skipped.
+    Whooper knows no checkout of the PR's repo, so project is None."""
+    repo, pr, cause = review["repo"], review["pr"], review["cause"]
+    name = f"{repo.split('/')[-1]}#{pr}" if repo else f"#{pr}"
+    if review["submitted"]:
+        submitted = review["submitted"]
+        standing = ("approved" if submitted["event"] == "APPROVE" else "commented") + (
+            f" {short_date(submitted['at'], now)}" if submitted["at"] else "")
+    elif review["skipped_by_user"]:
+        standing = "skipped"
+    elif review["outcome"] == "running":
+        standing = f"reviewing since {short_date(review['started_at'], now)}"
+    elif review["outcome"] == "waiting":
+        standing = f"waiting · {cause['summary']}" if cause else "waiting for the next round"
+    elif review["outcome"] == "failed":
+        standing = cause["summary"] if cause else "review failed"
+    elif not review["needs_you"]:
+        standing = "not submitted"
+    elif review["skipped"]:
+        standing = "skipped, look first"
+    else:
+        count = review["findings"]
+        standing = f"{count} finding{'' if count == 1 else 's'}" if count else "no findings"
+    if review["submitted"] or review["skipped_by_user"]:
+        dot = "idle"
+    else:
+        dot = {"running": "running", "waiting": "idle", "failed": "error"}.get(
+            review["outcome"], {"ready": "success", "look": "attention"}.get(group, "idle"))
+    running = review["outcome"] == "running"
+    actions = [action for action, applies in [
+        ("retry", not running and repo is not None),
+        ("skip", not running and review["submitted"] is None and not review["skipped_by_user"]),
+        ("remove", not running),
+    ] if applies]
+    return {
+        "id": review["run_id"],
+        "group": group,
+        "title": review["title"] or (f"{repo}#{pr}" if repo else f"PR #{pr}"),
+        "detail": " · ".join([name, *([f"@{review['author']}"] if review["author"] else []), standing]),
+        "dot": dot,
+        "project": None,
+        "updated_at": (review["submitted"] or {}).get("at") or review["ended_at"] or review["started_at"],
+        "route": f"/reviews/{review['run_id']}",
+        "actions": actions,
+    }
+
+
+def status_v2(status, now):
+    """The fields of Prompting Time's status format 2 for status, the rest of whooper-status's JSON, at
+    now, a local time: Whooper's agent row, as Prompting Time worded it before format 2; the causes
+    that stop every review, as blockers, each of which a round rechecks: the one status's blocked names,
+    then each other cause a PR's newest review waits or failed at; and the newest review of each PR the
+    user did not remove, as items, at most STATUS_ITEMS, those still current before the finished ones
+    and each part newest first, with truncated saying whether any were left out."""
+    blocked, last = status["blocked"], status["last_round"]
+    if blocked:
+        agent = {"words": f"Can't review · {blocked['summary']}", "dot": "error"}
+    elif status["round"]["running"]:
+        reviewing = status["round"]["reviewing"]
+        agent = {"words": f"Reviewing {reviewing}" if reviewing else "Polling now", "dot": "running"}
+    elif status["paused"]:
+        agent = {"words": "Paused", "dot": "idle"}
+    else:
+        upcoming = short_time(status["next_round"], now) if status["next_round"] else None
+        if last and last["result"] == "poll_failed":
+            agent = {"words": f"Poll failed {short_time(last['ended_at'], now)}"
+                              + (f" · next try {upcoming}" if upcoming else ""), "dot": "error"}
+        else:
+            agent = {"words": f"Running · next poll {upcoming}" if upcoming else "Running", "dot": "idle"}
+    # status's reviews are newest first, so the first run of each PR listed is its newest.
+    seen, items = set(), []
+    for review in status["reviews"]:
+        if (review["repo"], review["pr"]) in seen:
+            continue
+        seen.add((review["repo"], review["pr"]))
+        if group := review_group(review):
+            items.append((review, review_item(review, group, now)))
+    causes = {blocked["id"]: blocked["summary"]} if blocked else {}
+    for review, item in items:
+        if item["group"] == "waiting" and review["cause"]:
+            causes.setdefault(review["cause"]["id"], review["cause"]["summary"])
+    newest_first = sorted((item for _, item in items), key=lambda item: datetime.fromisoformat(item["updated_at"]),
+                          reverse=True)
+    # sorted keeps the order of equal keys, so each part stays newest first.
+    ordered = sorted(newest_first, key=lambda item: item["group"] == "done")
+    return {
+        "format": 2,
+        "agent": agent,
+        "blockers": [{"id": cause, "title": summary, "dot": "error", "route": f"/causes/{cause}", "action": "round"}
+                     for cause, summary in causes.items()],
+        "items": ordered[:STATUS_ITEMS],
+        "truncated": len(ordered) > STATUS_ITEMS,
+    }
 
 
 # whooper-status lists the last 50 rounds, which is all rounds.jsonl keeps.
@@ -2304,10 +2457,15 @@ def fill(template, values):
     return re.sub(r"\{\{(\w+)\}\}", value, template)
 
 
-def check_schema(value, schema, where="the value"):
+def check_schema(value, schema, where="the value", root=None):
     """Raises ValueError at the first place value breaks schema. Covers the JSON Schema keywords
-    Whooper's schemas use: type, one or a list of them, enum, minimum, pattern, properties, required,
-    additionalProperties, items, minItems, and maxItems."""
+    Whooper's schemas and the copy of Prompting Time's status schema use: type, one or a list of them,
+    enum, const, minimum, minLength, pattern, properties, required, additionalProperties, items,
+    minItems, maxItems, uniqueItems, and $ref to one of the schema's own $defs. format only annotates,
+    as JSON Schema's default has it, so it checks nothing."""
+    root = root or schema
+    if "$ref" in schema:
+        check_schema(value, root["$defs"][schema["$ref"].removeprefix("#/$defs/")], where, root)
     kinds = schema.get("type", [])
     kinds = [kinds] if isinstance(kinds, str) else kinds
     types = {"object": dict, "array": list, "string": str, "integer": int, "number": (int, float), "boolean": bool,
@@ -2318,6 +2476,11 @@ def check_schema(value, schema, where="the value"):
         raise ValueError(f"{where} is not of type {' or '.join(kinds)}")
     if "enum" in schema and value not in schema["enum"]:
         raise ValueError(f"{where} is {value!r}, not one of {schema['enum']}")
+    # 1 == True in Python, but not in JSON.
+    if "const" in schema and (value != schema["const"] or type(value) is not type(schema["const"])):
+        raise ValueError(f"{where} is {value!r}, not {schema['const']!r}")
+    if "minLength" in schema and isinstance(value, str) and len(value) < schema["minLength"]:
+        raise ValueError(f"{where} is shorter than {schema['minLength']} characters")
     if "minimum" in schema and isinstance(value, (int, float)) and not isinstance(value, bool) and value < schema["minimum"]:
         raise ValueError(f"{where} is below {schema['minimum']}")
     if "pattern" in schema and isinstance(value, str) and not re.search(schema["pattern"], value):
@@ -2330,14 +2493,17 @@ def check_schema(value, schema, where="the value"):
             raise ValueError(f"{where} has unexpected {', '.join(extra)}")
         for key, sub in properties.items():
             if key in value:
-                check_schema(value[key], sub, f"{where}.{key}")
+                check_schema(value[key], sub, f"{where}.{key}", root)
     if isinstance(value, list) and len(value) < schema.get("minItems", 0):
         raise ValueError(f"{where} has fewer than {schema['minItems']} items")
     if isinstance(value, list) and len(value) > schema.get("maxItems", len(value)):
         raise ValueError(f"{where} has more than {schema['maxItems']} items")
+    if (isinstance(value, list) and schema.get("uniqueItems")
+            and len({json.dumps(item, sort_keys=True) for item in value}) < len(value)):
+        raise ValueError(f"{where} holds an item twice")
     if isinstance(value, list) and "items" in schema:
         for i, item in enumerate(value):
-            check_schema(item, schema["items"], f"{where}[{i}]")
+            check_schema(item, schema["items"], f"{where}[{i}]", root)
 
 
 def check_jobs(config):

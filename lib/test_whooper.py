@@ -21,7 +21,8 @@ import whooper
 from whooper import (REVIEW_WORDING, SETTINGS_SCHEMA, add_round, bot_list, change_drafts, check_overview, check_schema,
                      claude_shell_calls, classify, co_change, conversation, devin_shell_calls, diff_files, failure_cause,
                      fill, main, mark_new_commits, next_round, pr_link, poll_items, read_asks, read_drafts, read_schedule,
-                     select_work, skill_hashes, slack_posts, summary_text, wait_review, write_record, write_settings)
+                     select_work, short_date, short_time, skill_hashes, slack_posts, status_v2, summary_text,
+                     wait_review, write_record, write_settings)
 
 LOGIN = "sam-example"
 # Every test runs on this made-up config, never on the user's own.
@@ -1196,6 +1197,25 @@ class CheckSchemaTest(unittest.TestCase):
         ]:
             with self.subTest(name), self.assertRaises(ValueError):
                 check_schema(value, self.SCHEMA)
+
+    def test_it_checks_the_keywords_of_prompting_times_status_schema(self):
+        schema = json.loads((ROOT / "schemas" / "prompting-time-status.json").read_text())
+        item = {"id": "r1", "group": "look", "title": "T", "detail": None, "dot": "attention", "project": None,
+                "updated_at": "2031-07-30T15:00:00-07:00", "route": "/reviews/r1", "actions": ["skip"]}
+        status = {"format": 2, "agent": {"words": "Running", "dot": "idle"}, "blockers": [], "items": [item],
+                  "truncated": False}
+        check_schema(status, schema)
+        for name, changes in [
+            ("another format, by const", {"format": 1}),
+            ("true for the format, which is 1 to Python", {"format": True}),
+            ("a dot outside the $defs enum", {"agent": {"words": "Running", "dot": "red"}}),
+            ("an empty id, below minLength", {"items": [{**item, "id": ""}]}),
+            ("a route that is not a path, by the $defs pattern", {"items": [{**item, "route": "reviews/r1"}]}),
+            ("a row action twice, against uniqueItems", {"items": [{**item, "actions": ["skip", "skip"]}]}),
+            ("more than 50 items", {"items": [item] * 51}),
+        ]:
+            with self.subTest(name), self.assertRaises(ValueError):
+                check_schema({**status, **changes}, schema)
 
     def test_the_check_command_fails_on_a_file_that_does_not_fit(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4871,9 +4891,12 @@ class RunTest(unittest.TestCase):
         self.assertEqual((answered.returncode, answered.stdout), (0, "It stopped.\n"), answered.stderr)
 
     def test_status_reports_the_loop_pause_next_round_and_rounds_from_the_state_folder(self):
+        # Status format 2's fields come beside format 1's, which they leave as they were.
         nothing = {"version": 1, "loop": {"running": False, "pid": None}, "paused": False, "next_round": None,
                    "round": {"running": False, "started_at": None, "reviewing": None}, "last_round": None,
-                   "blocked": None, "reviews": [], "rounds": []}
+                   "blocked": None, "reviews": [], "rounds": [],
+                   "format": 2, "agent": {"words": "Running", "dot": "idle"}, "blockers": [], "items": [],
+                   "truncated": False}
         self.assertEqual(self.status(), nothing)
         # Unix times on 2031-07-30: the next round at 10:15:00 in Los Angeles, the running round's
         # start at 10:00:02, and the last round from 09:45:01 to 09:52:40.
@@ -4917,6 +4940,11 @@ class RunTest(unittest.TestCase):
             "blocked": None,
             "reviews": [],
             "rounds": rounds,
+            "format": 2,
+            "agent": {"words": "Reviewing example-org/example-repo#12", "dot": "running"},
+            "blockers": [],
+            "items": [],
+            "truncated": False,
         })
         # Locks left by a whooper-run that is gone and by a round whose process ID now belongs to this
         # test: nothing runs, so no round is next either.
@@ -5794,6 +5822,59 @@ class ReviewsTest(unittest.TestCase):
             self.review(month),
         ])
 
+    def test_status_lists_each_prs_newest_review_as_an_item_of_status_format_2(self):
+        now = datetime.now(timezone.utc).astimezone(self.LA)
+        ready = self.make_run(timedelta(hours=1))
+        self.finish(ready, "approve_once_ci_passes", [self.NIT])
+        # An older run of the same PR, which the newer one supersedes, lists as no item.
+        self.finish(self.make_run(timedelta(hours=5)), findings=[finding()])
+        look = self.make_run(timedelta(hours=2), pr=13)
+        self.finish(look)
+        failed = self.stopped(timedelta(hours=3), 14, "time_limit")
+        submitted = self.make_run(timedelta(hours=4), pr=17)
+        self.finish(submitted, "approve_once_ci_passes", [self.NIT])
+        self.write(submitted, "submit.json", {"status": "posted", "request": self.REQUEST, "response": {"id": 7001}}, 30)
+        removed = self.make_run(timedelta(hours=6), pr=18)
+        self.finish(removed)
+        (removed / "removed-by-user").touch()
+        reviewing = self.make_run(timedelta(minutes=10), pr=15)
+        self.fetched(reviewing)
+        self.hold(reviewing, os.getpid())
+        # A review that waits read no github.json yet, so its title is its PR.
+        waits = self.waiting(timedelta(minutes=30), 16)
+        status = self.status()
+        schema = json.loads((ROOT / "schemas" / "prompting-time-status.json").read_text())
+        # The schema lists format 2's fields only; format 1's stay beside them until Prompting Time
+        # reads format 2 alone.
+        check_schema({key: status[key] for key in schema["properties"]}, schema, "status")
+
+        def item(run, group, dot, detail, actions=("retry", "skip", "remove"), title=self.TITLE, updated=None):
+            return {"id": run.name, "group": group, "title": title, "detail": detail, "dot": dot, "project": None,
+                    "updated_at": self.local(updated or self.started(run) + timedelta(minutes=20)),
+                    "route": f"/reviews/{run.name}", "actions": list(actions)}
+
+        self.assertEqual(status["items"], [
+            item(reviewing, "reviewing", "running",
+                 f"example-repo#15 · @alice · reviewing since {short_date(self.local(self.started(reviewing)), now)}",
+                 actions=(), updated=self.started(reviewing)),
+            item(waits, "waiting", "idle", "example-repo#16 · waiting · Docker isn't running",
+                 title="example-org/example-repo#16", updated=self.started(waits)),
+            item(ready, "ready", "success", "example-repo#12 · @alice · 1 finding"),
+            item(look, "look", "attention", "example-repo#13 · @alice · no findings"),
+            item(failed, "failed", "error", "example-repo#14 · @alice · The review ran past its time limit",
+                 updated=self.started(failed) + timedelta(minutes=2)),
+            # Finished items come after the current ones.
+            item(submitted, "done", "idle",
+                 f"example-repo#17 · @alice · approved {short_date(self.local(self.started(submitted) + timedelta(minutes=30)), now)}",
+                 actions=("retry", "remove"), updated=self.started(submitted) + timedelta(minutes=30)),
+        ])
+        self.assertFalse(status["truncated"])
+        # The newest review that ended waits at a cause that stops every review.
+        self.assertEqual(status["blockers"], [{"id": "docker_unavailable", "title": "Docker isn't running",
+                                               "dot": "error", "route": "/causes/docker_unavailable",
+                                               "action": "round"}])
+        self.assertEqual(status["agent"], {"words": "Can't review · Docker isn't running", "dot": "error"})
+
     def test_a_review_runs_while_a_live_whooper_review_holds_its_prs_lock_for_it(self):
         earlier = self.make_run(timedelta(hours=2))
         self.finish(earlier)
@@ -6358,6 +6439,96 @@ class ReviewsTest(unittest.TestCase):
                 result = self.show(*args)
                 self.assertEqual((result.returncode, result.stdout, result.stderr),
                                  (1, "", "usage: whooper-show <run-id> --json\n"))
+
+
+class StatusFormat2Test(unittest.TestCase):
+    """status_v2, the fields of Prompting Time's status format 2 in whooper-status's JSON, on reviews
+    as read_reviews lists them, at a fixed time in Los Angeles."""
+
+    LA = ZoneInfo("America/Los_Angeles")
+    NOW = datetime(2031, 7, 30, 15, 0, tzinfo=LA)
+
+    def review(self, minutes_ago, pr=12, **fields):
+        """A review of example-org/example-repo#<pr> that started minutes_ago before NOW and ended a minute
+        later with a look_first verdict, and waits for the user."""
+        started = (self.NOW - timedelta(minutes=minutes_ago)).isoformat(timespec="seconds")
+        ended = (self.NOW - timedelta(minutes=minutes_ago - 1)).isoformat(timespec="seconds")
+        return {"run_id": f"run-{pr}-{minutes_ago}", "repo": "example-org/example-repo", "pr": pr, "title": "T",
+                "author": None, "url": None, "started_at": started, "ended_at": ended, "outcome": "reviewed",
+                "verdict": "look_first", "skipped": False, "findings": 0, "safe_to_approve": False, "submitted": None,
+                "needs_you": True, "cause": None, "head_sha": "h1", "pr_head_sha": None, "skipped_by_user": False,
+                "removed_by_user": False, **fields}
+
+    def status(self, reviews, **fields):
+        return status_v2({"blocked": None, "last_round": None, "round": {"running": False, "reviewing": None},
+                          "paused": False, "next_round": None, "reviews": reviews, **fields}, self.NOW)
+
+    def test_each_review_goes_in_the_group_prompting_time_placed_it_in_before_format_2(self):
+        failed = {"outcome": "failed", "verdict": None}
+        cases = [
+            ({}, "look", "attention"),
+            ({"safe_to_approve": True, "verdict": "approve_once_ci_passes"}, "ready", "success"),
+            # A review the user skipped is done, even one that failed.
+            ({"skipped_by_user": True, "needs_you": False}, "done", "idle"),
+            ({**failed, "skipped_by_user": True, "needs_you": False}, "done", "idle"),
+            ({**failed, "cause": CAUSES["time_limit"]}, "failed", "error"),
+            # A failure at a cause that stops every review waits with the others it stopped, still red.
+            ({**failed, "cause": CAUSES["docker_unavailable"]}, "waiting", "error"),
+            ({"outcome": "waiting", "verdict": None, "needs_you": False, "cause": CAUSES["docker_unavailable"]},
+             "waiting", "idle"),
+            ({"outcome": "waiting", "verdict": None, "needs_you": False, "cause": CAUSES["unknown"]}, "reviewing", "idle"),
+            ({"outcome": "running", "verdict": None, "needs_you": False, "ended_at": None}, "reviewing", "running"),
+        ]
+        for fields, group, dot in cases:
+            with self.subTest(fields):
+                [item] = self.status([self.review(5, **fields)])["items"]
+                self.assertEqual((item["group"], item["dot"]), (group, dot))
+        # A review the user removed is in no group.
+        self.assertEqual(self.status([self.review(5, removed_by_user=True, needs_you=False)])["items"], [])
+
+    def test_it_lists_the_current_items_before_the_finished_ones_and_at_most_50(self):
+        done = self.review(1, pr=1, skipped_by_user=True, needs_you=False)
+        current = [self.review(10 + i, pr=100 + i) for i in range(50)]
+        status = self.status([done, *current])
+        self.assertEqual([item["id"] for item in status["items"]], [r["run_id"] for r in current])
+        self.assertTrue(status["truncated"])
+        status = self.status([done, *current[:49]])
+        self.assertEqual(status["items"][-1]["id"], done["run_id"])
+        self.assertFalse(status["truncated"])
+
+    def test_blockers_name_the_blocked_cause_then_each_other_one_a_newest_review_waits_at(self):
+        blocked = {**CAUSES["gh_signed_out"], "since": self.NOW.isoformat(), "waiting": 0}
+        reviews = [self.review(5, pr=1, outcome="failed", cause=CAUSES["setup_failed"]),
+                   self.review(6, pr=2, outcome="waiting", needs_you=False, cause=CAUSES["setup_failed"]),
+                   # A failure of the PR's own stops no other review.
+                   self.review(7, pr=3, outcome="failed", cause=CAUSES["time_limit"])]
+        self.assertEqual([(b["id"], b["title"], b["route"]) for b in self.status(reviews, blocked=blocked)["blockers"]], [
+            ("gh_signed_out", "gh isn't signed in to GitHub", "/causes/gh_signed_out"),
+            ("setup_failed", "The repo's setup script failed", "/causes/setup_failed"),
+        ])
+
+    def test_the_agent_row_says_what_whooper_does_as_prompting_time_worded_it_before_format_2(self):
+        today, monday = "2031-07-30T15:45:00-07:00", "2031-07-28T10:00:00-07:00"
+        self.assertEqual((short_time(today, self.NOW), short_time(monday, self.NOW)), ("3:45 PM", "Mon 10:00 AM"))
+        self.assertEqual((short_date(today, self.NOW), short_date(monday, self.NOW),
+                          short_date("2030-11-24T09:05:00-08:00", self.NOW)), ("3:45 PM", "Jul 28", "Nov 24, 2030"))
+        failed = {"started_at": monday, "ended_at": "2031-07-30T14:50:00-07:00", "result": "poll_failed",
+                  "selected": 0, "reviews": []}
+        for fields, agent in [
+            ({}, {"words": "Running", "dot": "idle"}),
+            ({"next_round": today}, {"words": "Running · next poll 3:45 PM", "dot": "idle"}),
+            ({"last_round": failed, "next_round": today},
+             {"words": "Poll failed 2:50 PM · next try 3:45 PM", "dot": "error"}),
+            ({"paused": True, "next_round": today}, {"words": "Paused", "dot": "idle"}),
+            ({"round": {"running": True, "reviewing": None}}, {"words": "Polling now", "dot": "running"}),
+            ({"round": {"running": True, "reviewing": "example-org/example-repo#12"}, "paused": True},
+             {"words": "Reviewing example-org/example-repo#12", "dot": "running"}),
+            ({"blocked": {**CAUSES["docker_unavailable"], "since": today, "waiting": 2},
+              "round": {"running": True, "reviewing": None}},
+             {"words": "Can't review · Docker isn't running", "dot": "error"}),
+        ]:
+            with self.subTest(fields):
+                self.assertEqual(self.status([], **fields)["agent"], agent)
 
 
 class RetryTest(unittest.TestCase):
