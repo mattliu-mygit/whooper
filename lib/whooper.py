@@ -433,13 +433,66 @@ def read_title_and_author(run):
     return [pr.get(key) if isinstance(pr.get(key), str) else None for key in ("title", "author")]
 
 
+def polled_heads(data):
+    """The head of each PR, by (repo, number), that Whooper's latest poll saw, whooper-fetch's
+    poll/github.json and the newest poll's items, or the recheck list holds, as {(repo, number): (time,
+    head)}, each dated by when its file was written, and of two for one PR the newer. A file that is
+    missing or does not read as JSON gives no heads."""
+    heads = {}
+
+    def note(when, repo, pr, head):
+        if isinstance(repo, str) and isinstance(pr, int) and isinstance(head, str):
+            if (repo, pr) not in heads or when >= heads[(repo, pr)][0]:
+                heads[(repo, pr)] = (when, head)
+
+    def stamped(path):
+        try:
+            return path.stat().st_mtime, json.loads(path.read_text())
+        except (OSError, ValueError):
+            return 0, None
+
+    when, prs = stamped(data / "poll" / "github.json")
+    for pr in prs if isinstance(prs, list) else []:
+        try:
+            note(when, pr["repository"]["nameWithOwner"], pr["number"], pr["headRefOid"])
+        except (KeyError, TypeError):
+            continue
+    items = []
+    # Poll outputs are named by their UTC start time, so the last name is the newest, as in select.
+    if newest := max((data / "poll").glob("[0-9]*Z.json"), default=None):
+        when, poll = stamped(newest)
+        items += [(when, item) for item in (poll.get("items") if isinstance(poll, dict) else None) or []]
+    items += [stamped(path) for path in (data / "rechecks").glob("*.json")]
+    for when, item in items:
+        if isinstance(item, dict):
+            note(when, item.get("repo"), item.get("pr"), item.get("head_sha"))
+    return heads
+
+
+def pr_head(data, polled, repo, pr):
+    """The newest head Whooper knows of repo's PR pr: of its head in polled (polled_heads) and the heads
+    its records under data/prs name, the one Whooper learned last, or None when none names it. A record
+    dates its head by its started_at, since a later status, such as stale, keeps the head it started
+    with."""
+    known = [polled[(repo, pr)]] if (repo, pr) in polled else []
+    for path in (data / "prs" / f"{repo.replace('/', '-')}-{pr}").glob("*.json"):
+        record = read_object(path) or {}
+        try:
+            known.append((datetime.fromisoformat(record["started_at"]).timestamp(), path.name.split(".")[0]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return max(known)[1] if known else None
+
+
 def read_reviews(data, now):
     """The review runs under data/runs that started in the REVIEW_DAYS days before now, newest first, as
     whooper-status lists them. A review's PR number and start come from its run ID, its repo from
     run.json, its title from github.json, and the rest from read_review. Only the newest run of each PR
     can need the user, since a newer run supersedes the older ones, even while it runs or waits, and
     one that runs or waits needs no one yet. A name in runs that is not a run ID, such as Finder's
-    .DS_Store, is no run."""
+    .DS_Store, is no run. Each review also gets the head it reviewed, from run.json, and the newest
+    head Whooper knows of its PR (pr_head), which differ once the PR has new commits since the
+    review."""
     def modified(path):
         try:
             return local_time(path.stat().st_mtime)
@@ -454,6 +507,7 @@ def read_reviews(data, now):
     # whooper-review takes the PR's lock before it makes the run directory, so the locks, read after
     # the runs are listed, name every listed run whose review still runs.
     running = running_runs(data)
+    polled = polled_heads(data)
     # runs is newest first, so a PR, by repo and number, is in newer once its newest run is listed, and
     # its older runs no longer need the user. A run without a readable run.json has repo None, which
     # matches only other runs without one.
@@ -462,6 +516,7 @@ def read_reviews(data, now):
         item, outcome, result, submit, cause = read_review(run, running)
         title, _ = read_title_and_author(run)
         repo = item["repo"] if item else None
+        head = item.get("head_sha") if item and isinstance(item.get("head_sha"), str) else None
         # No file records when a review ended, so it ended when whooper-review saved failure.txt as it
         # stopped the review, or else when the run wrote findings.json as it ended.
         ended = None if outcome == "running" else modified(run / "failure.txt") or modified(run / "findings.json")
@@ -482,6 +537,8 @@ def read_reviews(data, now):
                          if submit else None,
             "needs_you": (repo, pr) not in newer and outcome not in ("running", "waiting") and submit is None,
             "cause": cause,
+            "head_sha": head,
+            "pr_head_sha": pr_head(data, polled, repo, pr) if repo else None,
         })
         newer.add((repo, pr))
     return reviews
@@ -553,6 +610,7 @@ def show_review(data, run_id):
         "asks": [json.loads(path.read_text()) for path in ask_files(run)],
         "submitted": submit,
         "cause": cause,
+        "head_sha": item.get("head_sha") if item and isinstance(item.get("head_sha"), str) else None,
     }
 
 

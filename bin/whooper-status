@@ -24,7 +24,7 @@
 #               once a review succeeds or stops at a cause of its PR's own
 #   reviews     the review runs in <state>/runs that started in the last 30 days, newest first, each
 #               {run_id, repo, pr, title, url, started_at, ended_at, outcome, verdict, skipped,
-#               findings, submitted, needs_you, cause}:
+#               findings, submitted, needs_you, cause, head_sha, pr_head_sha}:
 #     repo        <owner>/<repo>, from run.json, or null when run.json cannot be read, as when
 #                 whooper-review stopped before it wrote the file
 #     pr          the PR's number, from the run ID, <UTC start time>-<PR number>
@@ -49,20 +49,28 @@
 #                 its review may or may not be on GitHub
 #     needs_you   true for a review that ended, reviewed or failed, and is not submitted, until a newer
 #                 run of the same repo and PR starts, which supersedes it, even one that waits
-#     cause       for a failed review, what stopped it, {id, summary, scope}, for one that waits, the
-#                 cause it waits on, from its waiting.json, and null otherwise. scope
-#                 is all for a cause that stops every review: docker_unavailable (the repo's setup
-#                 script could not reach Docker), setup_failed (it failed otherwise), and gh_signed_out;
-#                 and pr for one that stops this PR's: repo_not_configured (no clone of the repo),
-#                 agent_no_findings, time_limit, and unknown, such as an interrupted review. It comes
-#                 from failure.json, which whooper-review saves as it stops the review, or for an older
-#                 review from the wording of failure.txt, and is unknown without either
-#   rounds      the last 50 rounds from <state>/rounds.jsonl, newest first, each {started_at, ended_at,
-#               result, selected, reason}: result is done, poll_failed, or interrupted, as in
-#               last_round, or skipped for a round whooper-run skipped while Whooper was paused, whose
-#               ended_at is null; selected is how many items the round selected, 0 when it ended
-#               before selecting; reason says why it ended so, or is null: which poll step failed,
-#               the cause reviews wait on and how many wait, or that Whooper is paused
+#     cause       for a failed review, what stopped it, {id, summary, scope}; for one that waits,
+#                 the cause it waits on, from its waiting.json; null otherwise. scope is all for a
+#                 cause that stops every review: docker_unavailable (the repo's setup script could
+#                 not reach Docker), setup_failed (it failed otherwise), and gh_signed_out; and pr
+#                 for one that stops this PR's: repo_not_configured (no clone of the repo),
+#                 agent_no_findings, time_limit, and unknown, such as an interrupted review. It
+#                 comes from failure.json, which whooper-review saves as it stops the review, or for
+#                 an older review from the wording of failure.txt, and is unknown without either
+#     head_sha    the commit the review reviewed, or for one that waits would review, from run.json,
+#                 or null without it
+#     pr_head_sha the PR's newest head Whooper knows: of the heads its latest poll saw
+#                 (<state>/poll/github.json and the newest poll's items), the recheck list holds,
+#                 and the PR's records under <state>/prs name, the one it learned last, a file's
+#                 dated by when it was written and a record's by its started_at; null when none
+#                 names the PR or without the repo. It differs from head_sha once the PR has new
+#                 commits since the review
+#   rounds      the last 50 rounds from <state>/rounds.jsonl, newest first, each {started_at,
+#               ended_at, result, selected, reason}: result is done, poll_failed, or interrupted,
+#               as in last_round, or skipped for a round whooper-run skipped while Whooper was
+#               paused, whose ended_at is null; selected is how many items the round selected, 0
+#               when it ended before selecting; reason says why it ended so, or is null: which poll
+#               step failed, the cause reviews wait on and how many wait, or that Whooper is paused
 #
 # Times are local, in ISO 8601 with the offset. bin/whooper-show <run-id> --json prints one review
 # in full.

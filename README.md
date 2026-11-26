@@ -159,6 +159,11 @@ writes `findings.json` itself and may still change it. Nothing records when a re
 end is when whooper-review saved `failure.txt`, or else when the run wrote `findings.json`, and a
 posted review's time is when whooper-submit wrote GitHub's answer to `submit.json`.
 
+Each review also has `head_sha`, the commit it reviewed, from `run.json`, and `pr_head_sha`, the
+newest head of its PR that Whooper knows: of the heads its latest poll saw, the recheck list holds,
+and the PR's records name, the one it learned last. The two differ once the PR has new commits since
+the review, and `pr_head_sha` is null when nothing names the PR. whooper-show gives `head_sha` too.
+
 A failed review's `cause` says what stopped it, as `id`, a short `summary`, and `scope`: `all` when
 the cause stops every review until you fix it, and `pr` when it stops only this PR's:
 

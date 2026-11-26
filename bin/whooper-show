@@ -30,6 +30,8 @@
 #              null before, and while the file says posting
 #   cause      for a failed review, what stopped it, {id, summary, scope}, and for one that waits,
 #              the cause it waits on, as in bin/whooper-status; null otherwise
+#   head_sha   the commit the review reviewed, from run.json, or null without it; the pr_head_sha
+#              bin/whooper-status gives the same review tells whether the PR has new commits since
 #
 # A run ID that names no run directory gets "no run <run-id>" and exit 1. Prompting Time runs this
 # as the manifest's show-review action, whose fixed argument --json comes before the run ID; either

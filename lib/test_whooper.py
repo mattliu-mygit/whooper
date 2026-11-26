@@ -3207,6 +3207,12 @@ class ReviewsTest(unittest.TestCase):
         (lock / "pid").write_text(f"{pid}\n")
         (lock / "run_id").write_text(f"{run.name}\n")
 
+    def record(self, pr, head, started, status="done"):
+        """Writes the record of first reviews of example-org/example-repo#<pr> at head, started at started."""
+        path = self.state / "prs" / f"example-org-example-repo-{pr}" / f"{head}.first_review.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"status": status, "failures": 0, "started_at": started.isoformat()}))
+
     def stopped(self, ago, pr, cause):
         """Makes a run of example-org/example-repo#<pr> that started ago before now and that whooper-review
         stopped at cause 2 minutes later, and returns it."""
@@ -3244,7 +3250,7 @@ class ReviewsTest(unittest.TestCase):
                 "url": f"https://github.com/example-org/example-repo/pull/{pr}", "started_at": self.local(started),
                 "ended_at": self.local(started + timedelta(minutes=20)), "outcome": "reviewed",
                 "verdict": "look_first", "skipped": False, "findings": 0, "submitted": None, "needs_you": True,
-                "cause": None, **fields}
+                "cause": None, "head_sha": "h1", "pr_head_sha": None, **fields}
 
     def show(self, *args):
         return subprocess.run([str(ROOT / "bin" / "whooper-show"), *args], env=self.env, capture_output=True,
@@ -3317,7 +3323,7 @@ class ReviewsTest(unittest.TestCase):
         self.hold(killed, gone.pid)
         running = {"outcome": "running", "ended_at": None, "verdict": None, "needs_you": False}
         self.assertEqual(self.reviews(), [
-            self.review(fetching, **running, repo=None, url=None, title=None),
+            self.review(fetching, **running, repo=None, url=None, title=None, head_sha=None),
             self.review(current, **running),
             # The run the lock names is newer, so the earlier run of its PR no longer needs the user.
             self.review(earlier, needs_you=False),
@@ -3376,7 +3382,7 @@ class ReviewsTest(unittest.TestCase):
         (self.state / "runs" / "notes").mkdir()
         failed = {"outcome": "failed", "verdict": None}
         self.assertEqual(self.reviews(), [
-            *[self.review(run, **failed, repo=None, url=None, title=None, cause=CAUSES["unknown"],
+            *[self.review(run, **failed, repo=None, url=None, title=None, cause=CAUSES["unknown"], head_sha=None,
                           ended_at=self.local(self.started(run) + timedelta(minutes=1))) for run in unreadable],
             self.review(empty, **failed, cause=CAUSES["agent_no_findings"],
                         ended_at=self.local(self.started(empty) + timedelta(minutes=21))),
@@ -3457,7 +3463,7 @@ class ReviewsTest(unittest.TestCase):
         self.assertEqual(self.shown(waits), {
             "version": 1, "run_id": waits.name, "run": json.loads((waits / "run.json").read_text()), "title": None,
             "author": None, "outcome": "waiting", "findings": None, "drafts": None, "diff": None, "failure": None,
-            "asks": [], "submitted": None, "cause": CAUSES["docker_unavailable"]})
+            "asks": [], "submitted": None, "cause": CAUSES["docker_unavailable"], "head_sha": "h1"})
         # An ask about it may read why it waits.
         prompt = io.StringIO()
         with redirect_stdout(prompt):
@@ -3490,6 +3496,37 @@ class ReviewsTest(unittest.TestCase):
         self.finish(self.make_run(timedelta(hours=4), pr=18))
         self.assertIsNone(self.status()["blocked"])
 
+    def test_status_gives_the_head_each_review_read_and_the_newest_head_whooper_knows_of_its_pr(self):
+        # Each review read h1, as its run.json says, and whooper-review's record dates h1 by its start.
+        runs = {pr: self.make_run(timedelta(hours=pr - 10), pr=pr) for pr in [11, 12, 13, 14, 15]}
+        for pr, run in runs.items():
+            self.finish(run)
+            if pr != 15:
+                self.record(pr, "h1", self.started(run))
+        # whooper-review stopped this one before it wrote run.json, which names the repo and head.
+        stopped = self.make_run(timedelta(hours=6), pr=16, run_json=False)
+        self.write(stopped, "failure.txt", "the review stopped at an unexpected error\n", 1)
+        # Half an hour ago the latest poll saw PR 11 at h2 and PR 13 still at h1, and listed a Slack ask
+        # for PR 14 at h4; then whooper-retry queued PR 13 at h3, and whooper-submit found PR 12 at h5.
+        half_hour_ago = (self.now - timedelta(minutes=30)).timestamp()
+        poll = self.state / "poll"
+        poll.mkdir()
+        (poll / "github.json").write_text(json.dumps([
+            {"repository": {"nameWithOwner": "example-org/example-repo"}, "number": number, "headRefOid": head}
+            for number, head in [(11, "h2"), (13, "h1")]]))
+        (poll / "20310727T020000Z.json").write_text(json.dumps({"items": [
+            {"repo": "example-org/example-repo", "pr": 14, "head_sha": "h4", "kind": "first_review"}]}))
+        for path in poll.iterdir():
+            os.utime(path, (half_hour_ago, half_hour_ago))
+        self.record(13, "h3", self.now - timedelta(minutes=10), status="retry")
+        (self.state / "rechecks").mkdir()
+        (self.state / "rechecks" / "example-org-example-repo-12.json").write_text(json.dumps(
+            {"repo": "example-org/example-repo", "pr": 12, "head_sha": "h5", "kind": "first_review"}))
+        self.assertEqual([(r["pr"], r["head_sha"], r["pr_head_sha"]) for r in self.reviews()],
+                         [(11, "h1", "h2"), (12, "h1", "h5"), (13, "h1", "h3"), (14, "h1", "h4"), (15, "h1", None),
+                          (16, None, None)])
+        self.assertEqual((self.shown(runs[11])["head_sha"], self.shown(stopped)["head_sha"]), ("h1", None))
+
     def test_show_prints_a_finished_review(self):
         run = self.make_run(timedelta(hours=1))
         self.finish(run, findings=[finding(), self.NIT])
@@ -3501,7 +3538,7 @@ class ReviewsTest(unittest.TestCase):
             # The run is not safe to approve, so until the user changes anything the review only comments
             # and includes nothing.
             "drafts": {"event": "COMMENT", "message": "", "findings": {}},
-            "diff": self.DIFF, "failure": None, "asks": [], "submitted": None, "cause": None,
+            "diff": self.DIFF, "failure": None, "asks": [], "submitted": None, "cause": None, "head_sha": "h1",
         })
         drafts = subprocess.run([str(ROOT / "bin" / "whooper-draft"), run.name], env=self.env, capture_output=True,
                                 text=True, timeout=60)
@@ -3523,7 +3560,7 @@ class ReviewsTest(unittest.TestCase):
         self.assertEqual(self.shown(failed), {
             **nothing, "run_id": failed.name, "run": json.loads((failed / "run.json").read_text()),
             "title": self.TITLE, "author": "alice", "outcome": "failed", "diff": self.DIFF, "failure": reason,
-            "cause": CAUSES["time_limit"],
+            "cause": CAUSES["time_limit"], "head_sha": "h1",
         })
         # A Devin review that wrote findings that fit before its time limit has them and whooper-draft's
         # drafts, though it failed.
@@ -3537,6 +3574,7 @@ class ReviewsTest(unittest.TestCase):
         self.assertEqual(self.shown(stopped), {
             **nothing, "run_id": stopped.name, "run": None, "title": None, "author": None, "outcome": "failed",
             "diff": None, "failure": "the review stopped at an unexpected error\n", "cause": CAUSES["unknown"],
+            "head_sha": None,
         })
         # A Devin review that is still running may still change the findings.json it wrote, so it shows
         # no findings yet.
@@ -3547,7 +3585,7 @@ class ReviewsTest(unittest.TestCase):
         self.assertEqual(self.shown(running), {
             **nothing, "run_id": running.name, "run": json.loads((running / "run.json").read_text()),
             "title": self.TITLE, "author": "alice", "outcome": "running", "diff": self.DIFF, "failure": None,
-            "cause": None,
+            "cause": None, "head_sha": "h1",
         })
 
     def test_show_prints_the_drafts_and_the_review_whooper_submit_posted(self):
