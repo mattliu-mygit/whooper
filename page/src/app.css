@@ -1,0 +1,334 @@
+/* The page's layout, after the agreed mock. Every value is a Sigil variable from
+   @prompting-time/ui's styles.css; the components bring their own styles. */
+html,
+body,
+#root {
+  block-size: 100%;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.w-hint {
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+}
+
+.w-error {
+  color: var(--s-error);
+  font-size: var(--s-size-sm);
+}
+
+/* Queue */
+.w-queue {
+  display: grid;
+  align-content: start;
+  gap: var(--s-space-16);
+  max-inline-size: var(--s-content-max-narrow);
+  margin: 0 auto;
+  padding: var(--s-space-16);
+}
+
+.w-queue-header h1 {
+  font-size: var(--s-size-lg);
+  font-weight: var(--s-weight-medium);
+}
+
+.w-loop {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-8);
+  color: var(--s-text-muted);
+  font-size: var(--s-size-sm);
+}
+
+.w-group h2 {
+  margin-block-end: var(--s-space-4);
+  color: var(--s-text-subtle);
+  font-size: var(--s-size-xs);
+  font-weight: var(--s-weight-medium);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* Review */
+.w-review {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-space-8);
+  block-size: 100%;
+  padding: var(--s-space-8) var(--s-space-12);
+}
+
+.w-header {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-12);
+}
+
+.w-title {
+  display: grid;
+  flex: 1;
+  min-inline-size: 0;
+}
+
+.w-title h1 {
+  overflow: hidden;
+  font-size: var(--s-size-sm);
+  font-weight: var(--s-weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.w-meta,
+.w-summary {
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+}
+
+.w-summary strong {
+  color: var(--s-text);
+  font-weight: var(--s-weight-medium);
+}
+
+.w-segmented {
+  display: inline-flex;
+}
+
+.w-segmented .pt-button[aria-pressed="false"] {
+  background: transparent;
+  color: var(--s-text-muted);
+}
+
+.w-body {
+  display: grid;
+  flex: 1;
+  grid-template-columns: minmax(12rem, 16rem) minmax(0, 1fr);
+  gap: var(--s-space-8);
+  min-block-size: 0;
+}
+
+.w-file-list,
+.w-card,
+.w-submit {
+  border: var(--s-card-border);
+  border-radius: var(--s-card-radius);
+  background: var(--s-surface);
+}
+
+.w-file-list {
+  overflow: auto;
+  padding: var(--s-space-8);
+}
+
+.w-file-list-head {
+  display: flex;
+  justify-content: space-between;
+  margin-block-end: var(--s-space-8);
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+}
+
+.w-file {
+  display: grid;
+  grid-template-columns: 1ch minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--s-space-8);
+  inline-size: 100%;
+  padding: var(--s-space-4);
+  border: 0;
+  border-radius: var(--s-radius-sm);
+  background: transparent;
+  color: var(--s-text);
+  font-size: var(--s-size-xs);
+  text-align: start;
+  cursor: pointer;
+}
+
+.w-file:hover,
+.w-file[aria-current="true"] {
+  background: var(--s-surface-elevated);
+}
+
+.w-file-status,
+.w-file-counts {
+  color: var(--s-text-subtle);
+  font-family: var(--s-code-font-family);
+  font-size: var(--s-size-xs);
+}
+
+.w-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.w-file-dir {
+  margin-block: var(--s-space-8) var(--s-space-4);
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+  overflow-wrap: anywhere;
+}
+
+.w-file-comments {
+  margin-inline-end: var(--s-space-4);
+  color: var(--s-text);
+}
+
+.w-files-pane {
+  display: grid;
+  align-content: start;
+  gap: var(--s-space-8);
+  overflow: auto;
+}
+
+.w-card-header {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-8);
+  padding: var(--s-space-8) var(--s-space-12);
+  color: var(--s-text);
+  font-size: var(--s-size-sm);
+}
+
+.w-off-line {
+  display: grid;
+  gap: var(--s-space-8);
+  padding: var(--s-space-8) var(--s-space-12);
+}
+
+/* A draft comment, under its line in the diff or in a card. */
+.w-thread {
+  display: grid;
+  gap: var(--s-space-8);
+  margin: var(--s-space-8) var(--s-space-12);
+  padding: var(--s-space-8) var(--s-space-12);
+  border: var(--s-border-thin) solid var(--s-border-strong);
+  border-inline-start: var(--s-border-medium) solid var(--s-border-strong);
+  border-radius: var(--s-radius-sm);
+  background: var(--s-surface-sunken);
+  font-family: var(--s-font-body);
+  font-size: var(--s-size-sm);
+  line-height: var(--s-leading-normal);
+  white-space: normal;
+}
+
+.w-thread[data-included="no"] .w-thread-body {
+  color: var(--s-text-muted);
+}
+
+.w-thread-folded {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--s-text-muted);
+}
+
+.w-thread-meta {
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+}
+
+.w-thread-body {
+  white-space: pre-wrap;
+}
+
+.w-thread code {
+  padding: 0 var(--s-space-4);
+  border-radius: var(--s-radius-sm);
+  background: var(--s-background);
+}
+
+.w-thread-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-space-8);
+}
+
+/* Include in review sits first, with the buttons pushed to the right as in the mock. */
+.w-thread-actions > .pt-checkbox {
+  margin-inline-end: auto;
+}
+
+.w-textarea {
+  inline-size: 100%;
+  padding: var(--s-space-8);
+  border: var(--s-input-border-width) var(--s-border-style) var(--s-border-strong);
+  border-radius: var(--s-radius-input);
+  background: var(--s-background);
+  resize: vertical;
+}
+
+.w-ask,
+.w-answer {
+  display: grid;
+  gap: var(--s-space-8);
+}
+
+.w-answer {
+  padding-block-start: var(--s-space-8);
+  border-block-start: var(--s-border-thin) solid var(--s-border);
+}
+
+.w-answer-question {
+  color: var(--s-text-muted);
+}
+
+.w-answer-text {
+  white-space: pre-wrap;
+}
+
+/* The one-submission bar. */
+.w-submit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-space-12);
+  padding: var(--s-space-8) var(--s-space-12);
+  font-size: var(--s-size-sm);
+}
+
+.w-radios {
+  display: inline-flex;
+  gap: var(--s-space-12);
+  color: var(--s-text-muted);
+}
+
+.w-radios label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-space-4);
+}
+
+.w-radios input {
+  margin: 0;
+  accent-color: var(--s-primary);
+}
+
+.w-message {
+  flex: 1;
+  min-inline-size: 12rem;
+  block-size: var(--s-control-height-sm);
+  padding: 0 var(--s-input-px);
+  border: var(--s-input-border-width) var(--s-border-style) var(--s-border-strong);
+  border-radius: var(--s-radius-input);
+  background: var(--s-background);
+}
+
+.w-message::placeholder {
+  color: var(--s-input-placeholder-color);
+}
+
+.w-submit-line {
+  inline-size: 100%;
+}

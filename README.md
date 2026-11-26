@@ -194,6 +194,33 @@ whooper-ask saves each answer in the run directory as `asks/<n>.json`, numbered 
 `[ask] timeout_minutes` (10 by default) is stopped with everything it started and, like a run that
 fails, saves no answer; its number is not used again.
 
+## Whooper's page in Prompting Time
+
+`page/` is the page Prompting Time shows for Whooper: the queue of reviews and each review's diff
+with Whooper's findings as draft comments under their lines, Include in review, Edit, Ask about
+this, Discard, and one bar that submits the review. It is a Solid 2.0 app built on Prompting Time's
+shared UI library, `@prompting-time/ui`. Prompting Time shows it in an iframe sandboxed to scripts
+only, so the page reaches nothing but its host: it sends Prompting Time the messages in
+`page/src/protocol.ts`, which also says which Whooper command each one runs, and Prompting Time
+confirms a submit before `whooper-submit` posts. whooper-status does not list reviews yet, so the
+host builds the queue's reviews.
+
+The page needs Node 22.12 or later. In `page/`:
+
+```sh
+npm ci          # exact versions from package-lock.json, as the registry stood on .npmrc's date
+npm test        # the page's tests, against the fake host in page/src/fakeHost.ts
+npm run dev     # http://localhost:5175/dev/ shows the page in a sandboxed iframe with the fake host
+npm run build   # page/dist, which the repo does not track
+```
+
+The fake host answers from invented reviews in `page/src/fixtures.ts` the way Whooper's commands
+would, and reaches no Whooper, GitHub, or model; `/dev/?review=<run id>` opens one of its reviews.
+Until `@prompting-time/ui`'s first npm release, the page installs it from a Prompting Time checkout
+beside this one, `../../repos/prompting-time-ui/packages/ui` from `page/`, which `npm ci` copies in;
+it then switches to a pinned npm version. Versions are exact and resolved as of `.npmrc`'s `before`
+date, at least a week before they were pinned, and no install script runs.
+
 ## What counts as work
 
 `lib/whooper.py` applies the rules. `prompts/poll.md` is the only judgment, and it covers Slack
