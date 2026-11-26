@@ -886,17 +886,41 @@ def review_request(head_sha, event, body, comments):
 
 
 def read_findings(run_dir):
-    """The findings.json of the review in run_dir, or None when the review left no findings.json
-    Whooper can read: one that holds a list of findings, each with an ID, an empty list included.
-    whooper-review leaves findings.json as the run wrote it when it stops the review before its schema
-    check, such as at the time limit or for an empty file, so only a file that reads as findings shows
-    that the review finished."""
+    """The findings.json of the review in run_dir as whooper-ask reads it, or None when the review left
+    no findings.json Whooper can read: one that holds a list of findings, each with an ID, an empty
+    list included. whooper-review leaves findings.json as the run wrote it when it stops the review
+    before its schema check, such as at the time limit or for an empty file, so only a file that reads
+    as findings shows that the review finished. The file need not fit the schema, so that an ask can
+    answer about an older review, or one whooper-review stopped after the run wrote part of the file;
+    whooper-draft, whooper-submit, and whooper-classify read it with read_valid_findings instead."""
     try:
         result = json.loads((run_dir / "findings.json").read_text())
-        # Every caller looks findings up by ID.
+        # whooper-ask --finding looks findings up by ID.
         {f["id"] for f in result["findings"]}
     except (FileNotFoundError, ValueError, KeyError, TypeError):
         return None
+    return result
+
+
+# The JSON Schema a review's findings.json must fit, which whooper-review checks when the run ends.
+FINDINGS_SCHEMA = ROOT / "schemas" / "findings.json"
+
+
+def read_valid_findings(run_dir, command):
+    """The findings.json of the review in run_dir, for whooper-<command>: draft, submit, or classify,
+    which read its fields without checking for each one. Refuses a review that did not finish, which
+    left no findings.json or one that does not fit FINDINGS_SCHEMA, naming the first part that does not
+    fit. whooper-review leaves findings.json as the run wrote it when it stops the review before its
+    schema check, so a Devin review stopped at its time limit can leave findings and little else."""
+    schema = json.loads(FINDINGS_SCHEMA.read_text())
+    try:
+        result = json.loads((run_dir / "findings.json").read_text())
+        check_schema(result, schema, "findings.json")
+    except FileNotFoundError:
+        raise SystemExit(f"whooper-{command}: {run_dir} has no findings.json, so its review did not finish")
+    except ValueError as e:
+        raise SystemExit(f"whooper-{command}: {run_dir} has a findings.json that does not fit schemas/findings.json,"
+                         f" so its review did not finish: {e}")
     return result
 
 
@@ -1080,6 +1104,13 @@ def ask_facts(run_dir, question, finding_id=None):
     result = read_findings(run_dir)
     finished = result is not None
     record = ASK_RECORD if finished else {**ASK_RECORD, **ASK_FAILURE_RECORD}
+    # whooper-review fills run.json with one jq, and the file stays empty when that jq fails, as when
+    # the skills cannot be hashed. Such a file holds nothing to answer from, and bin/whooper-ask
+    # counts it as missing, so the list leaves it out.
+    try:
+        json.loads((run_dir / "run.json").read_text())
+    except (OSError, ValueError):
+        record = {name: what for name, what in record.items() if name != "run.json"}
     lines = ["", "", "## The review's record", "", f"The review's run directory is {run_dir}. You may read these files:", ""]
     lines += [f"- {run_dir / name}: {what}" for name, what in record.items() if (run_dir / name).exists()]
     # bin/whooper-ask numbers its answers asks/1.json, asks/2.json, and so on; a Devin ask's config
@@ -1248,10 +1279,7 @@ def main(command, *args):
         # Not resolve(): the run's commands name its directory as whooper-review printed it, and on
         # macOS a directory under $TMPDIR resolves to another path through /private.
         data, run = Path(args[0]), Path(os.path.abspath(args[1]))
-        result = read_findings(run)
-        if result is None:
-            raise SystemExit(f"whooper-classify: {run} has no findings.json Whooper can read, so its review"
-                             " did not finish")
+        result = read_valid_findings(run, command)
         # verdicts.json is written last, so a run that has it already added its findings to the digest.
         if (run / "verdicts.json").exists():
             raise SystemExit(f"whooper-classify: {run} is already classified")
@@ -1308,9 +1336,7 @@ def main(command, *args):
         if not (run / "run.json").exists():
             raise SystemExit(f"whooper-draft: no run {args[1]} in {run.parent}")
         # Drafts start from the run's findings (read_drafts), which only a finished review has.
-        if read_findings(run) is None:
-            raise SystemExit(f"whooper-draft: {run} has no findings.json Whooper can read, so its review"
-                             " did not finish")
+        read_valid_findings(run, command)
         print(json.dumps(change_drafts(run, *change) if change else read_drafts(run), indent=2))
     elif command == "submit":
         data, run, head_now, flags = Path(args[0]), Path(args[1]).resolve(), args[2], args[3:]
@@ -1321,10 +1347,7 @@ def main(command, *args):
                 raise SystemExit(f"whooper-submit: another submit of {run} is posting or did not finish, so its review"
                                  " may be on GitHub; check the PR, then delete submit.json to submit again")
             raise SystemExit(f"whooper-submit: {run} was already submitted; see its submit.json")
-        result = read_findings(run)
-        if result is None:
-            raise SystemExit(f"whooper-submit: {run} has no findings.json Whooper can read, so its review"
-                             " did not finish")
+        result = read_valid_findings(run, command)
         item = load(run / "run.json")
         if head_now != item["head_sha"]:
             mark_new_commits(data, item, head_now, datetime.now(timezone.utc))

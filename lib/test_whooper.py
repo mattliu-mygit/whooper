@@ -922,6 +922,25 @@ class DevinShellCallsTest(unittest.TestCase):
         self.assertEqual(devin_shell_calls(export)["call_1"]["command"], f"cd {RUN}/head && go test ./internal/api")
 
 
+# What whooper-review leaves of findings.json when it stops a review before its schema check, such as
+# at the time limit or for an empty file, each with the end of the refusal that whooper-draft,
+# whooper-submit, and whooper-classify give after the run's directory. A Devin review writes the file
+# itself, so one stopped at its time limit can leave findings and little else.
+UNFIT = "has a findings.json that does not fit schemas/findings.json, so its review did not finish: "
+UNFINISHED = [
+    ("no findings.json", None, "has no findings.json, so its review did not finish"),
+    ("empty", "", UNFIT + "Expecting value: line 1 column 1 (char 0)"),
+    ("not JSON", '{"status": "revi', UNFIT + "Unterminated string starting at: line 1 column 12 (char 11)"),
+    ("no list of findings", "{}", UNFIT + "findings.json lacks status, skip_reason, approval, findings"),
+    ("findings and nothing else", json.dumps({"findings": [finding()]}),
+     UNFIT + "findings.json lacks status, skip_reason, approval"),
+    ("a finding without its rule v1 answers", json.dumps({
+        "status": "reviewed", "skip_reason": "", "approval": {"verdict": "look_first", "reason": "Ran no probe."},
+        "findings": [{key: value for key, value in finding().items() if key != "rule_v1"}]}),
+     UNFIT + "findings.json.findings[0] lacks rule_v1"),
+]
+
+
 class ClassifyTest(unittest.TestCase):
     def verdicts(self, f, fetched=True):
         """The finding's verdict and failed checks under each agent's reader."""
@@ -974,8 +993,6 @@ class ClassifyTest(unittest.TestCase):
                 self.assertEqual(classify(result, calls, True, RUN), [])
 
     def test_a_review_that_did_not_finish_is_not_classified(self):
-        # whooper-review leaves findings.json as the run wrote it when it stops the review before its
-        # schema check, such as at the time limit or for an empty file.
         with tempfile.TemporaryDirectory() as data:
             run = Path(data) / "runs" / "20310727T010246Z-12"
             run.mkdir(parents=True)
@@ -984,8 +1001,7 @@ class ClassifyTest(unittest.TestCase):
                 "base_ref": "master", "source": "github_request", "slack": None, "reason": "r",
                 "run_id": run.name, "dry_run": True, "as_of": None, "agent": "claude"}))
             (run / "transcript.jsonl").write_text("")
-            for name, content in [("no findings.json", None), ("empty", ""), ("not JSON", '{"status": "revi'),
-                                  ("no list of findings", "{}")]:
+            for name, content, why in UNFINISHED:
                 with self.subTest(name):
                     if content is None:
                         (run / "findings.json").unlink(missing_ok=True)
@@ -993,8 +1009,7 @@ class ClassifyTest(unittest.TestCase):
                         (run / "findings.json").write_text(content)
                     with self.assertRaises(SystemExit) as caught:
                         main("classify", data, str(run))
-                    self.assertEqual(str(caught.exception), f"whooper-classify: {run} has no findings.json Whooper"
-                                                            " can read, so its review did not finish")
+                    self.assertEqual(str(caught.exception), f"whooper-classify: {run} {why}")
             # Nothing went to the digest or the PR's record.
             self.assertEqual(sorted(p.name for p in Path(data).iterdir()), ["runs"])
             self.assertFalse((run / "verdicts.json").exists())
@@ -1156,7 +1171,8 @@ class PostTest(unittest.TestCase):
 
 class SubmitTest(unittest.TestCase):
     """bin/whooper-submit, and whooper.py draft, which bin/whooper-draft runs, on a review run of
-    example-org/example-repo#12 at head h1 in a throwaway state folder. gh is a fake: it reports the
+    example-org/example-repo#12 at head h1 in a throwaway state folder; a few tests run
+    bin/whooper-classify and bin/whooper-post on it too. gh is a fake: it reports the
     PR's head from the file head and the CI checks on it from checks.json, lists a teammate's comment
     on finding 1's line written after the review started, records the body of each review it is asked
     to post in posted.jsonl, and fails any other call, so no test can reach GitHub. Unless a test
@@ -1623,10 +1639,7 @@ class SubmitTest(unittest.TestCase):
         self.assertIn("no run 20310101T000000Z-1", missing.stderr)
 
     def test_a_review_that_did_not_finish_has_no_drafts_and_cannot_be_submitted(self):
-        # whooper-review leaves findings.json as the run wrote it when it stops the review before its
-        # schema check, such as at the time limit or for an empty file.
-        for name, content in [("no findings.json", None), ("empty", ""), ("not JSON", '{"status": "revi'),
-                              ("no list of findings", "{}")]:
+        for name, content, why in UNFINISHED:
             if content is None:
                 (self.run / "findings.json").unlink(missing_ok=True)
             else:
@@ -1639,9 +1652,40 @@ class SubmitTest(unittest.TestCase):
                 with self.subTest(name, command=command, args=args[1:]):
                     with self.assertRaises(SystemExit) as caught:
                         main(command, str(self.state), *args)
-                    self.assertEqual(str(caught.exception), f"whooper-{command}: {run} has no findings.json Whooper"
-                                                            " can read, so its review did not finish")
+                    self.assertEqual(str(caught.exception), f"whooper-{command}: {run} {why}")
         self.assertEqual(sorted(p.name for p in self.run.iterdir()), ["findings.json", "run.json"])
+
+    def test_draft_submit_and_classify_refuse_findings_that_do_not_fit_the_schema(self):
+        # Findings and little else, as a Devin review stopped at its time limit can leave. An ask still
+        # answers about such a review (AskTest), but these three read its fields without checking for
+        # each one.
+        (self.run / "findings.json").write_text(json.dumps({"findings": [self.BUG, self.QUESTION]}))
+        for command, argument, run in [("whooper-draft", self.run.name, self.run),
+                                       ("whooper-submit", self.run.name, self.run.resolve()),
+                                       ("whooper-classify", str(self.run), self.run)]:
+            with self.subTest(command):
+                result = subprocess.run([str(ROOT / "bin" / command), argument], env=self.env, capture_output=True,
+                                        text=True, timeout=60)
+                # The refusal alone, with no traceback.
+                self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                 (1, "", f"{command}: {run} {UNFIT}findings.json lacks status, skip_reason, approval\n"))
+        # Nothing was drafted, posted, classified, or recorded.
+        self.assertEqual(self.posted(), [])
+        self.assertEqual(sorted(p.name for p in self.state.iterdir()), ["runs"])
+        self.assertEqual(sorted(p.name for p in self.run.iterdir()), ["findings.json", "run.json"])
+
+    def test_submit_and_post_refuse_a_run_json_they_cannot_read(self):
+        # whooper-review fills run.json with one jq, and the file stays empty when that jq fails, as when
+        # the skills cannot be hashed.
+        for name, content in [("empty", ""), ("cut short", '{"repo": "example-org/exa')]:
+            (self.run / "run.json").write_text(content)
+            for command, flags in [("whooper-submit", []), ("whooper-post", ["--print"])]:
+                with self.subTest(name, command=command):
+                    result = subprocess.run([str(ROOT / "bin" / command), self.run.name, *flags], env=self.env,
+                                            capture_output=True, text=True, timeout=60)
+                    self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                     (1, "", f"{command}: cannot read {self.run / 'run.json'}\n"))
+        self.assertEqual(self.posted(), [])
 
 
 class SlackGuardTest(unittest.TestCase):
@@ -2494,7 +2538,8 @@ class AskTest(unittest.TestCase):
         listed = [line for line in prompt.splitlines() if line.startswith(f"- {stopped}/")]
         self.assertTrue(listed[0].startswith(f"- {stopped / 'failure.txt'}: "), listed)
         # whooper-review writes run.json with one jq, which leaves the file empty when it fails, as when
-        # the skills cannot be hashed. Such a run.json, like one cut short, records no agent either.
+        # the skills cannot be hashed. Such a run.json, like one cut short, records no agent either, and
+        # holds nothing to answer from, so the prompt leaves it out.
         (self.fakes / "answer").write_text("The skills could not be hashed.\n")
         for n, (name, run_json) in enumerate([("empty", ""), ("cut short", '{"repo": "example-org/exa')], start=2):
             with self.subTest(run_json=name):
@@ -2503,6 +2548,7 @@ class AskTest(unittest.TestCase):
                 self.assertEqual((result.returncode, result.stdout), (0, "The skills could not be hashed.\n"),
                                  result.stderr)
                 self.assertEqual(json.loads((stopped / "asks" / f"{n}.json").read_text())["agent"], "devin")
+                self.assertNotIn(f"{stopped / 'run.json'}: ", (stopped / "asks" / f"{n}.prompt.md").read_text())
 
     def test_a_findings_json_without_findings_whooper_can_read_counts_as_a_review_that_did_not_finish(self):
         # whooper-review leaves findings.json as the run wrote it when it stops the review before its
@@ -2518,6 +2564,17 @@ class AskTest(unittest.TestCase):
         # An empty list of findings is a finished review that found nothing.
         (self.run / "findings.json").write_text(json.dumps({"findings": []}))
         self.assertNotIn(f"{self.run / 'stderr.log'}: ", self.prompt("claude", str(self.run), self.QUESTION))
+
+    def test_findings_that_do_not_fit_the_schema_can_still_be_asked_about(self):
+        # whooper-draft, whooper-submit, and whooper-classify refuse findings and little else, as a
+        # Devin review stopped at its time limit can leave (SubmitTest), but an ask answers from what
+        # the file holds.
+        (self.run / "findings.json").write_text(json.dumps({"findings": [finding(), self.NIT]}))
+        (self.fakes / "answer").write_text("Line 3 has a zero-width space.\n")
+        result = self.ask(self.run.name, self.QUESTION, "--finding", "2")
+        self.assertEqual((result.returncode, result.stdout), (0, "Line 3 has a zero-width space.\n"), result.stderr)
+        self.assertIn("finding 2, Invisible characters in the setup steps (README.md:3)",
+                      (self.run / "asks" / "1.prompt.md").read_text())
 
     def test_saves_each_answer_numbered_in_order(self):
         asks = self.run / "asks"

@@ -132,8 +132,8 @@ every finding it has is a nit. A run that skipped the PR, as the review of a lar
 untagged ask does, read too little to vouch for it, so it is not safe whatever its verdict says.
 Until the user changes anything, a safe run starts as an approval with every nit included, and any
 other run as a comment with nothing included, so the user decides. A review that did not finish,
-whose `findings.json` is missing or holds no findings Whooper can read, such as an empty file, has
-no drafts.
+whose `findings.json` is missing or does not fit `schemas/findings.json`, such as an empty file or
+findings without a verdict, has no drafts; whooper-draft names the first part that does not fit.
 
 `bin/whooper-submit <run-id>` posts the review with the user's own gh login, as one GitHub review
 at the head the run reviewed. Each comment is `AI comment (vetted)`, a blank line, and the text,
@@ -160,8 +160,9 @@ code, so Prompting Time can tell them apart:
 
 Any other failure exits 1, or with gh's or jq's own code, none of which is 10 to 13. A comment
 someone wrote on the same line since the review, and a link outside the configured orgs, do not
-stop it. It refuses a review that did not finish, a review that includes no comment and does not
-approve, and a run it already submitted, so a review never posts twice.
+stop it. It refuses a review that did not finish, a run whose `run.json` it cannot read, a review
+that includes no comment and does not approve, and a run it already submitted, so a review never
+posts twice.
 
 ## Ask about a review
 

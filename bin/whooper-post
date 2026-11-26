@@ -38,7 +38,10 @@ done
 [[ "$print" == true ]] || die "live posting waits for the user's approval of the rule-file edits; pass --print"
 run="$data/runs/$run_id"
 [[ -f "$run/run.json" ]] || die "no run $run_id in $data/runs"
-read -r repo pr < <(jq -r '[.repo, .pr] | @tsv' "$run/run.json")
+# whooper-review fills run.json with one jq, and the file stays empty when that jq fails, as when the
+# skills cannot be hashed. jq then prints nothing, and read, left without a line, would stop this
+# script under set -e without saying why.
+read -r repo pr < <(jq -r '[.repo, .pr] | @tsv' "$run/run.json" 2>/dev/null) || die "cannot read $run/run.json"
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
