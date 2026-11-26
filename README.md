@@ -65,6 +65,9 @@ bin/whooper-resume         # ends the pause
 bin/whooper-status --json  # what runs, whether Whooper is paused, the next and last rounds, and the reviews
 ```
 
+A pause lasts until whooper-resume ends it or whooper-run starts again: whooper-run deletes the
+pause when it starts, so when Prompting Time opens and starts whooper-run, Whooper runs.
+
 Only one round runs at a time: whooper-round holds the lock `<state>/round.lock`, and another
 whooper-round prints "a round is already running" and exits 1. whooper-status makes no network
 calls, and its header lists the fields it prints. [See reviews](#see-reviews) says how it lists the
@@ -449,8 +452,9 @@ same way too.
   gone, or is now some other program, is stale, and the next whooper-run takes it over.
 - `next-round`: the Unix time of the round whooper-run waits for, written before each wait and
   deleted when the round is due.
-- `paused`: an empty file that whooper-pause creates and whooper-resume deletes. While it exists,
-  whooper-run skips its rounds.
+- `paused`: an empty file that whooper-pause creates and whooper-resume deletes, and whooper-run
+  deletes when it starts, so a pause does not survive a restart. While it exists, whooper-run skips
+  its rounds.
 - `round.lock/`: the running whooper-round's lock, with its process ID in `pid` and the same stale
   rule as `run.lock/`. `round.json` holds the round's start as a Unix time, how many items it
   selected, the PR it is reviewing as `<owner>/<repo>#<number>`, and each finished review's PR and

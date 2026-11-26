@@ -1920,12 +1920,15 @@ class RunTest(unittest.TestCase):
         ]))
 
     def test_refuses_to_start_while_another_whooper_run_holds_the_lock(self):
-        # A script named whooper-run stands in for a copy that is already polling.
+        # A script named whooper-run stands in for a copy that is already polling, and paused.
         holder = self.holder("whooper-run")
         self.hold(self.lock, holder)
+        (self.state / "paused").touch()
         result = self.command("whooper-run")
         self.assertEqual((result.returncode, (self.lock / "pid").read_text()), (1, f"{holder}\n"))
         self.assertIn(f"process {holder} is already running", result.stderr)
+        # Only the copy that runs ends the pause when it starts.
+        self.assertTrue((self.state / "paused").exists())
 
     def test_takes_over_a_lock_whose_process_is_some_other_program(self):
         # After a kill -9 or a restart, the lock's process ID can belong to anything, here this test.
@@ -2225,27 +2228,30 @@ class RunTest(unittest.TestCase):
         usage = self.command("whooper-status")
         self.assertEqual((usage.returncode, usage.stderr), (1, "usage: whooper-status --json\n"))
 
-    def test_whooper_run_skips_rounds_while_paused(self):
+    def test_a_pause_lasts_until_whooper_run_restarts_and_skips_each_round_meanwhile(self):
+        # A pause does not survive a restart: a new whooper-run deletes paused and runs its first round at
+        # once, and the fakes fail its poll.
         self.assertEqual(self.command("whooper-pause").returncode, 0)
         log = Path(self.tmp.name) / "run.log"
         with log.open("w") as out:
             loop = self.start(ROOT / "bin" / "whooper-run", out)
-        # The first round is due at once.
+        self.wait_for((self.state / "last-round.json").exists, "the first round")
+        self.assertFalse((self.state / "paused").exists())
+        self.assertEqual(self.status()["last_round"]["result"], "poll_failed")
+        # Paused while it waits, whooper-run skips the next round, due a minute after the first ended.
+        self.assertEqual(self.command("whooper-pause").returncode, 0)
         self.wait_for(lambda: "skipped this round" in log.read_text(), "whooper-run to skip a round")
         skipped = datetime.now(timezone.utc)
         self.wait_for(lambda: self.status()["next_round"], "the next round")
         status = self.status()
         self.assertGreater(datetime.fromisoformat(status["next_round"]), skipped)
-        self.assertEqual({key: status[key] for key in ["loop", "paused", "round", "last_round"]},
+        # The skipped round ran nothing, so the last round is still the first.
+        self.assertEqual({key: status[key] for key in ["loop", "paused", "round"]},
                          {"loop": {"running": True, "pid": loop.pid}, "paused": True,
-                          "round": {"running": False, "started_at": None, "reviewing": None}, "last_round": None})
-        self.stop(loop)
-        # Resumed, a new whooper-run runs its first round at once, and the fakes fail its poll.
+                          "round": {"running": False, "started_at": None, "reviewing": None}})
+        self.assertEqual(status["last_round"]["result"], "poll_failed")
         self.assertEqual(self.command("whooper-resume").returncode, 0)
         self.assertFalse((self.state / "paused").exists())
-        self.start(ROOT / "bin" / "whooper-run")
-        self.wait_for((self.state / "last-round.json").exists, "a round")
-        self.assertEqual(self.status()["last_round"]["result"], "poll_failed")
 
 
 DAY_NAMES = ["mon", "tue", "wed", "thu", "fri", "sat", "sun", "next mon"]

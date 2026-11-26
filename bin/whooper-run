@@ -6,9 +6,10 @@
 # time outside the configured hours and days moves to the next start. Before each wait, whooper-run
 # writes the next round's Unix time to <state>/next-round, where <state> is $XDG_STATE_HOME/whooper
 # (default ~/.local/state/whooper). While <state>/paused exists, which bin/whooper-pause creates and
-# bin/whooper-resume deletes, it skips each round it comes to and logs that it did. Only one copy
-# runs at a time: whooper-run holds the lock <state>/run.lock, with its process ID in run.lock/pid,
-# and refuses to start while another whooper-run holds it. Stop it with Ctrl-C, or with
+# bin/whooper-resume deletes, it skips each round it comes to and logs that it did. A pause does not
+# survive a restart: whooper-run deletes <state>/paused when it starts. Only one copy runs at a
+# time: whooper-run holds the lock <state>/run.lock, with its process ID in run.lock/pid, and
+# refuses to start while another whooper-run holds it. Stop it with Ctrl-C, or with
 # kill -- -$(cat <state>/run.lock/pid) when a shell started it in the background; either way the
 # round it is running stops too.
 #
@@ -44,6 +45,10 @@ if ! mkdir "$lock" 2>/dev/null; then
   fi
 fi
 save "$lock/pid" echo "$$"
+# A pause does not survive a restart: Prompting Time starts whooper-run each time it opens, and
+# reopening it leaves Whooper running. Only the copy that holds the lock deletes the pause, so a
+# second copy refused above leaves it.
+rm -f "$WHOOPER_STATE/paused"
 nap=""
 trap 'rm -rf "$lock"; [[ -z "$nap" ]] || kill "$nap" 2>/dev/null || true' EXIT
 trap 'exit 130' INT TERM HUP
