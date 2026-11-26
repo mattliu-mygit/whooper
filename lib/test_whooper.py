@@ -1411,6 +1411,15 @@ class SubmitTest(unittest.TestCase):
         self.assertEqual(printed.returncode, 0, printed.stderr)
         return printed.stdout.splitlines()[-1].removeprefix("fingerprint: ")
 
+    def hold(self):
+        """Has the lock of the run's PR name the run and this test's process, which is alive, as
+        whooper-review's lock does while it reviews; returns the lock."""
+        lock = self.state / "locks" / "example-org-example-repo-12"
+        lock.mkdir(parents=True)
+        (lock / "pid").write_text(f"{os.getpid()}\n")
+        (lock / "run_id").write_text(f"{self.run.name}\n")
+        return lock
+
     def test_posts_the_included_drafts_as_one_review_at_the_reviewed_head(self):
         for change in [("include", "1"), ("include", "2"), ("include", "3"), ("approve",),
                        ("text", "2", "Why retry a call that succeeded? It duplicates the order."),
@@ -1722,39 +1731,106 @@ class SubmitTest(unittest.TestCase):
         self.assertEqual(approved.returncode, 0, approved.stderr)
         self.assertEqual(self.posted(), [{"commit_id": "h1", "event": "APPROVE", "body": "", "comments": []}])
 
+    def test_a_review_that_failed_is_not_safe_to_approve_whatever_its_findings(self):
+        # A Devin review writes findings.json itself. This one wrote a safe run's findings and then passed its
+        # time limit, so whooper-review stopped it before it finished.
+        why = f"the review run passed its 45-minute limit; see {self.run}/stderr.log and the transcript in {self.run}"
+
+        def fail():
+            self.write_findings("approve_once_ci_passes", [self.NIT])
+            (self.run / "failure.txt").write_text(f"{why}\n")
+
+        fail()
+        self.assertEqual(self.draft(), {"event": "COMMENT", "message": "", "findings": {}})
+        self.draft("approve")
+        for flags in [[], ["--print"]]:
+            with self.subTest(flags=flags):
+                refused = self.submit(*flags)
+                self.assertEqual(refused.returncode, 11, refused.stderr)
+                self.assertEqual([line.strip() for line in refused.stderr.splitlines() if line.startswith("  ")],
+                                 [f"the review failed: {why}"])
+                self.assertIn("--approve-anyway", refused.stderr)
+        self.assertEqual(self.posted(), [])
+        # The user looked, and approves anyway.
+        approved = self.submit("--approve-anyway")
+        self.assertEqual(approved.returncode, 0, approved.stderr)
+        self.assertEqual(self.posted(), [{"commit_id": "h1", "event": "APPROVE", "body": "", "comments": []}])
+        # Only an approval waits for the user's look: a failed review's comments post as they are.
+        self.setUp()
+        fail()
+        self.draft("include", "3")
+        commented = self.submit()
+        self.assertEqual(commented.returncode, 0, commented.stderr)
+        self.assertEqual([request["event"] for request in self.posted()], ["COMMENT"])
+
+    def test_a_review_still_running_cannot_be_submitted(self):
+        # A Devin review writes findings.json itself and may change it until it ends, so while its whooper-review
+        # holds the PR's lock for the run, nothing of it posts, not even a safe run's findings as a comment.
+        self.write_findings("approve_once_ci_passes", [self.NIT])
+        lock = self.hold()
+        comment = {"event": "COMMENT", "message": "", "findings": {"3": {"included": True}}}
+        for name, drafts in [("an approval of its nit", None), ("a comment", comment)]:
+            if drafts:
+                (self.run / "drafts.json").write_text(json.dumps(drafts))
+            for flags in [[], ["--print"], ["--approve-anyway"]]:
+                with self.subTest(name, flags=flags):
+                    refused = self.submit(*flags)
+                    self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                                     (1, "", "whooper-submit: the review is still running; submit it once it ends\n"))
+        self.assertEqual(self.posted(), [])
+        self.assertEqual(sorted(p.name for p in self.run.iterdir()), ["drafts.json", "findings.json", "run.json"])
+        # whooper-review deletes the lock when the review ends.
+        shutil.rmtree(lock)
+        submitted = self.submit()
+        self.assertEqual(submitted.returncode, 0, submitted.stderr)
+        self.assertEqual([request["event"] for request in self.posted()], ["COMMENT"])
+
     def test_status_and_show_call_a_run_safe_to_approve_exactly_when_submit_approves_it_without_approve_anyway(self):
         # Prompting Time reads safe_to_approve from whooper-status and whooper-show, so it must match what
         # whooper-submit does with an approval.
         why = "The PR changes 40 files across four services."
+
+        def failed():
+            # As a Devin review that passed its time limit after it wrote its findings.
+            (self.run / "failure.txt").write_text("the review run passed its 45-minute limit\n")
+
         cases = {
-            "only nits": ("approve_once_ci_passes", [self.NIT, self.OTHER_NIT], ""),
-            "no finding": ("approve_once_ci_passes", [], ""),
-            "the verdict is look_first": ("look_first", [self.NIT], ""),
-            "a finding that is not a nit": ("approve_once_ci_passes", [self.NIT, self.QUESTION], ""),
-            "the review skipped the PR": ("approve_once_ci_passes", [], why),
+            "only nits": ("approve_once_ci_passes", [self.NIT, self.OTHER_NIT], "", None),
+            "no finding": ("approve_once_ci_passes", [], "", None),
+            "the verdict is look_first": ("look_first", [self.NIT], "", None),
+            "a finding that is not a nit": ("approve_once_ci_passes", [self.NIT, self.QUESTION], "", None),
+            "the review skipped the PR": ("approve_once_ci_passes", [], why, None),
+            # Only a nit, in a review that did not finish: it failed after its run wrote the findings, or it
+            # still runs.
+            "the review failed": ("approve_once_ci_passes", [self.NIT], "", failed),
+            "the review still runs": ("approve_once_ci_passes", [self.NIT], "", self.hold),
         }
         seen = {}
-        for name, (verdict, findings, skip_reason) in cases.items():
+        for name, (verdict, findings, skip_reason, unfinished) in cases.items():
             with self.subTest(name):
                 self.setUp()
                 self.write_findings(verdict, findings, skip_reason)
+                if unfinished:
+                    unfinished()
                 self.draft("approve")
                 # --print runs every check whooper-submit runs before it posts, and posts nothing.
                 submitted = self.submit("--print")
-                self.assertIn(submitted.returncode, (0, 11), submitted.stderr)
                 status, show = io.StringIO(), io.StringIO()
                 with redirect_stdout(status):
                     main("status", str(self.state))
                 with redirect_stdout(show):
                     main("show", str(self.state), self.run.name)
                 [review] = json.loads(status.getvalue())["reviews"]
-                seen[name] = (submitted.returncode == 0, review["safe_to_approve"],
+                seen[name] = (submitted.returncode, review["safe_to_approve"],
                               json.loads(show.getvalue())["safe_to_approve"])
-        # Each case as (whooper-submit approves, whooper-status's safe_to_approve, whooper-show's).
-        self.assertEqual(seen, {"only nits": (True, True, True), "no finding": (True, True, True),
-                                "the verdict is look_first": (False, False, False),
-                                "a finding that is not a nit": (False, False, False),
-                                "the review skipped the PR": (False, False, False)})
+        # Each case as (whooper-submit's exit code, whooper-status's safe_to_approve, whooper-show's): 0 when
+        # whooper-submit would approve, 11 when the run is not safe to approve, and 1 when it refuses the review.
+        self.assertEqual(seen, {"only nits": (0, True, True), "no finding": (0, True, True),
+                                "the verdict is look_first": (11, False, False),
+                                "a finding that is not a nit": (11, False, False),
+                                "the review skipped the PR": (11, False, False),
+                                "the review failed": (11, False, False),
+                                "the review still runs": (1, False, False)})
 
     def test_an_approval_without_a_message_says_pre_approving_only_when_it_comments(self):
         self.write_findings("approve_once_ci_passes", [self.NIT, self.OTHER_NIT])

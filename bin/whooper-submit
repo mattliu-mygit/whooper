@@ -23,10 +23,12 @@
 #   10  The PR has new commits since the review. The reviewed head's record says stale and the PR
 #       goes on the recheck list, as whooper-post does, so the next round reviews the new commits
 #       whatever brought the PR in; bin/whooper-round runs that round now.
-#   11  The review approves, and the run is not safe to approve. It lists why: a review the run
-#       skipped, with its reason, since it read too little to vouch for the PR whatever its verdict
-#       says; a verdict other than approve_once_ci_passes, with its reason; and each finding that is
-#       not a nit. --approve-anyway approves anyway, once the user has looked.
+#   11  The review approves, and the run is not safe to approve. It lists why: a review that failed,
+#       with the reason whooper-review saved in failure.txt, since it stopped before it finished
+#       whatever findings it left, such as a Devin review that passed its time limit after writing
+#       them; a review the run skipped, with its reason, since it read too little to vouch for the PR
+#       whatever its verdict says; a verdict other than approve_once_ci_passes, with its reason; and
+#       each finding that is not a nit. --approve-anyway approves anyway, once the user has looked.
 #   12  An included comment or the message @-mentions someone. It lists each mention, and
 #       --allow-mentions posts them.
 #   13  The request is not the one whose fingerprint --expect gives, because the drafts changed
@@ -34,9 +36,10 @@
 #
 # Any other failure exits 1, or with gh's or jq's own code, none of which is 10 to 13. A comment
 # someone wrote on the same line since the review, and a link outside the configured orgs, do not
-# stop it. It refuses a review that did not finish, which left no findings.json or one that does not
-# fit schemas/findings.json, a run whose run.json it cannot read, and a review that includes no
-# comment and does not approve.
+# stop it. It refuses a review that is still running, which a live whooper-review holds the PR's lock
+# for, since a Devin review may still change the findings.json it wrote; a review that did not
+# finish, which left no findings.json or one that does not fit schemas/findings.json; a run whose
+# run.json it cannot read; and a review that includes no comment and does not approve.
 #
 # Before it posts, it writes <run dir>/submit.json saying posting, and after, GitHub's response,
 # so the file records the request and the response, and a second call refuses: a review never posts

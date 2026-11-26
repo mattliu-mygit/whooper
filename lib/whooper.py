@@ -436,9 +436,10 @@ def read_review(run, running):
         outcome = "reviewed" if result is not None and not (run / "failure.txt").exists() else "failed"
     submit = read_object(run / "submit.json")
     posted = submit if submit and submit.get("status") == "posted" else None
-    # Only a review that finished counts: one that runs may still change its findings.json, and one
-    # that failed, as at its time limit, stopped before it finished, whatever findings it left.
-    safe = outcome == "reviewed" and not run_concerns(result)
+    # whooper-submit refuses a review that runs, which may still change its findings.json, and
+    # run_concerns lists a failure, as at the time limit, whatever findings the review left, so this is
+    # true exactly when whooper-submit approves the review without --approve-anyway.
+    safe = outcome == "reviewed" and not run_concerns(run, result)
     return (read_object(run / "run.json"), outcome, result, posted, read_cause(run, outcome),
             (run / SKIPPED_BY_USER).exists(), (run / REMOVED_BY_USER).exists(), safe)
 
@@ -1543,7 +1544,7 @@ def read_drafts(run_dir):
     if path.exists():
         return json.loads(path.read_text())
     result = json.loads((run_dir / "findings.json").read_text())
-    if run_concerns(result):
+    if run_concerns(run_dir, result):
         return {"event": "COMMENT", "message": "", "findings": {}}
     return {"event": "APPROVE", "message": "", "findings": {f["id"]: {"included": True} for f in result["findings"]}}
 
@@ -1602,14 +1603,22 @@ def vetted_comments(findings, drafts):
     return comments
 
 
-def run_concerns(result):
-    """What in a review run's findings.json argues against approving the PR, as lines for
-    whooper-submit to list: a review the run skipped, with the run's reason; a verdict other than
-    approve_once_ci_passes, with its reason; and each finding that is not a nit. A run with none is
-    safe to approve: its drafts start as an approval (read_drafts), whooper-submit approves it
-    without --approve-anyway, and whooper-status and whooper-show give safe_to_approve true once its
-    review is reviewed (read_review)."""
-    approval, concerns = result["approval"], []
+def run_concerns(run_dir, result):
+    """What in the review run in run_dir argues against approving the PR, as lines for whooper-submit
+    to list: a review that failed, with the reason whooper-review saved in failure.txt as it stopped
+    the review; and from result, the run's findings.json, a review the run skipped, with the run's
+    reason, a verdict other than approve_once_ci_passes, with its reason, and each finding that is not
+    a nit. A run with none is safe to approve: its drafts start as an approval (read_drafts),
+    whooper-submit approves it without --approve-anyway, and whooper-status and whooper-show give
+    safe_to_approve true once its review is reviewed (read_review)."""
+    concerns = []
+    # A Devin review writes findings.json itself, so one that passed its time limit or was interrupted
+    # can leave findings that fit, though it stopped before it finished.
+    try:
+        concerns.append(f"the review failed: {(run_dir / 'failure.txt').read_text(errors='replace').strip()}")
+    except FileNotFoundError:
+        pass
+    approval = result["approval"]
     # A run that skipped the PR, as prompts/review.md has it skip a large PR from an untagged ask,
     # read too little to vouch for it, whatever its verdict says.
     if result["status"] == "skipped":
@@ -1984,6 +1993,10 @@ def main(command, *args):
         print(json.dumps(change_drafts(run, *change) if change else read_drafts(run), indent=2))
     elif command == "submit":
         data, run, head_now, flags = Path(args[0]), Path(args[1]).resolve(), args[2], args[3:]
+        # A Devin review writes findings.json itself and may change it until it ends, so nothing of a
+        # review a live whooper-review still runs posts, neither an approval nor a comment.
+        if run.name in running_runs(data):
+            raise SystemExit("whooper-submit: the review is still running; submit it once it ends")
         # bin/whooper-submit writes submit.json saying posting before it posts, and adds GitHub's
         # response after, so a run that has the file may have its review on GitHub.
         if (run / "submit.json").exists():
@@ -2009,7 +2022,7 @@ def main(command, *args):
         # An approval lets the PR merge under the user's name, so whatever in the run argues against
         # it waits for the user's own look.
         if drafts["event"] == "APPROVE" and "--approve-anyway" not in flags:
-            if concerns := run_concerns(result):
+            if concerns := run_concerns(run, result):
                 refuse(NOT_SAFE_EXIT, "whooper-submit: nothing posted: the review approves, and the run is not safe to"
                        " approve:\n" + "".join(f"  {c}\n" for c in concerns)
                        + "Pass --approve-anyway to approve it anyway, or make the review only comment with"

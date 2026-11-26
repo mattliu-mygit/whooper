@@ -166,11 +166,12 @@ newest head of its PR that Whooper knows: of the heads its latest poll saw, the 
 and the PR's records name, the one it learned last. The two differ once the PR has new commits since
 the review, and `pr_head_sha` is null when nothing names the PR. whooper-show gives `head_sha` too.
 
-`safe_to_approve` is true when a review's outcome is `reviewed` and whooper-submit would approve it
-without `--approve-anyway` ([Submit a review](#submit-a-review)): its verdict is
+`safe_to_approve` is true exactly when whooper-submit would approve a review without
+`--approve-anyway` ([Submit a review](#submit-a-review)): its outcome is `reviewed`, its verdict is
 `approve_once_ci_passes`, every finding is a nit, and it did not skip the PR. It is false for any
-other review, as for one that runs, waits, or failed, even with findings that fit, such as a Devin
-review that passed its time limit after writing them. whooper-show gives it too.
+other review, as for one that runs, which whooper-submit refuses, waits, or failed, even with
+findings that fit, such as a Devin review that passed its time limit after writing them.
+whooper-show gives it too.
 
 A failed review's `cause` says what stopped it, as `id`, a short `summary`, and `scope`: `all` when
 the cause stops every review until you fix it, and `pr` when it stops only this PR's:
@@ -214,13 +215,15 @@ bin/whooper-draft <run-id> approve                          # or comment
 bin/whooper-draft <run-id> message 'Thanks, this reads well.'
 ```
 
-A run is safe to approve when it reviewed the PR, its verdict is `approve_once_ci_passes`, and
-every finding it has is a nit. A run that skipped the PR, as the review of a large PR from an
-untagged ask does, read too little to vouch for it, so it is not safe whatever its verdict says.
-Until the user changes anything, a safe run starts as an approval with every nit included, and any
-other run as a comment with nothing included, so the user decides. A review that did not finish,
-whose `findings.json` is missing or does not fit `schemas/findings.json`, such as an empty file or
-findings without a verdict, has no drafts; whooper-draft names the first part that does not fit.
+A run is safe to approve when it reviewed the PR, its verdict is `approve_once_ci_passes`, every
+finding it has is a nit, and its review did not fail. A run that skipped the PR, as the review of a
+large PR from an untagged ask does, read too little to vouch for it, so it is not safe whatever its
+verdict says. Nor is a review that failed, which has a `failure.txt`, whatever findings it left,
+such as a Devin review that passed its time limit after writing them. Until the user changes
+anything, a safe run starts as an approval with every nit included, and any other run as a comment
+with nothing included, so the user decides. A review that did not finish, whose `findings.json` is
+missing or does not fit `schemas/findings.json`, such as an empty file or findings without a
+verdict, has no drafts; whooper-draft names the first part that does not fit.
 
 `bin/whooper-submit <run-id>` posts the review with the user's own gh login, as one GitHub review
 at the head the run reviewed. Each comment is `AI comment (vetted)`, a blank line, and the text,
@@ -241,15 +244,16 @@ code, so Prompting Time can tell them apart:
 | Exit | Why | What then |
 | --- | --- | --- |
 | 10 | The PR has new commits since the review. | The reviewed head's record says stale and the PR goes on the recheck list, as whooper-post does, so the next round reviews the new commits whatever brought the PR in; `bin/whooper-round` runs that round at once. |
-| 11 | The review approves, and the run is not safe to approve. | It lists why: a review the run skipped and why, the verdict and its reason, and the findings that are not nits. `--approve-anyway` approves after the user has looked. |
+| 11 | The review approves, and the run is not safe to approve. | It lists why: a review that failed and the reason in its `failure.txt`, a review the run skipped and why, the verdict and its reason, and the findings that are not nits. `--approve-anyway` approves after the user has looked. |
 | 12 | An included comment or the message @-mentions someone. | It lists each mention, and `--allow-mentions` posts them. |
 | 13 | The request is not the one whose fingerprint `--expect` gives, because the drafts changed since `--print` showed it. | `--print` shows the new request for another confirmation. |
 
 Any other failure exits 1, or with gh's or jq's own code, none of which is 10 to 13. A comment
 someone wrote on the same line since the review, and a link outside the configured orgs, do not
-stop it. It refuses a review that did not finish, a run whose `run.json` it cannot read, a review
-that includes no comment and does not approve, and a run it already submitted, so a review never
-posts twice.
+stop it. It refuses a review that is still running, since a Devin review may still change its
+`findings.json`, a review that did not finish, a run whose `run.json` it cannot read, a review that
+includes no comment and does not approve, and a run it already submitted, so a review never posts
+twice.
 
 ## Skip a review
 

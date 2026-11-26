@@ -47,10 +47,11 @@
 #     skipped     whether the review skipped the PR, as it does a large PR from an untagged ask
 #     findings    how many findings it has, 0 when findings.json is missing or does not fit; a
 #                 review that runs counts none yet, since a Devin review may still change the file
-#     safe_to_approve true when the outcome is reviewed and whooper-submit would approve the review
-#                 without --approve-anyway: its verdict is approve_once_ci_passes, every finding is
-#                 a nit, and it did not skip the PR (lib/whooper.py's run_concerns); false for any
-#                 other review, as for one that runs, waits, or failed, even with findings that fit
+#     safe_to_approve true exactly when whooper-submit would approve the review without
+#                 --approve-anyway: the outcome is reviewed, its verdict is approve_once_ci_passes,
+#                 every finding is a nit, and it did not skip the PR (lib/whooper.py's run_concerns);
+#                 false for any other review, as for one that runs, which whooper-submit refuses,
+#                 waits, or failed, even with findings that fit
 #     submitted   null, or {event, at} once whooper-submit posted the review: APPROVE or COMMENT, and
 #                 when submit.json recorded it; a submit.json that says posting counts as null, since
 #                 its review may or may not be on GitHub
