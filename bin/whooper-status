@@ -24,7 +24,7 @@
 #               once a review succeeds or stops at a cause of its PR's own
 #   reviews     the review runs in <state>/runs that started in the last 30 days, newest first, each
 #               {run_id, repo, pr, title, url, started_at, ended_at, outcome, verdict, skipped,
-#               findings, submitted, needs_you, cause, head_sha, pr_head_sha}:
+#               findings, submitted, needs_you, cause, head_sha, pr_head_sha, skipped_by_user}:
 #     repo        <owner>/<repo>, from run.json, or null when run.json cannot be read, as when
 #                 whooper-review stopped before it wrote the file
 #     pr          the PR's number, from the run ID, <UTC start time>-<PR number>
@@ -48,7 +48,8 @@
 #                 when submit.json recorded it; a submit.json that says posting counts as null, since
 #                 its review may or may not be on GitHub
 #     needs_you   true for a review that ended, reviewed or failed, and is not submitted, until a newer
-#                 run of the same repo and PR starts, which supersedes it, even one that waits
+#                 run of the same repo and PR starts, which supersedes it, even one that waits; false
+#                 while the user marks it skipped
 #     cause       for a failed review, what stopped it, {id, summary, scope}; for one that waits,
 #                 the cause it waits on, from its waiting.json; null otherwise. scope is all for a
 #                 cause that stops every review: docker_unavailable (the repo's setup script could
@@ -65,6 +66,8 @@
 #                 dated by when it was written and a record's by its started_at; null when none
 #                 names the PR or without the repo. It differs from head_sha once the PR has new
 #                 commits since the review
+#     skipped_by_user whether the user marked the review done without submitting it, with
+#                 bin/whooper-skip, which leaves skipped-by-user in the run directory
 #   rounds      the last 50 rounds from <state>/rounds.jsonl, newest first, each {started_at,
 #               ended_at, result, selected, reason}: result is done, poll_failed, or interrupted,
 #               as in last_round, or skipped for a round whooper-run skipped while Whooper was

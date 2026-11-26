@@ -150,8 +150,8 @@ was whole, such as when its fetch failed, and in a review's first seconds, befor
 file; the PR number and start come from the run ID. The title and author come from `github.json`,
 the PR conversation the review read, since `run.json` has neither, and are null when the review's
 GitHub fetch failed or the file cannot be read. A review needs you once it ends, reviewed or failed,
-until whooper-submit posts it or a newer review of the same PR starts, which supersedes it, even one
-that waits; a review that waits needs no one. A
+until whooper-submit posts it, you skip it ([Skip a review](#skip-a-review)), or a newer review of
+the same PR starts, which supersedes it, even one that waits; a review that waits needs no one. A
 `submit.json` that still says `posting` does not count as posted, since its review may or may not be
 on GitHub; whooper-submit then asks you to check the PR. The verdict, the findings, and the drafts
 come only from findings that fit the schema, and none while the review runs, since a Devin review
@@ -241,6 +241,16 @@ someone wrote on the same line since the review, and a link outside the configur
 stop it. It refuses a review that did not finish, a run whose `run.json` it cannot read, a review
 that includes no comment and does not approve, and a run it already submitted, so a review never
 posts twice.
+
+## Skip a review
+
+`bin/whooper-skip <run-id>` marks a review done without submitting it, and prints what it did: it
+leaves the empty file `skipped-by-user` in the run directory, so whooper-status lists the review with
+`skipped_by_user` true and `needs_you` false, and whooper-show gives `skipped_by_user` true.
+`bin/whooper-skip <run-id> --undo` deletes the file. Nothing else changes: nothing posts to GitHub,
+and the drafts and records stay, so a skipped review can still be submitted. It refuses a run ID that
+names no run directory and a review that is still running. Prompting Time runs it as the manifest's
+`skip` action, adding the run ID, and `--undo` after it to undo.
 
 ## Ask about a review
 
@@ -532,6 +542,7 @@ same way too.
   posted: the request and GitHub's `response`, with `status` `posted`, or `posting` while gh posts.
   `asks/` holds whooper-ask's answers, `<n>.json`, each beside its run's `<n>.prompt.md`,
   transcript, and `<n>.stderr.log`, and for Devin `<n>.devin-config.json`.
+  `skipped-by-user` is the empty file whooper-skip leaves when you skip the review.
   The worktrees `head/` and `base/` exist only while the run does. The run of a review that waits
   holds only `run.json`, the work item with the run ID and the agent `[jobs] review` names, and
   `waiting.json`, the cause it waits on.

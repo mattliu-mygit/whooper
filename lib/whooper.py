@@ -26,6 +26,7 @@ from the user's config file (config_path), never from this code. The bin/ script
   whooper.py cause <run dir> <step> [<step's error output>]                         -> failure.json, the cause
   whooper.py retry <data dir> <run-id> <head now>                                  -> queues another review
   whooper.py wait <data dir> <work-item.json> <failure.json>                      -> a waiting run, the recheck list
+  whooper.py skip <data dir> <run-id> [--undo]                                    -> marks the run skipped, or not
   whooper.py classify <data dir> <run dir>                                         -> verdicts, digest, record
   whooper.py post <data dir> <run dir> <head now> <review comments.json>          -> post.json, digest, record
   whooper.py draft <data dir> <run-id> [<change>]                                  -> the run's drafts JSON
@@ -391,11 +392,16 @@ def read_cause(run, outcome):
     return failure_cause(next((step for step, wording in FAILURE_TEXTS if wording.search(first)), None), text)
 
 
+# The empty file whooper-skip leaves in the directory of a run the user marked skipped: the review
+# is done without being submitted, and needs the user no more.
+SKIPPED_BY_USER = "skipped-by-user"
+
+
 def read_review(run, running):
     """How the review in the run directory run went, as whooper-status and whooper-show report it:
-    run.json's work item, the outcome, the findings, the review whooper-submit posted, and for a
-    failed or waiting review, the cause (read_cause). running holds the IDs of the runs a live
-    whooper-review still runs (running_runs). A file that is missing, empty, cut short, or does not fit reads as
+    run.json's work item, the outcome, the findings, the review whooper-submit posted, for a failed or
+    waiting review, the cause (read_cause), and whether the user marked it skipped (skip_review).
+    running holds the IDs of the runs a live whooper-review still runs (running_runs). A file that is missing, empty, cut short, or does not fit reads as
     None, so a run directory Whooper cannot read gives a failed review rather than an error.
 
     The outcome is running while a live whooper-review runs the review; waiting for a review
@@ -421,7 +427,8 @@ def read_review(run, running):
         outcome = "reviewed" if result is not None and not (run / "failure.txt").exists() else "failed"
     submit = read_object(run / "submit.json")
     posted = submit if submit and submit.get("status") == "posted" else None
-    return read_object(run / "run.json"), outcome, result, posted, read_cause(run, outcome)
+    return (read_object(run / "run.json"), outcome, result, posted, read_cause(run, outcome),
+            (run / SKIPPED_BY_USER).exists())
 
 
 def read_title_and_author(run):
@@ -489,7 +496,7 @@ def read_reviews(data, now):
     whooper-status lists them. A review's PR number and start come from its run ID, its repo from
     run.json, its title from github.json, and the rest from read_review. Only the newest run of each PR
     can need the user, since a newer run supersedes the older ones, even while it runs or waits, and
-    one that runs or waits needs no one yet. A name in runs that is not a run ID, such as Finder's
+    one that runs or waits needs no one yet, nor one the user marked skipped. A name in runs that is not a run ID, such as Finder's
     .DS_Store, is no run. Each review also gets the head it reviewed, from run.json, and the newest
     head Whooper knows of its PR (pr_head), which differ once the PR has new commits since the
     review."""
@@ -513,7 +520,7 @@ def read_reviews(data, now):
     # matches only other runs without one.
     reviews, newer = [], set()
     for run, started, pr in runs:
-        item, outcome, result, submit, cause = read_review(run, running)
+        item, outcome, result, submit, cause, skipped = read_review(run, running)
         title, _ = read_title_and_author(run)
         repo = item["repo"] if item else None
         head = item.get("head_sha") if item and isinstance(item.get("head_sha"), str) else None
@@ -535,10 +542,12 @@ def read_reviews(data, now):
             # whooper-submit renames submit.json saying posted into place once GitHub took the review.
             "submitted": {"event": submit["request"]["event"], "at": modified(run / "submit.json")}
                          if submit else None,
-            "needs_you": (repo, pr) not in newer and outcome not in ("running", "waiting") and submit is None,
+            "needs_you": ((repo, pr) not in newer and outcome not in ("running", "waiting") and submit is None
+                          and not skipped),
             "cause": cause,
             "head_sha": head,
             "pr_head_sha": pr_head(data, polled, repo, pr) if repo else None,
+            "skipped_by_user": skipped,
         })
         newer.add((repo, pr))
     return reviews
@@ -584,7 +593,7 @@ def show_review(data, run_id):
     # A run ID names a directory right under runs, so a path such as ../x reads nothing outside it.
     if parse_run_id(run_id) is None or not run.is_dir():
         raise SystemExit(f"whooper-show: no run {run_id} in {data / 'runs'}")
-    item, outcome, result, submit, cause = read_review(run, running_runs(data))
+    item, outcome, result, submit, cause, skipped = read_review(run, running_runs(data))
     title, author = read_title_and_author(run)
 
     def text(name):
@@ -611,6 +620,7 @@ def show_review(data, run_id):
         "submitted": submit,
         "cause": cause,
         "head_sha": item.get("head_sha") if item and isinstance(item.get("head_sha"), str) else None,
+        "skipped_by_user": skipped,
     }
 
 
@@ -1089,6 +1099,33 @@ def retry(data, run_id, head_now, now):
     list_again(data, item, head_now)
     return (f"queued another review of {item['repo']}#{item['pr']} at {head_now[:12]} for the next round;"
             " bin/whooper-round runs that round now")
+
+
+def skip_review(data, run_id, undo=False):
+    """Marks the review run run_id under data skipped by the user, for whooper-skip, or with undo
+    unmarks it: the empty file SKIPPED_BY_USER in its directory, which makes whooper-status count the
+    review as done without its being submitted, so it needs the user no more. Nothing else changes,
+    the drafts and records included. Refuses a run ID that names no run directory and a review a live
+    whooper-review still runs. Returns the line whooper-skip prints."""
+    run = data / "runs" / run_id
+    # A run ID names a directory right under runs, so a path such as ../x reads nothing outside it.
+    if parse_run_id(run_id) is None or not run.is_dir():
+        raise SystemExit(f"whooper-skip: no run {run_id} in {data / 'runs'}")
+    if run_id in running_runs(data):
+        raise SystemExit("whooper-skip: the review is still running; skip it once it ends")
+    item = read_object(run / "run.json") or {}
+    name = f"{run_id} ({item['repo']}#{item['pr']})" if "repo" in item and "pr" in item else run_id
+    mark = run / SKIPPED_BY_USER
+    if undo:
+        if not mark.exists():
+            return f"{name} is not marked as skipped"
+        mark.unlink()
+        return f"unmarked {name} as skipped"
+    if mark.exists():
+        return f"{name} is already marked as skipped"
+    # The file stays empty, so a program watching the folder has nothing to read half of.
+    mark.touch()
+    return f"marked {name} as skipped, without submitting it; bin/whooper-skip {run_id} --undo unmarks it"
 
 
 def wait_review(data, item, cause, agent, now):
@@ -1778,6 +1815,9 @@ def main(command, *args):
     elif command == "retry":
         data, run_id, head_now = args
         print(retry(Path(data), run_id, head_now, datetime.now(timezone.utc)))
+    elif command == "skip":
+        data, run_id, *flags = args
+        print(skip_review(Path(data), run_id, undo=flags == ["--undo"]))
     elif command == "wait":
         data, item, failure = Path(args[0]), load(args[1]), load(args[2])
         cause = {key: failure[key] for key in ("id", "summary", "scope")}

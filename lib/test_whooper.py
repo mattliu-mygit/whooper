@@ -3250,7 +3250,7 @@ class ReviewsTest(unittest.TestCase):
                 "url": f"https://github.com/example-org/example-repo/pull/{pr}", "started_at": self.local(started),
                 "ended_at": self.local(started + timedelta(minutes=20)), "outcome": "reviewed",
                 "verdict": "look_first", "skipped": False, "findings": 0, "submitted": None, "needs_you": True,
-                "cause": None, "head_sha": "h1", "pr_head_sha": None, **fields}
+                "cause": None, "head_sha": "h1", "pr_head_sha": None, "skipped_by_user": False, **fields}
 
     def show(self, *args):
         return subprocess.run([str(ROOT / "bin" / "whooper-show"), *args], env=self.env, capture_output=True,
@@ -3463,7 +3463,8 @@ class ReviewsTest(unittest.TestCase):
         self.assertEqual(self.shown(waits), {
             "version": 1, "run_id": waits.name, "run": json.loads((waits / "run.json").read_text()), "title": None,
             "author": None, "outcome": "waiting", "findings": None, "drafts": None, "diff": None, "failure": None,
-            "asks": [], "submitted": None, "cause": CAUSES["docker_unavailable"], "head_sha": "h1"})
+            "asks": [], "submitted": None, "cause": CAUSES["docker_unavailable"], "head_sha": "h1",
+            "skipped_by_user": False})
         # An ask about it may read why it waits.
         prompt = io.StringIO()
         with redirect_stdout(prompt):
@@ -3539,6 +3540,7 @@ class ReviewsTest(unittest.TestCase):
             # and includes nothing.
             "drafts": {"event": "COMMENT", "message": "", "findings": {}},
             "diff": self.DIFF, "failure": None, "asks": [], "submitted": None, "cause": None, "head_sha": "h1",
+            "skipped_by_user": False,
         })
         drafts = subprocess.run([str(ROOT / "bin" / "whooper-draft"), run.name], env=self.env, capture_output=True,
                                 text=True, timeout=60)
@@ -3560,7 +3562,7 @@ class ReviewsTest(unittest.TestCase):
         self.assertEqual(self.shown(failed), {
             **nothing, "run_id": failed.name, "run": json.loads((failed / "run.json").read_text()),
             "title": self.TITLE, "author": "alice", "outcome": "failed", "diff": self.DIFF, "failure": reason,
-            "cause": CAUSES["time_limit"], "head_sha": "h1",
+            "cause": CAUSES["time_limit"], "head_sha": "h1", "skipped_by_user": False,
         })
         # A Devin review that wrote findings that fit before its time limit has them and whooper-draft's
         # drafts, though it failed.
@@ -3574,7 +3576,7 @@ class ReviewsTest(unittest.TestCase):
         self.assertEqual(self.shown(stopped), {
             **nothing, "run_id": stopped.name, "run": None, "title": None, "author": None, "outcome": "failed",
             "diff": None, "failure": "the review stopped at an unexpected error\n", "cause": CAUSES["unknown"],
-            "head_sha": None,
+            "head_sha": None, "skipped_by_user": False,
         })
         # A Devin review that is still running may still change the findings.json it wrote, so it shows
         # no findings yet.
@@ -3585,7 +3587,7 @@ class ReviewsTest(unittest.TestCase):
         self.assertEqual(self.shown(running), {
             **nothing, "run_id": running.name, "run": json.loads((running / "run.json").read_text()),
             "title": self.TITLE, "author": "alice", "outcome": "running", "diff": self.DIFF, "failure": None,
-            "cause": None, "head_sha": "h1",
+            "cause": None, "head_sha": "h1", "skipped_by_user": False,
         })
 
     def test_show_prints_the_drafts_and_the_review_whooper_submit_posted(self):
@@ -3618,6 +3620,65 @@ class ReviewsTest(unittest.TestCase):
         for name in ["1.prompt.md", "1.transcript.jsonl", "10.devin-config.json", "11.json.tmp", "3.prompt.md"]:
             (run / "asks" / name).write_text("{}")
         self.assertEqual(self.shown(run)["asks"], [asks[1], asks[2], asks[10]])
+
+    def skip(self, *args):
+        """Runs the manifest's skip action, to which Prompting Time adds the run ID and, to undo, --undo."""
+        [action] = [a for a in json.loads((ROOT / "prompting-time-plugin.json").read_text())["actions"]
+                    if a["name"] == "skip"]
+        self.assertFalse(action["confirm"])
+        command = action["command"]
+        return subprocess.run([str(ROOT / command[0]), *command[1:], *args], env=self.env, capture_output=True,
+                              text=True, timeout=60)
+
+    def test_skipping_a_review_marks_it_done_without_submitting_it_until_undone(self):
+        run = self.make_run(timedelta(hours=1))
+        self.finish(run, findings=[finding()])
+        undo = f"bin/whooper-skip {run.name} --undo unmarks it"
+        skipped = self.skip(run.name)
+        self.assertEqual((skipped.returncode, skipped.stdout, skipped.stderr), (
+            0, f"marked {run.name} (example-org/example-repo#12) as skipped, without submitting it; {undo}\n", ""))
+        self.assertEqual(self.reviews(), [self.review(run, findings=1, skipped_by_user=True, needs_you=False)])
+        self.assertEqual(self.shown(run)["skipped_by_user"], True)
+        # Nothing went to GitHub, and drafts stay as they were.
+        self.assertFalse((run / "submit.json").exists() or (run / "drafts.json").exists())
+        self.assertEqual(self.skip(run.name).stdout, f"{run.name} (example-org/example-repo#12) is already marked as"
+                                                     " skipped\n")
+        # Prompting Time adds --undo after the run ID.
+        undone = self.skip(run.name, "--undo")
+        self.assertEqual((undone.returncode, undone.stdout),
+                         (0, f"unmarked {run.name} (example-org/example-repo#12) as skipped\n"))
+        self.assertEqual(self.reviews(), [self.review(run, findings=1)])
+        self.assertEqual(self.skip("--undo", run.name).stdout,
+                         f"{run.name} (example-org/example-repo#12) is not marked as skipped\n")
+        # A review whooper-review stopped before it wrote run.json, which names the PR, can be skipped too.
+        stopped = self.make_run(timedelta(hours=2), pr=13, run_json=False)
+        self.write(stopped, "failure.txt", "the review stopped at an unexpected error\n", 1)
+        self.assertEqual(self.skip(stopped.name).stdout, f"marked {stopped.name} as skipped, without submitting it;"
+                                                         f" bin/whooper-skip {stopped.name} --undo unmarks it\n")
+        self.assertEqual({r["run_id"]: (r["skipped_by_user"], r["needs_you"]) for r in self.reviews()},
+                         {run.name: (False, True), stopped.name: (True, False)})
+
+    def test_skip_refuses_an_unknown_run_and_a_review_still_running(self):
+        run = self.make_run(timedelta(minutes=5))
+        self.fetched(run)
+        for run_id in ["20310101T000000Z-1", "..", "../whooper", f"../runs/{run.name}"]:
+            with self.subTest(run_id):
+                result = self.skip(run_id)
+                self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                 (1, "", f"whooper-skip: no run {run_id} in {self.state / 'runs'}\n"))
+        # A live whooper-review holds the PR's lock for the run; the lock's process is this test.
+        self.hold(run, os.getpid())
+        for args in [[run.name], [run.name, "--undo"]]:
+            with self.subTest(args=args):
+                result = self.skip(*args)
+                self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                 (1, "", "whooper-skip: the review is still running; skip it once it ends\n"))
+        for args in [[], ["--undo"], [run.name, run.name], [run.name, "--undo", "--undo"]]:
+            with self.subTest(args=args):
+                result = self.skip(*args)
+                self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                 (1, "", "usage: whooper-skip <run-id> [--undo]\n"))
+        self.assertEqual(list(run.glob("skipped*")), [])
 
     def test_show_refuses_an_unknown_run(self):
         run = self.make_run(timedelta(hours=1))
