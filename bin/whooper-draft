@@ -19,10 +19,11 @@
 # starts as an approval with every nit included, and any other run as a comment with nothing
 # included, so the user decides.
 # The message starts empty, and an approval posted without one says "Pre-approving to unblock" when
-# it includes comments. Each change goes through a temporary file and a rename, so a program
-# watching the state directory never reads half the file. A review that did not finish, which left
-# no findings.json or one that does not fit schemas/findings.json, has no drafts, and after the run
-# is submitted, changes are refused.
+# it includes comments. Each change reads the drafts and writes them back under a lock on the run's
+# folder, so of two changes at once neither drops the other's, and writes through a temporary file
+# and a rename, so a program watching the state directory never reads half the file. A review that
+# did not finish, which left no findings.json or one that does not fit schemas/findings.json, has no
+# drafts, and after the run is submitted, changes are refused.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"

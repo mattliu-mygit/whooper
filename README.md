@@ -116,7 +116,9 @@ Whooper's defaults for what the config leaves out. They are the ones a settings 
 `bin/whooper-settings set '{"schedule": {"interval_minutes": 30}}'` saves part of them. It checks
 the values against the schema, and the config as it would be saved with the checks Whooper runs
 when it starts, and only then rewrites the lines of those keys, keeping the file's comments. On a
-failure it prints why and leaves the file as it was. A change applies from the next round.
+failure it prints why and leaves the file as it was. It reads and rewrites the file under a lock on
+its folder, so of two saves at once neither drops the other's change. A change applies from the next
+round.
 
 ## See reviews
 
@@ -514,7 +516,10 @@ whooper-run and whooper-round write each of their files through a temporary file
 program watching the directory never reads half of one, whooper-draft and whooper-submit write a
 run's `drafts.json`, `submit-request.json`, and `submit.json` the same way, whooper-ask its
 `asks/<n>.json`, and whooper-post, whooper-submit, whooper-retry, and whooper-remove write the recheck
-list's files the same way too.
+list's files the same way too. Commands that read such a file and write it back hold a lock on its
+folder meanwhile, so of two at once neither drops the other's change: whooper-round and whooper-run
+adding to `rounds.jsonl`, whooper-draft changing `drafts.json`, and whooper-select taking items off
+the recheck list while the commands above write to it.
 
 - `poll/github.json`: whooper-fetch's latest output, one entry per PR as `queries/pr.graphql`
   returns it.

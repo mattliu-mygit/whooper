@@ -1,5 +1,5 @@
 import unittest
-from contextlib import redirect_stderr, redirect_stdout, suppress
+from contextlib import contextmanager, redirect_stderr, redirect_stdout, suppress
 from datetime import datetime, time, timedelta, timezone
 import hashlib
 import io
@@ -11,14 +11,16 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 from time import monotonic, sleep
 from unittest import mock
 from zoneinfo import ZoneInfo
 
-from whooper import (REVIEW_WORDING, SETTINGS_SCHEMA, bot_list, check_schema, claude_shell_calls, classify, conversation,
-                     devin_shell_calls, failure_cause, fill, main, next_round, pr_link, poll_items, read_asks,
-                     read_drafts, read_schedule, select_work, skill_hashes, slack_posts, summary_text, wait_review,
-                     write_record)
+import whooper
+from whooper import (REVIEW_WORDING, SETTINGS_SCHEMA, add_round, bot_list, change_drafts, check_schema, claude_shell_calls,
+                     classify, conversation, devin_shell_calls, failure_cause, fill, main, mark_new_commits, next_round,
+                     pr_link, poll_items, read_asks, read_drafts, read_schedule, select_work, skill_hashes, slack_posts,
+                     summary_text, wait_review, write_record, write_settings)
 
 LOGIN = "sam-example"
 # Every test runs on this made-up config, never on the user's own.
@@ -1310,6 +1312,29 @@ class PostTest(unittest.TestCase):
             self.post()
 
 
+@contextmanager
+def at_first_call(name, other):
+    """Patches lib/whooper.py's function name so that its first call first runs other() in another
+    thread, as another of Whooper's processes would at that moment, and waits half a second for it,
+    time enough unless other waits for a lock the caller holds. The block's end waits for other to end.
+    flock's locks, unlike POSIX record locks, hold between two threads of one process."""
+    function, threads = getattr(whooper, name), []
+
+    def call(*args, **kwargs):
+        if not threads:
+            threads.append(threading.Thread(target=other))
+            threads[0].start()
+            threads[0].join(0.5)
+        return function(*args, **kwargs)
+
+    with mock.patch(f"whooper.{name}", call):
+        try:
+            yield
+        finally:
+            for thread in threads:
+                thread.join()
+
+
 class SubmitTest(unittest.TestCase):
     """bin/whooper-submit, and whooper.py draft, which bin/whooper-draft runs, on a review run of
     example-org/example-repo#12 at head h1 in a throwaway state folder; a few tests run
@@ -1869,6 +1894,13 @@ class SubmitTest(unittest.TestCase):
         # Each change went to a temporary file renamed into place, so only drafts.json is new.
         self.assertEqual(json.loads((self.run / "drafts.json").read_text()), {**drafts, "event": "COMMENT"})
         self.assertEqual(sorted(p.name for p in self.run.iterdir()), ["drafts.json", "findings.json", "run.json"])
+
+    def test_two_changes_to_the_drafts_at_once_both_stay(self):
+        # Prompting Time's page includes finding 2 while Whooper's agent sets the message: the agent's change
+        # comes between the page's read of the drafts and its write.
+        with at_first_call("write_file", lambda: change_drafts(self.run, "message", "Thanks!")):
+            change_drafts(self.run, "include", "2")
+        self.assertEqual(self.draft(), {"event": "COMMENT", "message": "Thanks!", "findings": {"2": {"included": True}}})
 
     def test_whooper_draft_refuses_a_change_it_cannot_record(self):
         for name, change, why in [
@@ -2664,6 +2696,18 @@ class RoundHistoryTest(unittest.TestCase):
             self.assertEqual(os.listdir(tmp), ["rounds.jsonl"])
         starts = [json.loads(line)["started_at"] for line in history.splitlines()]
         self.assertEqual(starts, [1943194500 + 60 * n for n in range(1, 51)])
+
+    def test_two_rounds_that_end_at_once_both_stay_in_the_history(self):
+        # whooper-run adds a round it skips while a round run by hand ends: its line comes between the
+        # round's read of rounds.jsonl and its write.
+        ran = {"started_at": 1943194500, "ended_at": 1943194620, "result": "done", "selected": 0, "reason": None}
+        skipped = {"started_at": 1943194560, "ended_at": None, "result": "skipped", "selected": 0,
+                   "reason": "Whooper is paused"}
+        with tempfile.TemporaryDirectory() as tmp:
+            with at_first_call("write_file", lambda: add_round(Path(tmp), skipped)):
+                add_round(Path(tmp), ran)
+            history = [json.loads(line) for line in (Path(tmp) / "rounds.jsonl").read_text().splitlines()]
+        self.assertEqual(history, [ran, skipped])
 
 
 DAY_NAMES = ["mon", "tue", "wed", "thu", "fri", "sat", "sun", "next mon"]
@@ -4136,6 +4180,22 @@ class RetryTest(unittest.TestCase):
         self.poll([moved, self.asked_again])
         self.assertEqual(self.select(), [moved, self.asked_again])
 
+    def test_a_mark_written_while_a_round_selects_stays_on_the_recheck_list(self):
+        # The recheck list holds PR 12 at h1, and the poll lists the PR, so whooper-select takes it off the
+        # list. Meanwhile whooper-submit finds that the PR moved to h2 and marks it, between the selection's
+        # read of the list and its delete. The mark stays, so the next round reviews h2 whatever brought the
+        # PR in.
+        listed = self.state / "rechecks" / "example-org-example-repo-12.json"
+        listed.parent.mkdir()
+        listed.write_text(json.dumps(self.work))
+
+        def moved():
+            mark_new_commits(self.state, self.work, "h2", datetime.now(timezone.utc))
+
+        with at_first_call("select_work", moved), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            main("select", str(self.state))
+        self.assertEqual(json.loads(listed.read_text()), {**self.work, "head_sha": "h2"})
+
     def test_retrying_a_removed_review_unmarks_it(self):
         self.assertEqual(self.remove(self.run.name).returncode, 0)
         result = self.retry(self.run.name)
@@ -4234,6 +4294,17 @@ class SettingsTest(unittest.TestCase):
         self.assertNotIn("budget_usd", json.loads(self.settings("get"))["agents"]["claude"])
         self.settings("set", json.dumps({"agents": {"claude": {"budget_usd": 7.5}}}))
         self.assertEqual(json.loads(self.settings("get"))["agents"]["claude"]["budget_usd"], 7.5)
+
+    def test_two_saves_at_once_both_change_the_file(self):
+        # Prompting Time's settings form saves the schedule while a terminal saves the ask limit: the
+        # terminal's save comes between the form's read of the config and its write.
+        path = self.use_config(EXAMPLE)
+        with at_first_call("write_file", lambda: write_settings({"ask": {"timeout_minutes": 15}})):
+            write_settings({"schedule": {"interval_minutes": 30}})
+        saved = EXAMPLE.replace("interval_minutes = 15\n", "interval_minutes = 30\n", 1)
+        saved = saved.replace("timeout_minutes = 10               # whooper-ask",
+                              "timeout_minutes = 15               # whooper-ask", 1)
+        self.assertEqual(path.read_text(), saved)
 
     def test_set_adds_a_missing_table(self):
         path = self.use_config(CONFIG)

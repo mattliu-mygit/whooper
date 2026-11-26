@@ -41,7 +41,9 @@ from the user's config file (config_path), never from this code. The bin/ script
   whooper.py show <data dir> <run-id>                                              -> whooper-show's JSON
   whooper.py settings get | set <json>                                             -> settings JSON | saves the given ones
 """
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+import fcntl
 import hashlib
 import json
 import os
@@ -264,15 +266,16 @@ ROUNDS_KEPT = 50
 def add_round(data, entry):
     """Adds entry, a round that ended or one whooper-run skipped, to data/rounds.jsonl, the history
     whooper-status prints as rounds: one JSON object a line, oldest first, the last ROUNDS_KEPT. The
-    file is rewritten through a rename, so a program watching the folder never reads half of it.
-    Nothing locks it, so of a round run by hand and a round whooper-run skips that end at the same
-    moment, one can drop the other's line; add a lock if the history comes to miss rounds."""
+    file is rewritten through a rename, so a program watching the folder never reads half of it, and
+    under the state folder's lock, so of a round run by hand and a round whooper-run skips that end at
+    the same moment, neither drops the other's line."""
     path = data / "rounds.jsonl"
-    try:
-        lines = path.read_text().splitlines()
-    except FileNotFoundError:
-        lines = []
-    write_file(path, "".join(f"{line}\n" for line in [*lines, json.dumps(entry)][-ROUNDS_KEPT:]))
+    with folder_lock(data):
+        try:
+            lines = path.read_text().splitlines()
+        except FileNotFoundError:
+            lines = []
+        write_file(path, "".join(f"{line}\n" for line in [*lines, json.dumps(entry)][-ROUNDS_KEPT:]))
 
 
 # whooper-status lists the review runs that started in the last 30 days.
@@ -745,15 +748,16 @@ def write_settings(values):
     path = config_path().resolve()
     if not path.exists():
         raise SystemExit(f"whooper-settings: no config at {path}")
-    document = tomlkit.parse(path.read_text())
-    merge(document, values)
-    text = tomlkit.dumps(document)
-    merged = tomllib.loads(text)
-    read_schedule(merged)
-    check_jobs(merged)
-    # Nothing locks the file, so of two saves at the same moment the later one drops the other's
-    # change; add a lock if a running whooper-run starts saving settings too.
-    write_file(path, text)
+    # Prompting Time's settings form and a terminal can each save at the same moment, so each save
+    # reads the file and rewrites it under its folder's lock, and neither drops the other's change.
+    with folder_lock(path.parent):
+        document = tomlkit.parse(path.read_text())
+        merge(document, values)
+        text = tomlkit.dumps(document)
+        merged = tomllib.loads(text)
+        read_schedule(merged)
+        check_jobs(merged)
+        write_file(path, text)
 
 
 def write_file(path, text, exclusive=False):
@@ -776,6 +780,20 @@ def write_file(path, text, exclusive=False):
     except BaseException:
         os.unlink(temporary)
         raise
+
+
+@contextmanager
+def folder_lock(folder):
+    """Holds an exclusive lock on folder for the with block, for code that reads a file in folder and
+    writes it back: of two such writers at once, in any of Whooper's processes, the second waits for
+    the first and then reads what it wrote, so neither drops the other's change. The lock is flock's
+    on the folder itself, which adds no file to the folder, and it ends with the block or the process."""
+    fd = os.open(folder, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
 
 
 def bot_list(bots, key):
@@ -1132,11 +1150,14 @@ def mark_new_commits(data, item, head_now, now):
 
 def list_again(data, item, head):
     """Puts the work item of a review run, its run.json item, on the recheck list under data at head,
-    replacing the list's item for the PR, if any."""
+    replacing the list's item for the PR, if any. It writes under the list folder's lock, which
+    whooper-select holds from its read of the list to its deletes, so a mark written meanwhile is not
+    deleted with the item it replaces."""
     path = recheck_path(data, item)
     path.parent.mkdir(parents=True, exist_ok=True)
     work = {key: item[key] for key in ("kind", "repo", "pr", "head_sha", "base_ref", "source", "slack", "reason")}
-    write_file(path, json.dumps(work | {"head_sha": head}))
+    with folder_lock(path.parent):
+        write_file(path, json.dumps(work | {"head_sha": head}))
 
 
 def run_to_change(data, run_id, command, verb):
@@ -1565,24 +1586,25 @@ def change_drafts(run_dir, change, *args):
         raise SystemExit(f"whooper-draft: {run_dir} was already submitted; see its submit.json")
     if change == "text" and not args[1].strip():
         raise SystemExit("whooper-draft: the text is empty; to drop the comment, leave the finding out")
-    drafts = read_drafts(run_dir)
-    if change in ("include", "leave-out", "text"):
-        ids = [f["id"] for f in json.loads((run_dir / "findings.json").read_text())["findings"]]
-        if args[0] not in ids:
-            raise SystemExit(f"whooper-draft: the run has no finding {args[0]}; its findings are"
-                             f" {', '.join(ids) or 'none'}")
-        choice = drafts["findings"].setdefault(args[0], {"included": False})
-        if change == "text":
-            choice["text"] = args[1]
+    # Prompting Time's page, Whooper's agent, and a terminal can each change one run's drafts at the
+    # same moment, so each change reads drafts.json and writes it back under the run folder's lock.
+    with folder_lock(run_dir):
+        drafts = read_drafts(run_dir)
+        if change in ("include", "leave-out", "text"):
+            ids = [f["id"] for f in json.loads((run_dir / "findings.json").read_text())["findings"]]
+            if args[0] not in ids:
+                raise SystemExit(f"whooper-draft: the run has no finding {args[0]}; its findings are"
+                                 f" {', '.join(ids) or 'none'}")
+            choice = drafts["findings"].setdefault(args[0], {"included": False})
+            if change == "text":
+                choice["text"] = args[1]
+            else:
+                choice["included"] = change == "include"
+        elif change == "message":
+            drafts["message"] = args[0]
         else:
-            choice["included"] = change == "include"
-    elif change == "message":
-        drafts["message"] = args[0]
-    else:
-        drafts["event"] = change.upper()
-    # Nothing locks drafts.json, so of two changes at the same moment the later one drops the other's;
-    # add a lock if Prompting Time and the agent come to change one run's drafts at once.
-    write_file(run_dir / "drafts.json", json.dumps(drafts, indent=2))
+            drafts["event"] = change.upper()
+        write_file(run_dir / "drafts.json", json.dumps(drafts, indent=2))
     return drafts
 
 
@@ -1889,15 +1911,19 @@ def main(command, *args):
         newest = max((data / "poll").glob("[0-9]*Z.json"), default=None)
         if newest is None:
             raise SystemExit(f"whooper-select: no poll output in {data / 'poll'}")
-        rechecks = [load(path) for path in sorted((data / "rechecks").glob("*.json"))]
-        work, drops, finished = select_work(load(newest)["items"], data / "prs", datetime.now().astimezone(),
-                                            load_config().get("repos", {}), rechecks, data / "runs")
-        for item, reason in drops:
-            print(f"whooper-select: dropped {item['repo']}#{item['pr']} {item['kind']}: {reason}", file=sys.stderr)
-        # Nothing locks the list, so a mark of the same PR written between the read above and this
-        # delete is lost; add a lock if submits during a round's selection come to lose reviews.
-        for item in finished:
-            recheck_path(data, item).unlink(missing_ok=True)
+        recheck_list = data / "rechecks"
+        recheck_list.mkdir(exist_ok=True)
+        # list_again writes the list under this lock too, so a mark of a PR that whooper-submit or
+        # whooper-post writes while the selection runs, as for new commits, waits for the deletes below
+        # instead of being deleted with the item it replaces.
+        with folder_lock(recheck_list):
+            rechecks = [load(path) for path in sorted(recheck_list.glob("*.json"))]
+            work, drops, finished = select_work(load(newest)["items"], data / "prs", datetime.now().astimezone(),
+                                                load_config().get("repos", {}), rechecks, data / "runs")
+            for item, reason in drops:
+                print(f"whooper-select: dropped {item['repo']}#{item['pr']} {item['kind']}: {reason}", file=sys.stderr)
+            for item in finished:
+                recheck_path(data, item).unlink(missing_ok=True)
         for item in work:
             print(json.dumps(item))
     elif command == "conversation":
