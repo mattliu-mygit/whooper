@@ -2321,6 +2321,51 @@ class RunTest(unittest.TestCase):
                 self.fail(f"timed out waiting for {what}")
             sleep(0.1)
 
+    def lock_takers(self, item):
+        """Each command that takes a lock: its name, the arguments that bring it to the lock, with item as
+        whooper-review's work item, the lock, and the refusal it prints while the process whose ID fills
+        the braces holds the lock."""
+        round_lock, review_lock = self.state / "round.lock", self.state / "locks" / "sample-org-plain-repo-12"
+        return [("whooper-run", [], self.lock,
+                 f"whooper-run: process {{}} is already running Whooper; see {self.lock}/pid"),
+                ("whooper-round", [], round_lock,
+                 f"whooper-round: a round is already running, in process {{}}; see {round_lock}/pid"),
+                ("whooper-review", [str(item), "--dry-run"], review_lock,
+                 "whooper-review: process {} is already reviewing sample-org/plain-repo#12")]
+
+    def start_command(self, name, *args, env):
+        """Starts bin/<name> with args in the environment env, keeping its error output for the test."""
+        process = subprocess.Popen([str(ROOT / "bin" / name), *args], env=env, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.PIPE, text=True, start_new_session=True)
+        self.addCleanup(self.stop, process)
+        return process
+
+    def two_copies(self, name, args, env, lock, paused):
+        """Starts two copies of bin/<name> with args in the environment env. A fake command stops the first
+        as it takes lock: it makes the file paused/stopped and waits for paused/go. Once the second copy
+        waits for the first, or has taken the lock, the first goes on, and once the second stops, or
+        holds the lock, the test stops both. Returns the first copy's process ID, the second's exit code
+        and error output, and the process ID in lock by then."""
+        def waits(process):
+            # Each copy takes its lock while it holds flock on <state>/locks, which lib/python takes with
+            # Python's fcntl.flock, so a copy that waits for the first runs fcntl.flock in its process group.
+            return subprocess.run(["pgrep", "-g", str(process.pid), "-f", "fcntl.flock"],
+                                  stdout=subprocess.DEVNULL).returncode == 0
+
+        first = self.start_command(name, *args, env=env)
+        self.wait_for((paused / "stopped").exists, f"the first {name} to stop as it takes the lock")
+        second = self.start_command(name, *args, env=env)
+        self.wait_for(lambda: waits(second) or self.read(lock / "pid") == f"{second.pid}\n",
+                      f"the second {name} to wait for the first or take the lock")
+        (paused / "go").touch()
+        self.wait_for(lambda: second.poll() is not None or self.read(lock / "pid") == f"{second.pid}\n",
+                      f"the second {name} to stop or take the lock")
+        holder = self.read(lock / "pid")
+        self.stop(first)
+        self.stop(second)
+        first.communicate()
+        return first.pid, second.returncode, second.communicate()[1], holder
+
     def fake_one_review_request(self):
         """Has gh report one review request, for example-org/example-repo#12, as fake_review_requests
         does. The review then fails, since the cache holds no clone of the repo."""
@@ -2480,57 +2525,72 @@ class RunTest(unittest.TestCase):
                 result = self.command(name, *args, env=env)
                 self.assertEqual((result.returncode, lock.exists()), (130, False), result.stderr)
 
+    def test_a_copy_that_comes_while_another_makes_the_lock_waits_for_it_and_refuses(self):
+        # The first copy of each command stops in the mkdir that makes the lock, before it writes its process
+        # ID there, as if it lost the processor there, until the second copy has come to the lock. The first
+        # then waits in its GitHub fetch, or its round's, so it holds the lock until the test stops it.
+        env, item, _ = self.pull_request()
+        mkdir = shutil.which("mkdir")
+        self.script(self.fakes / "gh", "exec sleep 30")
+        for name, args, lock, refusal in self.lock_takers(item):
+            with self.subTest(name):
+                paused = Path(self.tmp.name) / f"{name}.paused"
+                self.script(self.fakes / "mkdir", "\n".join([
+                    f'{mkdir} "$@" || exit',
+                    f'if [ "$1" = "{lock}" ] && {mkdir} "{paused}" 2>/dev/null; then',
+                    f'  touch "{paused}/stopped"',
+                    f'  until [ -e "{paused}/go" ]; do sleep 0.1; done',
+                    "fi",
+                ]))
+                first, returncode, stderr, holder = self.two_copies(name, args, env, lock, paused)
+                # The second copy waited until the first had written its process ID, then refused, and the
+                # lock names the first.
+                self.assertEqual((returncode, stderr, holder), (1, f"{refusal.format(first)}\n", f"{first}\n"))
+
     def test_of_two_copies_that_find_the_same_stale_lock_one_takes_it_over_and_the_other_refuses(self):
-        # Two copies of each command find a lock whose process is gone. The first stops in the cat that
-        # reads the lock's process ID, as if it lost the processor there, until the second has taken the
-        # lock over. The second then waits in its GitHub fetch, or its round's, so it holds the lock until
-        # the test stops it.
+        # Two copies of each command come to a lock whose process is gone. The first stops in the cat that
+        # reads the lock's process ID, as if it lost the processor there, until the second has come to the
+        # lock too. The first then takes the lock over and waits in its GitHub fetch, or its round's, so it
+        # holds the lock until the test stops it.
         env, item, _ = self.pull_request()
         gone = subprocess.Popen(["true"])
         gone.wait()
         cat = shutil.which("cat")
         self.script(self.fakes / "gh", "exec sleep 30")
-
-        def start(name, args):
-            process = subprocess.Popen([str(ROOT / "bin" / name), *args], env=env, stdout=subprocess.DEVNULL,
-                                       stderr=subprocess.PIPE, text=True, start_new_session=True)
-            self.addCleanup(self.stop, process)
-            return process
-
-        round_lock, review_lock = self.state / "round.lock", self.state / "locks" / "sample-org-plain-repo-12"
-        for name, args, lock, refusal in [
-                ("whooper-run", [], self.lock, f"whooper-run: another copy took {self.lock} first"),
-                ("whooper-round", [], round_lock,
-                 f"whooper-round: a round is already running; another copy took {round_lock} first"),
-                ("whooper-review", [str(item), "--dry-run"], review_lock,
-                 f"whooper-review: another review of sample-org/plain-repo#12 took {review_lock} first")]:
+        for name, args, lock, refusal in self.lock_takers(item):
             with self.subTest(name):
                 paused = Path(self.tmp.name) / f"{name}.paused"
                 self.hold(lock, gone.pid)
                 self.script(self.fakes / "cat", "\n".join([
                     f'if [ "$*" = "{lock}/pid" ] && mkdir "{paused}" 2>/dev/null; then',
                     f'  {cat} "$@" > "{paused}/pid"',
-                    f'  touch "{paused}/read"',
+                    f'  touch "{paused}/stopped"',
                     f'  until [ -e "{paused}/go" ]; do sleep 0.1; done',
                     f'  exec {cat} "{paused}/pid"',
                     "fi",
                     f'exec {cat} "$@"',
                 ]))
-                first = start(name, args)
-                self.wait_for((paused / "read").exists, f"the first {name} to find the lock stale")
-                second = start(name, args)
-                self.wait_for(lambda: self.read(lock / "pid") == f"{second.pid}\n",
-                              f"the second {name} to take the lock")
-                (paused / "go").touch()
-                self.wait_for(lambda: first.poll() is not None or self.read(lock / "pid") == f"{first.pid}\n",
-                              f"the first {name} to stop or take the lock")
+                first, returncode, stderr, holder = self.two_copies(name, args, env, lock, paused)
+                # The second copy waited until the first had taken the lock over, then refused, and the lock
+                # names the first.
+                self.assertEqual((returncode, stderr, holder), (1, f"{refusal.format(first)}\n", f"{first}\n"))
+
+    def test_takes_over_a_lock_without_a_process_id_that_no_copy_is_making(self):
+        # A copy killed with kill -9 after the mkdir that makes its lock, before it wrote its process ID
+        # there, leaves the lock without one, while the flock on <state>/locks that it held as it made the
+        # lock ends with it. Each command takes such a lock over at once, then waits in its GitHub fetch,
+        # or its round's, so it holds the lock until the test stops it.
+        env, item, _ = self.pull_request()
+        self.script(self.fakes / "gh", "exec sleep 30")
+        for name, args, lock, _ in self.lock_takers(item):
+            with self.subTest(name):
+                lock.mkdir(parents=True)
+                process = self.start_command(name, *args, env=env)
+                self.wait_for(lambda: process.poll() is not None or self.read(lock / "pid") == f"{process.pid}\n",
+                              f"{name} to stop or take the lock")
                 holder = self.read(lock / "pid")
-                self.stop(first)
-                self.stop(second)
-                second.communicate()
-                # The first copy refused, and the lock still names the second.
-                self.assertEqual((first.returncode, first.communicate()[1], holder),
-                                 (1, f"{refusal}\n", f"{second.pid}\n"))
+                self.stop(process)
+                self.assertEqual(holder, f"{process.pid}\n", process.communicate()[1])
 
     def test_a_signal_the_moment_a_command_makes_its_temporary_folder_leaves_no_folder_behind(self):
         # mktemp makes the folder, inside the test's folder rather than the user's temporary folder, then

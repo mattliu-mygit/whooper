@@ -20,7 +20,7 @@ set -uo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 eval "$("$root/lib/python" "$root/lib/whooper.py" env)"
 lock="$WHOOPER_STATE/run.lock"
-mkdir -p "$WHOOPER_STATE"
+mkdir -p "$WHOOPER_STATE/locks"
 
 # Runs a command with its output going to a temporary file beside the file $1, then renames that
 # file to $1, so a program watching the state folder never reads half a file.
@@ -41,39 +41,33 @@ nap=""
 trap '[[ "$(cat "$lock/pid" 2>/dev/null)" != "$$" ]] || rm -rf "$lock"; [[ -z "$nap" ]] || kill "$nap" 2>/dev/null || true' EXIT
 trap 'exit 130' INT TERM HUP
 take() { (trap '' INT TERM HUP; mkdir "$lock" 2>/dev/null && save "$lock/pid" echo "$$"); }
-# Two copies can find the same stale lock. Had each deleted it, the slower could delete the lock the
-# faster had just taken, and both would run. take_over <pid> instead renames the lock aside, to a
-# name with this process's ID; a rename is atomic, so of two copies only one renames the stale lock.
-# It deletes the renamed lock only when its pid is still <pid>, the one found stale, and puts back,
-# and fails, when it renamed the lock another copy had taken meanwhile. Then it takes the lock, which
-# fails when another copy took it first. It ignores INT, TERM, and HUP as take does, so no such
-# signal leaves a lock renamed aside. A third copy that ran take in the instant a lock was aside
-# would get it too; if callers ever start three copies at once, lock with flock instead
-# (lib/whooper.py's folder_lock).
-take_over() {
-  (
-    trap '' INT TERM HUP
-    if mv "$lock" "$lock.stale.$$" 2>/dev/null; then
-      if [[ "$(cat "$lock.stale.$$/pid" 2>/dev/null)" != "$1" ]]; then
-        mv "$lock.stale.$$" "$lock"
-        exit 1
-      fi
-      rm -rf "$lock.stale.$$"
+# take makes the lock a moment before it writes the pid there, and two copies can find the same
+# stale lock. So each copy holds flock on <state>/locks from before take until it holds the lock or
+# refuses, as whooper-round and whooper-review do for theirs. A copy that finds the lock thus reads
+# it only after the copy that made it has written its pid, or was killed before it could, so a lock
+# without a pid is stale too; and no other copy can take the lock between this copy's deletion of a
+# stale lock and its take, however many copies start at once. lib/python takes the flock on file
+# descriptor 9, which this shell opens on the folder for the block below. A flock lasts until every
+# process that shares that opened folder closes it, so this one outlasts Python and ends with the
+# block, or with this process, as with flock(1), which macOS lacks. It is on <state>/locks rather
+# than <state> because a signal can run whooper-round's finish inside the block, and finish takes
+# lib/whooper.py's folder_lock on <state> to add the round to the history: with this flock on
+# <state>, finish would wait for it forever.
+{
+  "$root/lib/python" -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX)' || exit 1
+  if ! take; then
+    holder="$(cat "$lock/pid" 2>/dev/null || true)"
+    if [[ -n "$holder" ]] && ps -o command= -p "$holder" 2>/dev/null | grep -q whooper-run; then
+      echo "whooper-run: process $holder is already running Whooper; see $lock/pid" >&2
+      exit 1
     fi
-    take
-  )
-}
-if ! take; then
-  holder="$(cat "$lock/pid" 2>/dev/null || true)"
-  if [[ -n "$holder" ]] && ps -o command= -p "$holder" 2>/dev/null | grep -q whooper-run; then
-    echo "whooper-run: process $holder is already running Whooper; see $lock/pid" >&2
-    exit 1
+    rm -rf "$lock"
+    if ! take; then
+      echo "whooper-run: could not take over $lock" >&2
+      exit 1
+    fi
   fi
-  if ! take_over "$holder"; then
-    echo "whooper-run: another copy took $lock first" >&2
-    exit 1
-  fi
-fi
+} 9< "$WHOOPER_STATE/locks" || exit 1
 # A pause does not survive a restart: Prompting Time starts whooper-run each time it opens, and
 # reopening it leaves Whooper running. Only the copy that holds the lock deletes the pause, so a
 # second copy refused above leaves it.

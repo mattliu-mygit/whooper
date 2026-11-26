@@ -157,30 +157,22 @@ work="$(trap '' INT TERM HUP; mktemp -d)"
 
 # A lock whose process is gone is stale, and this review takes it over. As in whooper-run, the traps
 # come before the lock, take makes the lock and writes its pid in a subshell that ignores INT, TERM,
-# and HUP, so no such signal leaves the lock behind, and take_over renames a stale lock aside before
-# it deletes it, so of two reviews that find the same stale lock only one takes it over.
+# and HUP, so no such signal leaves the lock behind, and a review holds flock on <state>/locks from
+# before take until it holds the lock or refuses, so no review reads a lock another review is still
+# making, and of two reviews that find the same stale lock only one takes it over.
 mkdir -p "$data/locks"
 take() { (trap '' INT TERM HUP; mkdir "$lock" 2>/dev/null && echo "$$" > "$lock/pid"); }
-take_over() {
-  (
-    trap '' INT TERM HUP
-    if mv "$lock" "$lock.stale.$$" 2>/dev/null; then
-      if [[ "$(cat "$lock.stale.$$/pid" 2>/dev/null)" != "$1" ]]; then
-        mv "$lock.stale.$$" "$lock"
-        exit 1
-      fi
-      rm -rf "$lock.stale.$$"
+{
+  "$root/lib/python" -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX)'
+  if ! take; then
+    holder="$(cat "$lock/pid" 2>/dev/null || true)"
+    if [[ -n "$holder" ]] && kill -0 "$holder" 2>/dev/null; then
+      die "process $holder is already reviewing $repo#$pr"
     fi
-    take
-  )
-}
-if ! take; then
-  holder="$(cat "$lock/pid" 2>/dev/null || true)"
-  if [[ -n "$holder" ]] && kill -0 "$holder" 2>/dev/null; then
-    die "process $holder is already reviewing $repo#$pr"
+    rm -rf "$lock"
+    take || die "could not take over $lock"
   fi
-  take_over "$holder" || die "another review of $repo#$pr took $lock first"
-fi
+} 9< "$data/locks"
 # The lock names the run, so whooper-ask refuses an ask about this review, and not about an earlier
 # review of the PR, while this script runs.
 echo "$run_id" > "$lock/run_id"

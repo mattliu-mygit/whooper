@@ -27,7 +27,7 @@ eval "$("$root/lib/python" "$root/lib/whooper.py" env)"
 items="$WHOOPER_STATE/items"
 lock="$WHOOPER_STATE/round.lock"
 record="$lock/round.json"
-mkdir -p "$items"
+mkdir -p "$items" "$WHOOPER_STATE/locks"
 
 # Runs a command with its output going to a temporary file beside the file $1, then renames that
 # file to $1, so a program watching the state folder never reads half a file.
@@ -67,37 +67,29 @@ trap 'exit 130' INT TERM HUP
 # round takes it over. As there, the traps come before the lock, and take makes the lock, writes
 # round.json, and then writes the pid in a subshell that ignores INT, TERM, and HUP, so no such
 # signal leaves the lock behind, and a round whose process ID the lock holds has the round.json that
-# finish reads. take_over is whooper-run's too: it renames a stale lock aside before it deletes it,
-# so of two rounds that find the same stale lock only one takes it over.
+# finish reads. And as there, a round holds flock on <state>/locks from before take until it holds
+# the lock or refuses, so no round reads a lock another round is still making, and of two rounds
+# that find the same stale lock only one takes it over.
 take() {
   (trap '' INT TERM HUP; mkdir "$lock" 2>/dev/null &&
     save "$record" jq -n --argjson started "$(date +%s)" '{started_at: $started, selected: null, reviewing: null, reviews: []}' &&
     save "$lock/pid" echo "$$")
 }
-take_over() {
-  (
-    trap '' INT TERM HUP
-    if mv "$lock" "$lock.stale.$$" 2>/dev/null; then
-      if [[ "$(cat "$lock.stale.$$/pid" 2>/dev/null)" != "$1" ]]; then
-        mv "$lock.stale.$$" "$lock"
-        exit 1
-      fi
-      rm -rf "$lock.stale.$$"
+{
+  "$root/lib/python" -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX)' || exit 1
+  if ! take; then
+    holder="$(cat "$lock/pid" 2>/dev/null || true)"
+    if [[ -n "$holder" ]] && ps -o command= -p "$holder" 2>/dev/null | grep -q whooper-round; then
+      echo "whooper-round: a round is already running, in process $holder; see $lock/pid" >&2
+      exit 1
     fi
-    take
-  )
-}
-if ! take; then
-  holder="$(cat "$lock/pid" 2>/dev/null || true)"
-  if [[ -n "$holder" ]] && ps -o command= -p "$holder" 2>/dev/null | grep -q whooper-round; then
-    echo "whooper-round: a round is already running, in process $holder; see $lock/pid" >&2
-    exit 1
+    rm -rf "$lock"
+    if ! take; then
+      echo "whooper-round: could not take over $lock" >&2
+      exit 1
+    fi
   fi
-  if ! take_over "$holder"; then
-    echo "whooper-round: a round is already running; another copy took $lock first" >&2
-    exit 1
-  fi
-fi
+} 9< "$WHOOPER_STATE/locks" || exit 1
 
 echo "=== $(date '+%F %T') poll"
 # step names the poll step that runs, for the history's reason when it fails.
