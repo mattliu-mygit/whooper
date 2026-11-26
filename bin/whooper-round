@@ -9,8 +9,10 @@
 # ID in round.lock/pid, where <state> is $XDG_STATE_HOME/whooper (default ~/.local/state/whooper),
 # and exits 1 with "a round is already running" while another whooper-round holds it. While the
 # round runs, round.lock/round.json holds when it started and the PR it is reviewing. When the round
-# ends, done, failed, or stopped, it writes <state>/last-round.json, which bin/whooper-status reads.
-# It exits 0 when the poll steps succeeded, whether or not each review did, and 1 when one failed.
+# ends, done, failed, or stopped, it writes <state>/last-round.json, which bin/whooper-status reads,
+# and adds the round to <state>/rounds.jsonl, the history of the last 50 rounds, with a reason: which
+# poll step failed, or null. It exits 0 when the poll steps succeeded, whether or not each review
+# did, and 1 when one failed.
 #
 # No set -e: a review that fails must not end the round, and the next item still gets its review.
 set -uo pipefail
@@ -54,21 +56,27 @@ fi
 save "$lock/pid" echo "$$"
 save "$record" jq -n --argjson started "$(date +%s)" '{started_at: $started, selected: null, reviewing: null, reviews: []}'
 # However the round ends, round.json becomes last-round.json with the time and result, and a review
-# still running is listed as interrupted.
-result=interrupted
+# still running is listed as interrupted. The history gets the round with the reason it ended so, or
+# null, and 0 selected for a round that ended before it selected.
+result=interrupted reason=""
 finish() {
   save "$WHOOPER_STATE/last-round.json" jq --argjson ended "$(date +%s)" --arg result "$result" \
     '{started_at, ended_at: $ended, result: $result, selected,
       reviews: (.reviews + if .reviewing then [{pr: .reviewing, outcome: "interrupted"}] else [] end)}' "$record"
+  "$root/lib/python" "$root/lib/whooper.py" add-round "$WHOOPER_STATE" "$(jq -c --arg reason "$reason" \
+    '{started_at, ended_at, result, selected: (.selected // 0), reason: (if $reason == "" then null else $reason end)}' \
+    "$WHOOPER_STATE/last-round.json")"
   rm -rf "$lock"
 }
 trap finish EXIT
 trap 'exit 130' INT TERM HUP
 
 echo "=== $(date '+%F %T') poll"
-if ! { "$root/bin/whooper-fetch" && "$root/bin/whooper-poll" && save "$items/selected.jsonl" "$root/bin/whooper-select"; }; then
+# step names the poll step that runs, for the history's reason when it fails.
+if ! { step="The GitHub fetch" && "$root/bin/whooper-fetch" && step="The Slack poll" && "$root/bin/whooper-poll" &&
+  step="Selecting the work" && save "$items/selected.jsonl" "$root/bin/whooper-select"; }; then
   echo "a poll step failed; trying again next round"
-  result=poll_failed
+  result=poll_failed reason="$step failed"
   exit 1
 fi
 selected="$(grep -c . "$items/selected.jsonl")"

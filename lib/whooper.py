@@ -32,6 +32,7 @@ from the user's config file (config_path), never from this code. The bin/ script
   whooper.py summary <run dir>                                                     -> the summary channel's text
   whooper.py skills <skills dir>                                                   -> {skill: content hash}
   whooper.py next-round [<Unix time the last round ended>]                         -> the next round's Unix time
+  whooper.py add-round <data dir> <round JSON>                                     -> adds it to the round history
   whooper.py status <data dir>                                                     -> whooper-status's JSON
   whooper.py show <data dir> <run-id>                                              -> whooper-show's JSON
   whooper.py settings get | set <json>                                             -> settings JSON | saves the given ones
@@ -179,8 +180,9 @@ def local_time(unix):
 def read_status(data):
     """Whooper's status for whooper-status --json, from the files under data, its state directory:
     whether whooper-run and a round are running, whether Whooper is paused, when the next scheduled
-    round starts, how the last round ended, and the reviews of the last REVIEW_DAYS days
-    (read_reviews). Times are local, in ISO 8601 with the offset. It reads files, asks ps about the two
+    round starts, how the last round ended, the reviews of the last REVIEW_DAYS days (read_reviews),
+    and the last ROUNDS_KEPT rounds (add_round), newest first. Times are local, in ISO 8601 with the
+    offset. It reads files, asks ps about the two
     lock holders, and checks that the process of each review's lock exists, and never calls GitHub,
     Slack, or a model."""
     def read(path):
@@ -205,6 +207,7 @@ def read_status(data):
     next_round = read(data / "next-round") if loop else None
     record = json.loads(read(data / "round.lock" / "round.json") or "null") if current else None
     last = json.loads(read(data / "last-round.json") or "null")
+    rounds = [json.loads(line) for line in (read(data / "rounds.jsonl") or "").splitlines()]
     return {
         "version": 1,
         "loop": {"running": bool(loop), "pid": loop},
@@ -215,7 +218,28 @@ def read_status(data):
         "last_round": {**last, "started_at": local_time(last["started_at"]), "ended_at": local_time(last["ended_at"])}
                       if last else None,
         "reviews": read_reviews(data, datetime.now(timezone.utc)),
+        "rounds": [{**r, "started_at": local_time(r["started_at"]),
+                    "ended_at": local_time(r["ended_at"]) if r["ended_at"] is not None else None}
+                   for r in reversed(rounds)],
     }
+
+
+# whooper-status lists the last 50 rounds, which is all rounds.jsonl keeps.
+ROUNDS_KEPT = 50
+
+
+def add_round(data, entry):
+    """Adds entry, a round that ended or one whooper-run skipped, to data/rounds.jsonl, the history
+    whooper-status prints as rounds: one JSON object a line, oldest first, the last ROUNDS_KEPT. The
+    file is rewritten through a rename, so a program watching the folder never reads half of it.
+    Nothing locks it, so of a round run by hand and a round whooper-run skips that end at the same
+    moment, one can drop the other's line; add a lock if the history comes to miss rounds."""
+    path = data / "rounds.jsonl"
+    try:
+        lines = path.read_text().splitlines()
+    except FileNotFoundError:
+        lines = []
+    write_file(path, "".join(f"{line}\n" for line in [*lines, json.dumps(entry)][-ROUNDS_KEPT:]))
 
 
 # whooper-status lists the review runs that started in the last 30 days.
@@ -1686,6 +1710,9 @@ def main(command, *args):
         if when > earliest:
             print(f"whooper-run: outside the [schedule] hours; next round at {when:%a %Y-%m-%d %H:%M}", file=sys.stderr)
         print(int(when.timestamp()))
+    elif command == "add-round":
+        data, entry = args
+        add_round(Path(data), json.loads(entry))
     elif command == "status":
         print(json.dumps(read_status(Path(args[0])), indent=2))
     elif command == "show":

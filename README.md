@@ -62,7 +62,7 @@ directory for changes:
 bin/whooper-round          # runs a round now, even while paused
 bin/whooper-pause          # whooper-run skips each round it comes to, and logs that it did
 bin/whooper-resume         # ends the pause
-bin/whooper-status --json  # what runs, whether Whooper is paused, the next and last rounds, and the reviews
+bin/whooper-status --json  # what runs, whether Whooper is paused, the next and last rounds, the last 50 rounds, and the reviews
 ```
 
 A pause lasts until whooper-resume ends it or whooper-run starts again: whooper-run deletes the
@@ -462,6 +462,12 @@ same way too.
 - `last-round.json`: the last round that ended: its start and end as Unix times, its result
   (`done`, `poll_failed`, or `interrupted`), how many items it selected, and each review's PR and
   outcome, where a review the round stopped in is `interrupted`.
+- `rounds.jsonl`: the last 50 rounds, oldest first, one JSON object a line, which whooper-round adds
+  as each round ends and whooper-run as it skips one while paused: the round's start and end as Unix
+  times, the end null for a skipped round; its result (`done`, `poll_failed`, `interrupted`, or
+  `skipped`); how many items it selected, 0 when it ended before selecting; and why it ended so, or
+  null, such as `The GitHub fetch failed` or `Whooper is paused`. whooper-status prints them, newest
+  first, as `rounds`.
 - `items/`: whooper-round's work items: `selected.jsonl`, the latest round's selection, and
   `<owner>-<repo>-<pr>-<kind>.json`, the item a review got.
 - `runs/<run-id>/`: one review run, named by its UTC start time and PR number. `run.json` is the

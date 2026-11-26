@@ -6,12 +6,13 @@
 # time outside the configured hours and days moves to the next start. Before each wait, whooper-run
 # writes the next round's Unix time to <state>/next-round, where <state> is $XDG_STATE_HOME/whooper
 # (default ~/.local/state/whooper). While <state>/paused exists, which bin/whooper-pause creates and
-# bin/whooper-resume deletes, it skips each round it comes to and logs that it did. A pause does not
-# survive a restart: whooper-run deletes <state>/paused when it starts. Only one copy runs at a
-# time: whooper-run holds the lock <state>/run.lock, with its process ID in run.lock/pid, and
-# refuses to start while another whooper-run holds it. Stop it with Ctrl-C, or with
-# kill -- -$(cat <state>/run.lock/pid) when a shell started it in the background; either way the
-# round it is running stops too.
+# bin/whooper-resume deletes, it skips each round it comes to, logs that it did, and adds the skipped
+# round to <state>/rounds.jsonl, the history bin/whooper-status prints, as whooper-round adds each
+# round it runs. A pause does not survive a restart: whooper-run deletes <state>/paused when it
+# starts. Only one copy runs at a time: whooper-run holds the lock <state>/run.lock, with its process
+# ID in run.lock/pid, and refuses to start while another whooper-run holds it. Stop it with Ctrl-C,
+# or with kill -- -$(cat <state>/run.lock/pid) when a shell started it in the background; either way
+# the round it is running stops too.
 #
 # No set -e: a round that fails must not end the loop, and the next round tries again.
 set -uo pipefail
@@ -73,6 +74,9 @@ while true; do
   # A pause stops only the schedule: bin/whooper-round run by hand still runs a round.
   if [[ -e "$WHOOPER_STATE/paused" ]]; then
     echo "=== $(date '+%F %T') skipped this round: Whooper is paused; bin/whooper-resume resumes it"
+    # A skipped round never ran, so it has no end.
+    "$root/lib/python" "$root/lib/whooper.py" add-round "$WHOOPER_STATE" "$(jq -cn --argjson started "$(date +%s)" \
+      '{started_at: $started, ended_at: null, result: "skipped", selected: 0, reason: "Whooper is paused"}')"
   else
     # In the foreground, so Ctrl-C and kill -- -<pid> reach the round too. A TERM sent to this
     # process alone takes effect only once the round ends, since bash runs a trap between commands.

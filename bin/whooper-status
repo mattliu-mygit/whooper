@@ -39,6 +39,12 @@
 #                 its review may or may not be on GitHub
 #     needs_you   true for a review that ended, reviewed or failed, and is not submitted, until a newer
 #                 run of the same repo and PR starts, which supersedes it
+#   rounds      the last 50 rounds from <state>/rounds.jsonl, newest first, each {started_at, ended_at,
+#               result, selected, reason}: result is done, poll_failed, or interrupted, as in
+#               last_round, or skipped for a round whooper-run skipped while Whooper was paused, whose
+#               ended_at is null; selected is how many items the round selected, 0 when it ended
+#               before selecting; reason says why it ended so, or is null: which poll step failed, or
+#               that Whooper is paused
 #
 # Times are local, in ISO 8601 with the offset. bin/whooper-show <run-id> --json prints one review
 # in full.

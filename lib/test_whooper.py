@@ -1963,6 +1963,8 @@ class RunTest(unittest.TestCase):
                          {"result": "done", "selected": 1,
                           "reviews": [{"pr": "example-org/example-repo#12", "outcome": "failed"}]})
         self.assertEqual(status["round"], {"running": False, "started_at": None, "reviewing": None})
+        self.assertEqual(status["rounds"], [{"started_at": last["started_at"], "ended_at": last["ended_at"],
+                                             "result": "done", "selected": 1, "reason": None}])
         self.assertEqual(self.notifications.read_text(),
                          "Whooper: example-org/example-repo#12 review failed | See whooper-round's output.\n")
         self.assertFalse((self.state / "round.lock").exists())
@@ -1978,11 +1980,14 @@ class RunTest(unittest.TestCase):
         self.assertEqual((status["loop"], status["next_round"]), ({"running": True, "pid": loop.pid}, None))
         self.assertEqual((running["running"], running["reviewing"]), (True, "example-org/example-repo#12"))
         self.stop(loop)
-        last = self.status()["last_round"]
+        status = self.status()
+        last = status["last_round"]
         self.assertEqual((loop.returncode, last["started_at"]), (130, running["started_at"]))
         self.assertEqual({key: last[key] for key in ["result", "selected", "reviews"]},
                          {"result": "interrupted", "selected": 1,
                           "reviews": [{"pr": "example-org/example-repo#12", "outcome": "interrupted"}]})
+        self.assertEqual(status["rounds"], [{"started_at": last["started_at"], "ended_at": last["ended_at"],
+                                             "result": "interrupted", "selected": 1, "reason": None}])
         self.assertFalse((self.state / "round.lock").exists())
 
     def test_a_review_keeps_the_diff_it_read_after_its_worktrees_go(self):
@@ -2191,7 +2196,7 @@ class RunTest(unittest.TestCase):
     def test_status_reports_the_loop_pause_next_round_and_rounds_from_the_state_folder(self):
         nothing = {"version": 1, "loop": {"running": False, "pid": None}, "paused": False, "next_round": None,
                    "round": {"running": False, "started_at": None, "reviewing": None}, "last_round": None,
-                   "reviews": []}
+                   "reviews": [], "rounds": []}
         self.assertEqual(self.status(), nothing)
         # Unix times on 2031-07-30: the next round at 10:15:00 in Los Angeles, the running round's
         # start at 10:00:02, and the last round from 09:45:01 to 09:52:40.
@@ -2207,6 +2212,23 @@ class RunTest(unittest.TestCase):
             {"started_at": 1943196301, "ended_at": 1943196760, "result": "done", "selected": 1, "reviews": reviews}))
         last_round = {"started_at": "2031-07-30T09:45:01-07:00", "ended_at": "2031-07-30T09:52:40-07:00",
                       "result": "done", "selected": 1, "reviews": reviews}
+        # The history, oldest first: a round whose poll failed at 09:15:00, one whooper-run skipped at
+        # 09:30:00 while paused, and the last round.
+        (self.state / "rounds.jsonl").write_text("".join(json.dumps(r) + "\n" for r in [
+            {"started_at": 1943194500, "ended_at": 1943194507, "result": "poll_failed", "selected": 0,
+             "reason": "The GitHub fetch failed"},
+            {"started_at": 1943195400, "ended_at": None, "result": "skipped", "selected": 0,
+             "reason": "Whooper is paused"},
+            {"started_at": 1943196301, "ended_at": 1943196760, "result": "done", "selected": 1, "reason": None},
+        ]))
+        rounds = [
+            {"started_at": "2031-07-30T09:45:01-07:00", "ended_at": "2031-07-30T09:52:40-07:00", "result": "done",
+             "selected": 1, "reason": None},
+            {"started_at": "2031-07-30T09:30:00-07:00", "ended_at": None, "result": "skipped", "selected": 0,
+             "reason": "Whooper is paused"},
+            {"started_at": "2031-07-30T09:15:00-07:00", "ended_at": "2031-07-30T09:15:07-07:00",
+             "result": "poll_failed", "selected": 0, "reason": "The GitHub fetch failed"},
+        ]
         self.assertEqual(self.status(), {
             "version": 1,
             "loop": {"running": True, "pid": loop},
@@ -2216,6 +2238,7 @@ class RunTest(unittest.TestCase):
                       "reviewing": "example-org/example-repo#12"},
             "last_round": last_round,
             "reviews": [],
+            "rounds": rounds,
         })
         # Locks left by a whooper-run that is gone and by a round whose process ID now belongs to this
         # test: nothing runs, so no round is next either.
@@ -2224,7 +2247,7 @@ class RunTest(unittest.TestCase):
         (self.lock / "pid").write_text(f"{gone.pid}\n")
         (self.state / "round.lock" / "pid").write_text(f"{os.getpid()}\n")
         (self.state / "paused").unlink()
-        self.assertEqual(self.status(), {**nothing, "last_round": last_round})
+        self.assertEqual(self.status(), {**nothing, "last_round": last_round, "rounds": rounds})
         usage = self.command("whooper-status")
         self.assertEqual((usage.returncode, usage.stderr), (1, "usage: whooper-status --json\n"))
 
@@ -2245,13 +2268,37 @@ class RunTest(unittest.TestCase):
         self.wait_for(lambda: self.status()["next_round"], "the next round")
         status = self.status()
         self.assertGreater(datetime.fromisoformat(status["next_round"]), skipped)
-        # The skipped round ran nothing, so the last round is still the first.
+        # The skipped round ran nothing, so the last round is still the first, and the history lists both.
         self.assertEqual({key: status[key] for key in ["loop", "paused", "round"]},
                          {"loop": {"running": True, "pid": loop.pid}, "paused": True,
                           "round": {"running": False, "started_at": None, "reviewing": None}})
-        self.assertEqual(status["last_round"]["result"], "poll_failed")
+        last = status["last_round"]
+        self.assertEqual(last["result"], "poll_failed")
+        [skip, first] = status["rounds"]
+        self.assertEqual(first, {"started_at": last["started_at"], "ended_at": last["ended_at"],
+                                 "result": "poll_failed", "selected": 0, "reason": "The GitHub fetch failed"})
+        self.assertEqual({key: skip[key] for key in ["ended_at", "result", "selected", "reason"]},
+                         {"ended_at": None, "result": "skipped", "selected": 0, "reason": "Whooper is paused"})
+        self.assertTrue(datetime.fromisoformat(last["ended_at"]) < datetime.fromisoformat(skip["started_at"])
+                        <= skipped)
         self.assertEqual(self.command("whooper-resume").returncode, 0)
         self.assertFalse((self.state / "paused").exists())
+
+
+class RoundHistoryTest(unittest.TestCase):
+    """whooper.py add-round, which whooper-round runs as each round ends and whooper-run as it skips
+    one, on a throwaway state folder."""
+
+    def test_the_history_keeps_the_last_50_rounds_oldest_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for n in range(51):
+                main("add-round", tmp, json.dumps({"started_at": 1943194500 + 60 * n, "ended_at": None,
+                                                   "result": "skipped", "selected": 0, "reason": "Whooper is paused"}))
+            history = (Path(tmp) / "rounds.jsonl").read_text()
+            # Written through a rename, which leaves no temporary file behind.
+            self.assertEqual(os.listdir(tmp), ["rounds.jsonl"])
+        starts = [json.loads(line)["started_at"] for line in history.splitlines()]
+        self.assertEqual(starts, [1943194500 + 60 * n for n in range(1, 51)])
 
 
 DAY_NAMES = ["mon", "tue", "wed", "thu", "fri", "sat", "sun", "next mon"]
