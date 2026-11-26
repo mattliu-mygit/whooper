@@ -25,6 +25,7 @@
     { "name": "show-review", "title": "Show a review", "description": "Prints one review as JSON: its work item, the PR's title and author, outcome, findings, drafts, diff, why it failed, the questions asked about it, and the review submitted. Reads files only.", "command": ["bin/whooper-show", "--json"], "confirm": false },
     { "name": "draft", "title": "Change a draft", "description": "Includes or leaves out a comment, edits its text, or sets the review's event or message, in Whooper's state folder.", "command": ["bin/whooper-draft"], "confirm": false },
     { "name": "ask", "title": "Ask about this", "description": "Answers a question about a review with a run of the review's agent that reads the review's record and writes nothing else.", "command": ["bin/whooper-ask"], "confirm": false },
+    { "name": "retry", "title": "Retry review", "description": "Queues another review of a review's PR at the head the PR has now, which the next round runs even when earlier reviews at that head failed. Reads the PR's head with your gh login; posts nothing.", "command": ["bin/whooper-retry"], "confirm": false },
     { "name": "submit", "title": "Submit review", "description": "Posts the chosen comments and the approval or comment to GitHub as one review, with your gh login.", "command": ["bin/whooper-submit"], "confirm": true }
   ]
 }

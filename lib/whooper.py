@@ -23,6 +23,7 @@ from the user's config file (config_path), never from this code. The bin/ script
                                                                                       prunes the recheck list
   whooper.py conversation <conversation.graphql result> [<as-of time>]             -> a run's github.json
   whooper.py record <data dir> <work-item.json> running|failed                     -> writes the PR record
+  whooper.py retry <data dir> <run-id> <head now>                                  -> queues another review
   whooper.py classify <data dir> <run dir>                                         -> verdicts, digest, record
   whooper.py post <data dir> <run dir> <head now> <review comments.json>          -> post.json, digest, record
   whooper.py draft <data dir> <run-id> [<change>]                                  -> the run's drafts JSON
@@ -753,7 +754,9 @@ def select_work(items, prs_dir, now, repos, rechecks=()):
     records write_record writes, and repos is the config's [repos] table. An item is dropped when
     repos has no table for its repo, since a review needs the repo's settings, or when its record is
     running or done or has failed MAX_FAILURES times. A re-check is dropped when its PR already has
-    MAX_RECHECKS_PER_DAY re-check records for other heads started on now's local day.
+    MAX_RECHECKS_PER_DAY re-check records for other heads started on now's local day. A record that
+    says retry, which whooper-retry writes when the user asks for another review (retry), lets its
+    item through whatever earlier reviews at its head did, and the daily limit does not hold it either.
 
     The limit holds a recheck-list item too, counting the records of the item's own kind, and an item
     it drops stays on the list for the next day. A recheck-list item no longer waits once items list
@@ -775,6 +778,10 @@ def select_work(items, prs_dir, now, repos, rechecks=()):
             reason = f"the config has no [repos.\"{item['repo']}\"] table"
         elif record and record["status"] == "running":
             reason = "running at this head"
+        elif record and record["status"] == "retry":
+            # The user asked for this review, so neither limit holds it. The review's own record
+            # replaces this one when it starts.
+            pass
         elif record and (record["status"] == "done" or record["failures"] >= MAX_FAILURES):
             reason = "done at this head" if record["status"] == "done" else f"failed {record['failures']} times at this head"
             # No review starts at this head again, so the list has nothing left to bring back.
@@ -803,8 +810,9 @@ def write_record(prs_dir, item, status, now, approval=None):
     """Records a review run's status for the item's head and kind.
 
     running starts a run at now. failed counts one more failure at this head and done keeps the
-    count, so whooper-select stops retrying a head after MAX_FAILURES. classify passes the run's
-    approval with done, and later statuses for the same head keep it.
+    count, so whooper-select stops retrying a head after MAX_FAILURES. retry keeps the count too, and
+    select_work lets its item through anyway. classify passes the run's approval with done, and later
+    statuses for the same head keep it.
     """
     path = record_path(prs_dir, item)
     started_at = now.isoformat(timespec="seconds")
@@ -828,10 +836,35 @@ def mark_new_commits(data, item, head_now, now):
     come back, since the poll reads each Slack post once. item is the run's run.json. A later mark of
     the same PR replaces this one, so the list holds the newest head either command saw."""
     write_record(data / "prs", item, "stale", now)
+    list_again(data, item, head_now)
+
+
+def list_again(data, item, head):
+    """Puts the work item of a review run, its run.json item, on the recheck list under data at head,
+    replacing the list's item for the PR, if any."""
     path = recheck_path(data, item)
     path.parent.mkdir(parents=True, exist_ok=True)
     work = {key: item[key] for key in ("kind", "repo", "pr", "head_sha", "base_ref", "source", "slack", "reason")}
-    write_file(path, json.dumps(work | {"head_sha": head_now}))
+    write_file(path, json.dumps(work | {"head_sha": head}))
+
+
+def retry(data, run_id, head_now, now):
+    """Queues another review of the PR of the review run run_id under data, for whooper-retry, at
+    head_now, the head the PR has now: the run's work item at that head goes on the recheck list, and
+    the record at that head says retry, which select_work lets through whatever earlier reviews at
+    the head did, since the user asked for this review. Refuses a run ID that names no run directory
+    and a review a live whooper-review still runs. Returns the line whooper-retry prints."""
+    run = data / "runs" / run_id
+    # A run ID names a directory right under runs, so a path such as ../x reads nothing outside it.
+    if parse_run_id(run_id) is None or not run.is_dir():
+        raise SystemExit(f"whooper-retry: no run {run_id} in {data / 'runs'}")
+    if run_id in running_runs(data):
+        raise SystemExit("whooper-retry: the review is still running; retry it once it ends")
+    item = json.loads((run / "run.json").read_text())
+    write_record(data / "prs", {**item, "head_sha": head_now}, "retry", now)
+    list_again(data, item, head_now)
+    return (f"queued another review of {item['repo']}#{item['pr']} at {head_now[:12]} for the next round;"
+            " bin/whooper-round runs that round now")
 
 
 def recheck_path(data, item):
@@ -1471,6 +1504,9 @@ def main(command, *args):
     elif command == "record":
         data, item, status = args
         write_record(Path(data) / "prs", load(item), status, datetime.now(timezone.utc))
+    elif command == "retry":
+        data, run_id, head_now = args
+        print(retry(Path(data), run_id, head_now, datetime.now(timezone.utc)))
     elif command == "classify":
         # Not resolve(): the run's commands name its directory as whooper-review printed it, and on
         # macOS a directory under $TMPDIR resolves to another path through /private.

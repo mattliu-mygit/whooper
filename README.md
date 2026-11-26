@@ -229,6 +229,20 @@ whooper-ask saves each answer in the run directory as `asks/<n>.json`, numbered 
 `[ask] timeout_minutes` (10 by default) is stopped with everything it started and, like a run that
 fails, saves no answer; its number is not used again.
 
+## Retry a review
+
+`bin/whooper-retry <run-id>` queues another review of a run's PR, such as one whose setup script
+failed while Docker was not running, and prints what it queued. It reads the PR's head with your gh
+login, puts the run's work item at that head on the recheck list, and marks that head's record
+`retry`. The next round reviews it whatever earlier reviews at that head did: you asked for it, so
+neither the limit of 3 failures at a head nor the limit of 3 re-checks a day holds it back.
+`bin/whooper-round` runs that round now. When the poll lists the PR at that head, as while its
+review request stands, the round reviews the poll's item instead, once. Once the new review starts,
+its record counts toward both limits as usual, and as the PR's newest run it supersedes the run you
+retried, which no longer needs you. whooper-retry refuses a run ID that names no run directory, a
+review that is still running, and a run whose `run.json` it cannot read, since only that file names
+the PR's repo. Prompting Time runs it as the manifest's `retry` action.
+
 ## Whooper in Prompting Time
 
 Prompting Time reads `prompting-time-plugin.json`, which fits `schemas/prompting-time-plugin.json`:
@@ -296,7 +310,8 @@ When whooper-post or whooper-submit finds that a PR's head moved since its revie
 nothing and puts the PR on the recheck list. The next round's whooper-select adds it to the work at
 the new head, with the kind and source it had, so the new commits get a review even when only a
 Slack ask brought the PR in, which a poll reads once. Like a re-check, it waits for the next day
-once the PR has 3 records of its kind for other heads started today.
+once the PR has 3 records of its kind for other heads started today. `bin/whooper-retry` puts a PR
+on the list too, and no limit holds that review back ([Retry a review](#retry-a-review)).
 
 A PENDING review or a thread reply does not count as reviewing. Slack text is untrusted: an ask
 must name a post or thread reply slackdump read, and only plain
@@ -397,7 +412,8 @@ whooper-submit refuses that run until you check the PR on GitHub and delete the 
 whooper-run and whooper-round write each of their files through a temporary file and a rename, so a
 program watching the directory never reads half of one, whooper-draft and whooper-submit write a
 run's `drafts.json`, `submit-request.json`, and `submit.json` the same way, whooper-ask its
-`asks/<n>.json`, and whooper-post and whooper-submit write the recheck list's files the same way too.
+`asks/<n>.json`, and whooper-post, whooper-submit, and whooper-retry write the recheck list's files the
+same way too.
 
 - `poll/github.json`: whooper-fetch's latest output, one entry per PR as `queries/pr.graphql`
   returns it.
@@ -406,18 +422,20 @@ run's `drafts.json`, `submit-request.json`, and `submit.json` the same way, whoo
 - `poll/cursor`: the Unix time the next poll reads Slack from, which is the last successful poll's
   start time. Without it a poll reads the last 24 hours.
 - `prs/<owner>-<repo>-<pr>/<head>.<kind>.json`: a record of work on one head:
-  `{"status": "running" | "done" | "failed" | "stale", "failures": <n>, "started_at": "<ISO 8601 time>"}`.
+  `{"status": "running" | "done" | "failed" | "stale" | "retry", "failures": <n>, "started_at": "<ISO 8601 time>"}`.
   whooper-review writes running when it starts and failed, with one more failure, when it stops
-  without findings. whooper-classify writes done with the run's `approval`, and whooper-post and
-  whooper-submit write stale when the head moved.
+  without findings. whooper-classify writes done with the run's `approval`, whooper-post and
+  whooper-submit write stale when the head moved, and whooper-retry writes retry, keeping the
+  count, at the head the PR has now.
   whooper-select drops an item in a repo the config has no `[repos."<owner>/<repo>"]` table for,
   an item whose record is done or running or has failed 3 times, and a re-check of a PR that
   already has 3 re-check records for other heads started today (local time). A recheck-list item
   counts under that limit too, by the records of its own kind; dropped for it, the item stays on the
-  list for the next day.
+  list for the next day. Of these, only the missing table drops an item whose record says retry.
 - `rechecks/<owner>-<repo>-<pr>.json`: the recheck list: a PR whose head whooper-post or
-  whooper-submit found moved since its review, as the work item for the new head, with the kind,
-  source, and Slack ask it had. A later mark of the PR replaces it. whooper-select deletes it once
+  whooper-submit found moved since its review, as the work item for the new head, or whose review
+  you asked for again with whooper-retry, as the run's work item at the head the PR has now, with the
+  kind, source, and Slack ask it had. A later mark of the PR replaces it. whooper-select deletes it once
   the newest poll lists the PR, which then comes with the head the PR has now, or once the record at
   the listed head is done or has failed 3 times.
 - `locks/<owner>-<repo>-<pr>/`: the lock of the review that holds the PR, with its process ID in

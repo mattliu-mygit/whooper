@@ -668,6 +668,23 @@ class SelectWorkTest(unittest.TestCase):
         tomorrow = self.now + timedelta(days=1)
         self.assertEqual(select_work([], self.prs, tomorrow, REPOS, [listed]), ([listed], [], []))
 
+    def test_a_retry_is_work_whatever_earlier_reviews_at_its_head_did(self):
+        # The head failed 3 times before bin/whooper-retry marked its record retry and listed the PR
+        # again, and the PR has 3 first-review records for other heads today, which would hold any
+        # other recheck-list item for the next day.
+        for head in ["head0", "head1", "head2"]:
+            self.record(f"{head}.first_review.json", "stale", started_at="2031-08-01T16:00:00Z")
+        self.record("head3.first_review.json", "retry", failures=3)
+        listed = self.listed_again()
+        self.assertEqual(select_work([], self.prs, self.now, REPOS, [listed]), ([listed], [], []))
+        # A poll that lists the PR finishes the list's item, and the poll's item at that head is the work.
+        polled = work_item(kind="first_review")
+        self.assertEqual(select_work([polled], self.prs, self.now, REPOS, [listed]), ([polled], [], [listed]))
+        # Once the review starts, its record counts as any other: here it failed a fourth time.
+        self.record("head3.first_review.json", "failed", failures=4)
+        self.assertEqual(select_work([], self.prs, self.now, REPOS, [listed]),
+                         ([], [(listed, "failed 4 times at this head")], [listed]))
+
 
 class WriteRecordTest(unittest.TestCase):
     def test_failures_add_up_across_runs_and_done_keeps_the_run_start(self):
@@ -3132,6 +3149,142 @@ class ReviewsTest(unittest.TestCase):
                 result = self.show(*args)
                 self.assertEqual((result.returncode, result.stdout, result.stderr),
                                  (1, "", "usage: whooper-show <run-id> --json\n"))
+
+
+class RetryTest(unittest.TestCase):
+    """bin/whooper-retry, run as the manifest's retry action, and bin/whooper-select after it, on review
+    runs of example-org/example-repo#12 in a throwaway state folder. gh is a fake that reports the PR's
+    head from the file head and fails any other call, and slackdump, claude, and devin fail, so no test
+    can reach GitHub, Slack, or a model."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        tmp = Path(self.tmp.name)
+        self.fakes = tmp / "bin"
+        for name in ["slackdump", "claude", "devin"]:
+            fake(self.fakes / name, "exit 1")
+        fake(self.fakes / "gh", "\n".join([
+            'case "$*" in',
+            '  "api repos/example-org/example-repo/pulls/12 --jq .head.sha") cat "${0%/*}/head" ;;',
+            '  *) echo "fake gh: unexpected call: gh $*" >&2; exit 1 ;;',
+            "esac",
+        ]))
+        (self.fakes / "head").write_text("h1\n")
+        self.env = {**os.environ, "PATH": f"{self.fakes}:{os.environ['PATH']}", "XDG_STATE_HOME": str(tmp),
+                    "XDG_CACHE_HOME": str(tmp / "cache")}
+        self.state = tmp / "whooper"
+        # The review of the PR's head h1 failed at the repo's setup script, its third failure at h1.
+        self.work = {"kind": "first_review", "repo": "example-org/example-repo", "pr": 12, "head_sha": "h1",
+                     "base_ref": "master", "source": "github_request", "slack": None,
+                     "reason": "A GitHub review request names sam-example, who has not reviewed this PR."}
+        self.run = self.state / "runs" / "20310727T010246Z-12"
+        self.run.mkdir(parents=True)
+        self.write_run(self.work)
+        (self.run / "failure.txt").write_text("/config/setup.sh failed\n")
+        self.failed = {"status": "failed", "failures": 3, "started_at": "2031-07-27T01:02:46+00:00"}
+        self.record("h1").parent.mkdir(parents=True)
+        self.record("h1").write_text(json.dumps(self.failed))
+        # The newest poll lists the PR at h1, since its review request stands.
+        self.poll([self.work])
+
+    def write_run(self, work):
+        """Writes the run's run.json: the work item the review got, with the run's own fields."""
+        (self.run / "run.json").write_text(json.dumps({**work, "run_id": self.run.name, "merge_base": "m1",
+                                                       "as_of": None, "dry_run": True, "agent": "claude", "skills": {}}))
+
+    def record(self, head):
+        """The path of the record of first reviews of the PR at head."""
+        return self.state / "prs" / "example-org-example-repo-12" / f"{head}.first_review.json"
+
+    def poll(self, items):
+        """Makes items the newest poll's output."""
+        (self.state / "poll").mkdir(exist_ok=True)
+        (self.state / "poll" / "20310727T020000Z.json").write_text(json.dumps({"items": items}))
+
+    def retry(self, *args):
+        """Runs the manifest's retry action, to which Prompting Time adds the run ID, with args."""
+        [action] = [a for a in json.loads((ROOT / "prompting-time-plugin.json").read_text())["actions"]
+                    if a["name"] == "retry"]
+        command = action["command"]
+        return subprocess.run([str(ROOT / command[0]), *command[1:], *args], env=self.env, capture_output=True,
+                              text=True, timeout=60)
+
+    def select(self):
+        """The work items bin/whooper-select prints, as the next round's selection."""
+        result = subprocess.run([str(ROOT / "bin" / "whooper-select")], env=self.env, capture_output=True, text=True,
+                                timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return [json.loads(line) for line in result.stdout.splitlines()]
+
+    def test_a_review_that_failed_three_times_is_reviewed_again_in_the_next_round(self):
+        # Three failures at h1 stop the rounds from reviewing h1 again on their own.
+        self.assertEqual(self.select(), [])
+        result = self.retry(self.run.name)
+        self.assertEqual((result.returncode, result.stdout),
+                         (0, "queued another review of example-org/example-repo#12 at h1 for the next round;"
+                             " bin/whooper-round runs that round now\n"), result.stderr)
+        self.assertEqual(json.loads(self.record("h1").read_text()), {**self.failed, "status": "retry"})
+        # The poll lists the PR, so the round reviews the poll's item at h1, once, and the recheck list's
+        # item for it is done.
+        self.assertEqual(self.select(), [self.work])
+        self.assertFalse((self.state / "rechecks" / "example-org-example-repo-12.json").exists())
+        self.assertEqual(self.select(), [self.work])
+
+    def test_a_retry_reviews_the_head_the_pr_has_now_whatever_brought_it_in(self):
+        # A review of a PR only a Slack ask brought in, which a poll reads once, finished at h1.
+        slack = {"ts": "1943194837.000100", "tagged_user": True,
+                 "permalink": "https://example.slack.com/archives/C0000000001/p1943194837000100"}
+        work = {**self.work, "source": "slack_ask", "slack": slack, "reason": "Alex asked for a review."}
+        self.write_run(work)
+        (self.run / "failure.txt").unlink()
+        done = {"status": "done", "failures": 0, "started_at": "2031-07-27T01:02:46+00:00",
+                "approval": {"verdict": "look_first", "reason": "Ran the orders tests."}}
+        self.record("h1").write_text(json.dumps(done))
+        self.poll([])
+        self.assertEqual(self.select(), [])
+        # The user wants the review done again.
+        self.assertEqual(self.retry(self.run.name).returncode, 0)
+        self.assertEqual(self.select(), [work])
+        # Then the PR moves to h2, and the user asks again: the list now holds the PR at h2.
+        (self.fakes / "head").write_text("h2\n")
+        result = self.retry(self.run.name)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("example-org/example-repo#12 at h2", result.stdout)
+        self.assertEqual(self.select(), [{**work, "head_sha": "h2"}])
+        self.assertEqual(json.loads(self.record("h2").read_text())["status"], "retry")
+
+    def test_refuses_an_unknown_run_a_review_still_running_and_a_run_without_run_json(self):
+        runs = self.state / "runs"
+        # A run ID names a folder right under runs/, as in whooper-show.
+        for run_id in ["20310101T000000Z-1", "../whooper", f"../runs/{self.run.name}"]:
+            with self.subTest(run_id):
+                result = self.retry(run_id)
+                self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                 (1, "", f"whooper-retry: no run {run_id} in {runs}\n"))
+        # A live whooper-review holds the PR's lock for the run; the lock's process is this test.
+        lock = self.state / "locks" / "example-org-example-repo-12"
+        lock.mkdir(parents=True)
+        (lock / "pid").write_text(f"{os.getpid()}\n")
+        (lock / "run_id").write_text(f"{self.run.name}\n")
+        result = self.retry(self.run.name)
+        self.assertEqual((result.returncode, result.stdout, result.stderr),
+                         (1, "", "whooper-retry: the review is still running; retry it once it ends\n"))
+        # whooper-review stopped this review before it wrote run.json, which alone names the PR's repo.
+        stopped = runs / "20310727T000000Z-13"
+        stopped.mkdir()
+        (stopped / "failure.txt").write_text("the review stopped at an unexpected error\n")
+        result = self.retry(stopped.name)
+        self.assertEqual((result.returncode, result.stdout, result.stderr),
+                         (1, "", f"whooper-retry: cannot read {stopped}/run.json, which names the PR to review again\n"))
+        for args in [[], [self.run.name, stopped.name]]:
+            with self.subTest(args=args):
+                result = self.retry(*args)
+                self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                 (1, "", "usage: whooper-retry <run-id>\n"))
+        # Nothing was queued.
+        self.assertFalse((self.state / "rechecks").exists())
+        self.assertEqual(json.loads(self.record("h1").read_text()), self.failed)
 
 
 class SettingsTest(unittest.TestCase):

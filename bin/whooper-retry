@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Queues another review of a review run's PR, such as one whose setup script failed, for the next
+# round, at the head the PR has now:
+#
+#   whooper-retry <run-id>
+#
+# It reads the PR's head with the user's gh login, puts the run's work item at that head on the
+# recheck list, <state>/rechecks/<owner>-<repo>-<pr>.json, where <state> is $XDG_STATE_HOME/whooper
+# (default ~/.local/state/whooper), and marks the head's record under <state>/prs retry. The next
+# round's whooper-select then starts the review whatever earlier reviews at that head did: the user
+# asked for it, so neither the limit of 3 failures at a head nor the limit of 3 re-checks a day holds
+# it. Once the review starts, its own record counts as usual, and as the PR's newest run it
+# supersedes this one, which then no longer needs the user. It prints what it queued; bin/whooper-round
+# runs that round now. It posts nothing.
+#
+# It refuses a run ID that names no run directory, a review still running, which a live whooper-review
+# holds the PR's lock for, and a run whose run.json it cannot read, since only run.json names the
+# PR's repo. Prompting Time runs it as the manifest's retry action.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+eval "$("$root/lib/python" "$root/lib/whooper.py" env)"
+data="$WHOOPER_STATE"
+
+die() {
+  echo "whooper-retry: $*" >&2
+  exit 1
+}
+
+[[ $# == 1 ]] || { echo "usage: whooper-retry <run-id>" >&2; exit 1; }
+run_id="$1"
+run="$data/runs/$run_id"
+[[ -d "$run" ]] || die "no run $run_id in $data/runs"
+# whooper-review writes run.json after its fetch, with one jq, so a review it stopped before then has
+# none, and one whose skills could not be hashed has an empty one. jq then prints nothing, and read,
+# left without a line, would stop this script under set -e without saying why.
+read -r repo pr < <(jq -r '[.repo, .pr] | @tsv' "$run/run.json" 2>/dev/null) ||
+  die "cannot read $run/run.json, which names the PR to review again"
+head_now="$(gh api "repos/$repo/pulls/$pr" --jq .head.sha)"
+# lib/whooper.py refuses a review still running, then writes the record and the recheck list's item.
+exec "$root/lib/python" "$root/lib/whooper.py" retry "$data" "$run_id" "$head_now"
