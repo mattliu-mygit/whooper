@@ -14,8 +14,8 @@
 #              none; null when the review's GitHub fetch failed or the file cannot be read
 #   author     the login of the PR's author in github.json, or null the same way
 #   outcome    running, waiting, reviewed, or failed, by the rule bin/whooper-status's reviews follow
-#   findings   findings.json, or null while the review runs and when the file is missing or does not
-#              fit schemas/findings.json
+#   findings   findings.json without its overview, or null while the review runs and when the file is
+#              missing or does not fit schemas/findings.json
 #   safe_to_approve  whether whooper-submit would approve the review without --approve-anyway, false
 #              unless the outcome is reviewed, as in bin/whooper-status
 #   drafts     what bin/whooper-draft <run-id> prints, or null for a review whose findings are null
@@ -36,6 +36,10 @@
 #              bin/whooper-status gives the same review tells whether the PR has new commits since
 #   skipped_by_user  whether the user marked the review skipped with bin/whooper-skip
 #   removed_by_user  whether the user removed the review from their lists with bin/whooper-remove
+#   overview   the overview the review wrote in findings.json, which whooper-review checked against
+#              diff.patch (README.md, "How a review run works"): summary, verdict_reason, before_after,
+#              places, layers, flow, checked, and not_checked; null when the findings are null or have
+#              none
 #
 # A run ID that names no run directory gets "no run <run-id>" and exit 1. Prompting Time runs this
 # as the manifest's show-review action, whose fixed argument --json comes before the run ID; either

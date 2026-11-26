@@ -1,5 +1,6 @@
 import unittest
 from contextlib import contextmanager, redirect_stderr, redirect_stdout, suppress
+import copy
 from datetime import datetime, time, timedelta, timezone
 import hashlib
 import io
@@ -17,8 +18,8 @@ from unittest import mock
 from zoneinfo import ZoneInfo
 
 import whooper
-from whooper import (REVIEW_WORDING, SETTINGS_SCHEMA, add_round, bot_list, change_drafts, check_schema, claude_shell_calls,
-                     classify, conversation, devin_shell_calls, failure_cause, fill, main, mark_new_commits, next_round,
+from whooper import (REVIEW_WORDING, SETTINGS_SCHEMA, add_round, bot_list, change_drafts, check_overview, check_schema,
+                     claude_shell_calls, classify, conversation, devin_shell_calls, diff_files, failure_cause, fill, main, mark_new_commits, next_round,
                      pr_link, poll_items, read_asks, read_drafts, read_schedule, select_work, skill_hashes, slack_posts,
                      summary_text, wait_review, write_record, write_settings)
 
@@ -1194,6 +1195,154 @@ class CheckSchemaTest(unittest.TestCase):
                     main("check", str(ROOT / "schemas" / "findings.json"), str(path))
 
 
+# A run's diff.patch with each kind of file git diff writes: a changed file with two hunks, an added
+# file, a deleted file, a binary file, a pure rename, a path git quotes, and a path with a space, whose
+# --- and +++ lines git ends with a tab.
+OVERVIEW_PATCH = "".join([
+    "diff --git a/api/runs.go b/api/runs.go\nindex 1111111..2222222 100644\n--- a/api/runs.go\n+++ b/api/runs.go\n",
+    "@@ -10,7 +10,8 @@ func List() {\n a\n b\n c\n-d\n+D\n+E\n f\n g\n h\n",
+    "@@ -40,6 +41,7 @@ func Page() {\n p\n q\n r\n+s\n t\n u\n v\n",
+    "diff --git a/api/cursor.go b/api/cursor.go\nnew file mode 100644\nindex 0000000..3333333\n--- /dev/null\n",
+    "+++ b/api/cursor.go\n@@ -0,0 +1,3 @@\n+package api\n+\n+type Cursor string\n",
+    "diff --git a/api/old.go b/api/old.go\ndeleted file mode 100644\nindex 4444444..0000000\n--- a/api/old.go\n",
+    "+++ /dev/null\n@@ -1,2 +0,0 @@\n-package api\n-// Old paging.\n",
+    "diff --git a/web/logo.png b/web/logo.png\nindex 5555555..6666666 100644\n",
+    "Binary files a/web/logo.png and b/web/logo.png differ\n",
+    "diff --git a/docs/a.md b/docs/b.md\nsimilarity index 100%\nrename from docs/a.md\nrename to docs/b.md\n",
+    'diff --git "a/docs/caf\\303\\251.md" "b/docs/caf\\303\\251.md"\nindex 7777777..8888888 100644\n',
+    '--- "a/docs/caf\\303\\251.md"\n+++ "b/docs/caf\\303\\251.md"\n@@ -1 +1 @@\n-old\n+new\n',
+    "diff --git a/docs/read me.md b/docs/read me.md\nindex 9999999..aaaaaaa 100644\n",
+    "--- a/docs/read me.md\t\n+++ b/docs/read me.md\t\n@@ -2,0 +3 @@ intro\n+added\n",
+])
+
+
+def overview(**overrides):
+    """An overview of OVERVIEW_PATCH that keeps every rule of prompts/review.md's overview."""
+    out = {
+        "summary": "Pages GET /v1/runs by a cursor, so exports of large projects finish.",
+        "verdict_reason": "The cursor skips runs created in the same millisecond.",
+        "before_after": [{"label": "API callers", "before": "GET /v1/runs returns at most 100 runs.",
+                          "after": "It returns up to 500 runs and a next_cursor."}],
+        "places": [{"id": "p1", "title": "Runs with equal timestamps", "reason": "Page orders by created_at only.",
+                    "evidence": {"kind": "ran", "detail": "TestPage at head and base"},
+                    "path": "api/runs.go", "start_line": 41, "end_line": 47}],
+        "layers": [
+            {"id": "l1", "title": "The cursor", "intent": "A cursor type, and List and Page take it.", "read_hint": "read",
+             "ranges": [{"path": "api/cursor.go", "start_line": 1, "end_line": 3},
+                        {"path": "api/runs.go", "start_line": 12, "end_line": 14},
+                        {"path": "api/runs.go", "start_line": 41, "end_line": 47}]},
+            {"id": "l2", "title": "The old paging", "intent": "Removed.", "read_hint": "skim",
+             "ranges": [{"path": "api/old.go", "start_line": 1, "end_line": 2}]},
+            {"id": "l3", "title": "Docs", "intent": "Wording only.", "read_hint": "skip",
+             "ranges": [{"path": "docs/café.md", "start_line": 1, "end_line": 1},
+                        {"path": "docs/read me.md", "start_line": 3, "end_line": 3}]},
+        ],
+        "flow": {"title": "Paging an export", "input": "GET /v1/runs?cursor=c1", "calls": [
+            {"from": "handler", "to": "store", "label": "Page(c1)", "status": "changed", "old_label": "List()",
+             "path": "api/runs.go", "line": 44},
+            {"from": "store", "to": "MySQL", "label": "SELECT ... LIMIT 500", "status": "same", "old_label": None,
+             "path": None, "line": None}]},
+        "checked": ["Ran TestPage at head and base."],
+        "not_checked": ["The query plan: the sandbox has no database."],
+    }
+    out.update(overrides)
+    return out
+
+
+class OverviewTest(unittest.TestCase):
+    """check_overview, the checks whooper-review runs on the overview a review run wrote in findings.json,
+    and whooper.py overview, which drops an overview that fails them."""
+
+    FINDINGS = {"status": "reviewed", "skip_reason": "", "findings": [finding()],
+                "approval": {"verdict": "look_first", "reason": "Ran the api tests; no database path."}}
+
+    def test_an_overview_that_keeps_every_rule_passes(self):
+        check_overview(overview(), OVERVIEW_PATCH)
+        # A PR that changes no flow between components has none.
+        check_overview(overview(flow=None), OVERVIEW_PATCH)
+
+    def test_each_break_is_caught_and_named(self):
+        def outside(start, end, path="api/runs.go"):
+            return {"path": path, "start_line": start, "end_line": end}
+
+        for name, change, reason in [
+            ("a range between two hunks", lambda o: o["layers"][0]["ranges"][1].update(start_line=20, end_line=22),
+             "overview.layers[0].ranges[1], lines 20 to 22 of api/runs.go, is not inside one hunk of the diff"),
+            ("a range across two hunks", lambda o: o["layers"][0]["ranges"][1].update(start_line=12, end_line=45),
+             "overview.layers[0].ranges[1], lines 12 to 45 of api/runs.go, is not inside one hunk of the diff"),
+            ("a range that ends before it starts", lambda o: o["layers"][0]["ranges"][1].update(start_line=14, end_line=12),
+             "overview.layers[0].ranges[1], lines 14 to 12 of api/runs.go, is not inside one hunk of the diff"),
+            ("a deleted file's range past its last line", lambda o: o["layers"][1]["ranges"][0].update(end_line=3),
+             "overview.layers[1].ranges[0], lines 1 to 3 of api/old.go, is not inside one hunk of the diff"),
+            ("a range in a file whose diff shows no lines", lambda o: o["layers"][2]["ranges"].append(outside(1, 1, "web/logo.png")),
+             "overview.layers[2].ranges[2], lines 1 to 1 of web/logo.png, is not inside one hunk of the diff"),
+            ("a place outside the hunks", lambda o: o["places"][0].update(start_line=30, end_line=31),
+             "overview.places[0], lines 30 to 31 of api/runs.go, is not inside one hunk of the diff"),
+            ("a place in a file the diff does not change", lambda o: o["places"][0].update(path="api/other.go"),
+             "overview.places[0] names api/other.go, which the diff does not change"),
+            ("a changed file in no layer", lambda o: o["layers"].pop(2),
+             "docs/café.md is in no layer"),
+            ("a changed file in two layers", lambda o: o["layers"][1]["ranges"].append(outside(1, 3, "api/cursor.go")),
+             "api/cursor.go is in overview.layers[0] and overview.layers[1]"),
+            ("six places", lambda o: o.update(places=o["places"] * 6),
+             "overview.places has more than 5 items"),
+            ("two flows", lambda o: o.update(flow=[o["flow"], o["flow"]]),
+             "overview.flow is not of type object or null"),
+            ("evidence of another kind", lambda o: o["places"][0]["evidence"].update(kind="guessed"),
+             "overview.places[0].evidence.kind is 'guessed', not one of ['ran', 'read', 'searched']"),
+            ("another read hint", lambda o: o["layers"][0].update(read_hint="deep"),
+             "overview.layers[0].read_hint is 'deep', not one of ['read', 'skim', 'skip']"),
+            ("another call status", lambda o: o["flow"]["calls"][0].update(status="moved"),
+             "overview.flow.calls[0].status is 'moved', not one of ['same', 'added', 'removed', 'changed']"),
+            ("a call on line 0", lambda o: o["flow"]["calls"][0].update(line=0),
+             "overview.flow.calls[0].line is below 1"),
+            ("a line given as text", lambda o: o["places"][0].update(start_line="41"),
+             "overview.places[0].start_line is not of type integer"),
+            ("a missing part", lambda o: o.pop("not_checked"),
+             "overview lacks not_checked"),
+        ]:
+            value = copy.deepcopy(overview())
+            change(value)
+            with self.subTest(name), self.assertRaises(ValueError) as caught:
+                check_overview(value, OVERVIEW_PATCH)
+            self.assertEqual(str(caught.exception), reason, name)
+
+    def test_names_each_file_and_its_hunks_as_the_page_does(self):
+        # Each file by its path in the head, or a deleted file's at the merge base, with its path at the merge
+        # base, and the first and last line of each hunk, counted in the head, or a deleted file's at the merge
+        # base. The binary file and the pure rename show no lines.
+        self.assertEqual(diff_files(OVERVIEW_PATCH), [
+            ("api/runs.go", "api/runs.go", [(10, 17), (41, 47)]),
+            ("api/cursor.go", None, [(1, 3)]),
+            ("api/old.go", "api/old.go", [(1, 2)]),
+            ("web/logo.png", "web/logo.png", []),
+            ("docs/b.md", "docs/a.md", []),
+            ("docs/café.md", "docs/café.md", [(1, 1)]),
+            ("docs/read me.md", "docs/read me.md", [(3, 3)]),
+        ])
+
+    def test_the_overview_command_drops_an_overview_that_breaks_a_rule_and_keeps_the_findings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            (run / "diff.patch").write_text(OVERVIEW_PATCH)
+            # An overview that keeps every rule stays, and findings.json without one or without JSON is left
+            # as it is, for whooper-review's schema check.
+            for text in [json.dumps({**self.FINDINGS, "overview": overview()}), json.dumps(self.FINDINGS), "not JSON"]:
+                (run / "findings.json").write_text(text)
+                main("overview", str(run))
+                self.assertEqual((run / "findings.json").read_text(), text)
+            self.assertFalse((run / "overview.invalid.json").exists())
+            broken = overview(places=[{**overview()["places"][0], "start_line": 30, "end_line": 31}])
+            (run / "findings.json").write_text(json.dumps({**self.FINDINGS, "overview": broken}))
+            err = io.StringIO()
+            with redirect_stderr(err):
+                main("overview", str(run))
+            reason = "overview.places[0], lines 30 to 31 of api/runs.go, is not inside one hunk of the diff"
+            self.assertEqual(err.getvalue(), f"whooper-review: dropped the run's overview: {reason}\n")
+            self.assertEqual(json.loads((run / "findings.json").read_text()), self.FINDINGS)
+            self.assertEqual(json.loads((run / "overview.invalid.json").read_text()), {"reason": reason, "overview": broken})
+
+
 def review_comment(path="services/orders/internal/api/orders.go", line=88, start_line=None, side="RIGHT",
                    created_at="2031-07-27T01:30:00Z"):
     """A review comment as GitHub's REST API lists it, on the head's lines start_line to line."""
@@ -2184,6 +2333,28 @@ class RunTest(unittest.TestCase):
                                     "base_ref": "main", "source": "github_request", "slack": None, "reason": "r"}))
         return env, item, merge_base
 
+    def overview_of_the_pr(self, **overrides):
+        """An overview of pull_request's PR 12 that keeps every rule of prompts/review.md's overview: the
+        one hunk of app.txt and of the submodule vendor/lib in a layer each, and generated.txt, which
+        .gitattributes shows as binary, in none."""
+        out = {
+            "summary": "Adds a second line to app.txt and vendors lib as a submodule.",
+            "verdict_reason": "Nothing needs the author: the change only adds a line and a submodule.",
+            "before_after": [{"label": "Readers of app.txt", "before": "app.txt holds one.", "after": "It holds one and two."}],
+            "places": [{"id": "p1", "title": "The new line", "reason": "Nothing reads the second line yet.",
+                        "evidence": {"kind": "searched", "detail": "grep -rn app.txt"},
+                        "path": "app.txt", "start_line": 2, "end_line": 2}],
+            "layers": [{"id": "l1", "title": "app.txt", "intent": "One more line.", "read_hint": "read",
+                        "ranges": [{"path": "app.txt", "start_line": 1, "end_line": 2}]},
+                       {"id": "l2", "title": "The submodule", "intent": "Vendors lib.", "read_hint": "skip",
+                        "ranges": [{"path": "vendor/lib", "start_line": 1, "end_line": 1}]}],
+            "flow": None,
+            "checked": ["Read the diff."],
+            "not_checked": ["Nothing runs app.txt, so nothing ran."],
+        }
+        out.update(overrides)
+        return out
+
     def setup_script(self, body):
         """Names setup.sh, which runs body, a few lines of sh, as sample-org/plain-repo's setup script in
         the config, and returns its path."""
@@ -2334,7 +2505,8 @@ class RunTest(unittest.TestCase):
         (self.fakes / "result.json").write_text(json.dumps({
             "type": "result", "subtype": "success", "total_cost_usd": 0, "duration_ms": 0, "num_turns": 1,
             "structured_output": {"status": "reviewed", "skip_reason": "", "findings": [],
-                                  "approval": {"verdict": "approve_once_ci_passes", "reason": "Read the diff."}}}))
+                                  "approval": {"verdict": "approve_once_ci_passes", "reason": "Read the diff."},
+                                  "overview": self.overview_of_the_pr()}}))
         self.script(self.fakes / "claude", f"git diff {merge_base} HEAD > '{run_diff}'\ncat \"${{0%/*}}/result.json\"")
         result = self.command("whooper-review", str(item), "--dry-run", env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -2429,6 +2601,66 @@ class RunTest(unittest.TestCase):
         # No clone at all.
         shutil.rmtree(clone)
         self.assertEqual(diff(), None)
+
+    def test_a_review_keeps_the_overview_its_run_wrote_and_drops_one_that_breaks_a_rule(self):
+        env, item, _ = self.pull_request()
+        tmp = Path(self.tmp.name)
+        findings = {"status": "reviewed", "skip_reason": "", "findings": [],
+                    "approval": {"verdict": "approve_once_ci_passes", "reason": "Read the diff."}}
+
+        def review(overview):
+            """Reviews PR 12 with a Claude run that saves the prompt and the schema it got and returns findings
+            with overview, and returns whooper-review's result and the run's directory. A run ID names its
+            start to the second, so each review starts in a second of its own."""
+            sleep(1 - datetime.now().microsecond / 1e6)
+            (self.fakes / "result.json").write_text(json.dumps({
+                "type": "result", "subtype": "success", "total_cost_usd": 0, "duration_ms": 0, "num_turns": 1,
+                "structured_output": {**findings, "overview": overview}}))
+            self.script(self.fakes / "claude", "\n".join([
+                f"""printf '%s' "$2" > '{tmp}/prompt.md'""",
+                "while [ $# -gt 0 ]; do",
+                f"""  [ "$1" = --json-schema ] && printf '%s' "$2" > '{tmp}/schema.json'""",
+                "  shift",
+                "done",
+                'cat "${0%/*}/result.json"',
+            ]))
+            result = self.command("whooper-review", str(item), "--dry-run", env=env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result, Path(result.stdout.strip())
+
+        def shown(run):
+            result = self.command("whooper-show", run.name, "--json", env=env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return {key: json.loads(result.stdout)[key] for key in ["outcome", "findings", "overview"]}
+
+        # The prompt asks for the overview, and the schema the run returns its result in takes it.
+        kept = self.overview_of_the_pr()
+        result, run = review(kept)
+        self.assertIn("\n## The overview\n", (tmp / "prompt.md").read_text())
+        check_schema({**findings, "overview": kept}, json.loads((tmp / "schema.json").read_text()))
+        self.assertNotIn("overview", result.stderr)
+        self.assertEqual(json.loads((run / "findings.json").read_text()), {**findings, "overview": kept})
+        self.assertFalse((run / "overview.invalid.json").exists())
+        # whooper-show gives the overview once, beside the findings.
+        self.assertEqual(shown(run), {"outcome": "reviewed", "findings": findings, "overview": kept})
+        # An overview with lines outside the diff's hunks, one that does not fit the schema, or one that is no
+        # overview at all is dropped, with why, and the review keeps its findings.
+        place = {**kept["places"][0], "start_line": 3, "end_line": 3}
+        layers = [{**kept["layers"][0], "read_hint": "deep"}, kept["layers"][1]]
+        for broken, reason in [
+            (self.overview_of_the_pr(places=[place]),
+             "overview.places[0], lines 3 to 3 of app.txt, is not inside one hunk of the diff"),
+            (self.overview_of_the_pr(layers=layers),
+             "overview.layers[0].read_hint is 'deep', not one of ['read', 'skim', 'skip']"),
+            ("Adds a line.", "overview is not of type object"),
+        ]:
+            with self.subTest(reason):
+                result, run = review(broken)
+                self.assertIn(f"whooper-review: dropped the run's overview: {reason}\n", result.stderr)
+                self.assertEqual(json.loads((run / "findings.json").read_text()), findings)
+                self.assertEqual(json.loads((run / "overview.invalid.json").read_text()),
+                                 {"reason": reason, "overview": broken})
+                self.assertEqual(shown(run), {"outcome": "reviewed", "findings": findings, "overview": None})
 
     def test_a_failed_review_keeps_its_reason_and_an_ask_lists_it_first(self):
         env, item, _ = self.pull_request()
@@ -3673,7 +3905,7 @@ class ReviewsTest(unittest.TestCase):
             "version": 1, "run_id": waits.name, "run": json.loads((waits / "run.json").read_text()), "title": None,
             "author": None, "outcome": "waiting", "findings": None, "safe_to_approve": False, "drafts": None,
             "diff": None, "failure": None, "asks": [], "submitted": None, "cause": CAUSES["docker_unavailable"],
-            "head_sha": "h1", "skipped_by_user": False, "removed_by_user": False})
+            "head_sha": "h1", "skipped_by_user": False, "removed_by_user": False, "overview": None})
         # An ask about it may read why it waits.
         prompt = io.StringIO()
         with redirect_stdout(prompt):
@@ -3777,6 +4009,8 @@ class ReviewsTest(unittest.TestCase):
             "safe_to_approve": False, "drafts": {"event": "COMMENT", "message": "", "findings": {}},
             "diff": self.DIFF, "failure": None, "asks": [], "submitted": None, "cause": None, "head_sha": "h1",
             "skipped_by_user": False, "removed_by_user": False,
+            # The run wrote no overview.
+            "overview": None,
         })
         drafts = subprocess.run([str(ROOT / "bin" / "whooper-draft"), run.name], env=self.env, capture_output=True,
                                 text=True, timeout=60)
@@ -3795,7 +4029,7 @@ class ReviewsTest(unittest.TestCase):
         reason = f"the review run passed its 45-minute limit; see {failed}/stderr.log and the transcript in {failed}\n"
         self.write(failed, "failure.txt", reason, 45)
         nothing = {"version": 1, "findings": None, "safe_to_approve": False, "drafts": None, "asks": [],
-                   "submitted": None}
+                   "submitted": None, "overview": None}
         self.assertEqual(self.shown(failed), {
             **nothing, "run_id": failed.name, "run": json.loads((failed / "run.json").read_text()),
             "title": self.TITLE, "author": "alice", "outcome": "failed", "diff": self.DIFF, "failure": reason,

@@ -54,6 +54,113 @@
           "observed": { "type": "string", "description": "Exact text from the head_run output that shows the failure and is absent from the base_run output, or empty." }
         }
       }
+    },
+    "overview": {
+      "type": "object",
+      "description": "What the PR does and where to look first, for the review screen. Whooper drops an overview that breaks a rule of the prompt's overview section.",
+      "required": ["summary", "verdict_reason", "before_after", "places", "layers", "flow", "checked", "not_checked"],
+      "additionalProperties": false,
+      "properties": {
+        "summary": { "type": "string", "description": "What the PR does, for someone who calls the changed code, and why." },
+        "verdict_reason": { "type": "string", "description": "Why the approval verdict is what it is." },
+        "before_after": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["label", "before", "after"],
+            "additionalProperties": false,
+            "properties": {
+              "label": { "type": "string", "description": "Who sees the change." },
+              "before": { "type": "string" },
+              "after": { "type": "string" }
+            }
+          }
+        },
+        "places": {
+          "type": "array",
+          "maxItems": 5,
+          "description": "The places to read closely, most important first.",
+          "items": {
+            "type": "object",
+            "required": ["id", "title", "reason", "evidence", "path", "start_line", "end_line"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string" },
+              "title": { "type": "string" },
+              "reason": { "type": "string" },
+              "evidence": {
+                "type": "object",
+                "required": ["kind", "detail"],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": { "enum": ["ran", "read", "searched"] },
+                  "detail": { "type": "string", "description": "What was run, read, or searched for." }
+                }
+              },
+              "path": { "type": "string" },
+              "start_line": { "type": "integer", "minimum": 1 },
+              "end_line": { "type": "integer", "minimum": 1 }
+            }
+          }
+        },
+        "layers": {
+          "type": "array",
+          "description": "The change in reading order. Each file the diff shows lines of is in exactly one layer.",
+          "items": {
+            "type": "object",
+            "required": ["id", "title", "intent", "read_hint", "ranges"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string" },
+              "title": { "type": "string" },
+              "intent": { "type": "string" },
+              "read_hint": { "enum": ["read", "skim", "skip"] },
+              "ranges": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["path", "start_line", "end_line"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "path": { "type": "string" },
+                    "start_line": { "type": "integer", "minimum": 1 },
+                    "end_line": { "type": "integer", "minimum": 1 }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "flow": {
+          "type": ["object", "null"],
+          "description": "One call sequence for one input, when the PR changes how calls pass between components; null otherwise.",
+          "required": ["title", "input", "calls"],
+          "additionalProperties": false,
+          "properties": {
+            "title": { "type": "string" },
+            "input": { "type": "string" },
+            "calls": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["from", "to", "label", "status", "old_label", "path", "line"],
+                "additionalProperties": false,
+                "properties": {
+                  "from": { "type": "string" },
+                  "to": { "type": "string" },
+                  "label": { "type": "string" },
+                  "status": { "enum": ["same", "added", "removed", "changed"] },
+                  "old_label": { "type": ["string", "null"], "description": "The label at the merge base, for a changed call." },
+                  "path": { "type": ["string", "null"] },
+                  "line": { "type": ["integer", "null"], "minimum": 1 }
+                }
+              }
+            }
+          }
+        },
+        "checked": { "type": "array", "items": { "type": "string" } },
+        "not_checked": { "type": "array", "items": { "type": "string" } }
+      }
     }
   }
 }

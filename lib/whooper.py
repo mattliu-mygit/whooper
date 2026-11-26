@@ -24,6 +24,8 @@ from the user's config file (config_path), never from this code. The bin/ script
   whooper.py conversation <conversation.graphql result> [<as-of time>]             -> a run's github.json
   whooper.py record <data dir> <work-item.json> running|failed                     -> writes the PR record
   whooper.py cause <run dir> <step> [<step's error output>]                         -> failure.json, the cause
+  whooper.py overview <run dir>                                                    -> drops an overview that fails
+                                                                                      check_overview from findings.json
   whooper.py retry <data dir> <run-id> <head now>                                  -> queues another review
   whooper.py wait <data dir> <work-item.json> <failure.json>                      -> a waiting run, the recheck list
   whooper.py skip <data dir> <run-id> [--undo]                                    -> marks the run skipped, or not
@@ -602,13 +604,100 @@ def rebuilt_diff(item):
     return git.stdout.decode(errors="replace") if git.returncode == 0 else None
 
 
+# A hunk header of a patch git diff wrote: the hunk's first line in the old file and how many lines it
+# spans there, then the same in the new file. A count git leaves out is 1.
+HUNK = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+# The first line of each file's part of such a patch, with the file's two paths, each quoted when git
+# quotes it, read as the page's diff reads it.
+DIFF_HEADER = re.compile(r'diff --git ("a/(?:[^"\\]|\\.)*"|a/.+?) ("b/(?:[^"\\]|\\.)*"|b/.+?)$')
+
+
+def diff_path(text, prefix=""):
+    """A path as a patch git diff wrote names it, without prefix, a/ or b/, and without the quotes and C
+    escapes git gives a path with unusual characters, as in "a/caf\\303\\251.md" for a/café.md; None
+    for /dev/null, the side an added or deleted file lacks."""
+    if text.startswith('"'):
+        text = text[1:-1].encode().decode("unicode_escape").encode("latin-1").decode(errors="replace")
+    return None if text == "/dev/null" else text.removeprefix(prefix)
+
+
+def diff_files(patch):
+    """The files a patch git diff wrote changes, such as a run's diff.patch, as Whooper's page reads
+    them: each as (path, old path, lines), where path is the file's path in the head, or for a deleted
+    file at the merge base, old path its path at the merge base, None for an added file, and lines the
+    first and last line of each hunk, counted in the head, or for a deleted file at the merge base. A
+    file whose diff shows no lines, such as a binary file, a pure rename, or a mode change, has none.
+    The ---, +++, rename, and copy lines name a file's paths; the first line names them only for a file
+    without those, since a path with a space and " b/" in it reads two ways there."""
+    files = []
+    for part in re.split(r"^(?=diff --git )", patch, flags=re.M)[1:]:
+        first, *lines = part.splitlines()
+        names = DIFF_HEADER.match(first)
+        old, new = (diff_path(names[1], "a/"), diff_path(names[2], "b/")) if names else (None, None)
+        added = deleted = False
+        hunks = []
+        # git ends the path on a --- or +++ line with a tab when the path has a space.
+        for line in lines:
+            if hunk := HUNK.match(line):
+                hunks.append([int(n) if n is not None else 1 for n in hunk.groups()])
+            elif hunks:
+                # A line of a hunk, which may itself start with --- or +++.
+                continue
+            elif line.startswith("--- "):
+                old = diff_path(line[4:].split("\t")[0], "a/")
+            elif line.startswith("+++ "):
+                new = diff_path(line[4:].split("\t")[0], "b/")
+            elif line.startswith(("rename from ", "copy from ")):
+                old = diff_path(line.split(" from ", 1)[1])
+            elif line.startswith(("rename to ", "copy to ")):
+                new = diff_path(line.split(" to ", 1)[1])
+            elif line.startswith("new file mode"):
+                added = True
+            elif line.startswith("deleted file mode"):
+                deleted = True
+        spans = []
+        for old_start, old_count, new_start, new_count in hunks:
+            # A deleted file's lines count at the merge base, every other file's in the head.
+            start, count = (old_start, old_count) if deleted else (new_start, new_count)
+            if count:
+                spans.append((start, start + count - 1))
+        files.append((old if deleted else new, None if added else old, spans))
+    return files
+
+
+def check_overview(overview, patch):
+    """Raises ValueError at the first rule of prompts/review.md's overview that the overview a review
+    run wrote breaks, checked against patch, the run's diff.patch: it fits FINDINGS_SCHEMA's overview,
+    which allows at most 5 places and one flow; each place's lines and each layer range lie inside one
+    hunk of a file the patch changes (diff_files); and each file the patch shows lines of is in exactly
+    one layer. A file whose diff shows no lines, such as a binary file, has no lines a range could name,
+    so it is in no layer."""
+    check_schema(overview, json.loads(FINDINGS_SCHEMA.read_text())["properties"]["overview"], "overview")
+    hunks = {path: spans for path, _, spans in diff_files(patch)}
+    ranges = [(f"overview.places[{i}]", place) for i, place in enumerate(overview["places"])]
+    ranges += [(f"overview.layers[{i}].ranges[{j}]", r) for i, layer in enumerate(overview["layers"])
+               for j, r in enumerate(layer["ranges"])]
+    for where, r in ranges:
+        if r["path"] not in hunks:
+            raise ValueError(f"{where} names {r['path']}, which the diff does not change")
+        if not any(first <= r["start_line"] <= r["end_line"] <= last for first, last in hunks[r["path"]]):
+            raise ValueError(f"{where}, lines {r['start_line']} to {r['end_line']} of {r['path']}, is not inside"
+                             " one hunk of the diff")
+    for path, spans in hunks.items():
+        layers = [f"overview.layers[{i}]" for i, layer in enumerate(overview["layers"])
+                  if any(r["path"] == path for r in layer["ranges"])]
+        if spans and len(layers) != 1:
+            raise ValueError(f"{path} is in {' and '.join(layers) or 'no layer'}")
+
+
 def show_review(data, run_id):
     """One review run for Prompting Time's review screen, as whooper-show --json prints it:
     run.json, the outcome, the findings, whether it is safe to approve, and the posted review as
     read_review reads them, the PR's title and author in github.json, the drafts whooper-draft prints,
     which only a review whose findings fit has, diff.patch, or for a run from before reviews kept it,
-    the diff rebuilt_diff rebuilds, failure.txt, and whooper-ask's answers. Refuses a run ID that
-    names no run directory."""
+    the diff rebuilt_diff rebuilds, failure.txt, and whooper-ask's answers. The overview the run wrote
+    in findings.json, which whooper-review checked (check_overview), comes on its own, not in the
+    findings. Refuses a run ID that names no run directory."""
     run = data / "runs" / run_id
     # A run ID names a directory right under runs, so a path such as ../x reads nothing outside it.
     if parse_run_id(run_id) is None or not run.is_dir():
@@ -632,7 +721,7 @@ def show_review(data, run_id):
         "title": title,
         "author": author,
         "outcome": outcome,
-        "findings": result,
+        "findings": {key: value for key, value in result.items() if key != "overview"} if result else None,
         "safe_to_approve": safe,
         "drafts": read_drafts(run) if result else None,
         "diff": diff if diff is not None else rebuilt_diff(item),
@@ -643,6 +732,7 @@ def show_review(data, run_id):
         "head_sha": item.get("head_sha") if item and isinstance(item.get("head_sha"), str) else None,
         "skipped_by_user": skipped,
         "removed_by_user": removed,
+        "overview": result.get("overview") if result else None,
     }
 
 
@@ -666,13 +756,16 @@ def fill(template, values):
 
 def check_schema(value, schema, where="the value"):
     """Raises ValueError at the first place value breaks schema. Covers the JSON Schema keywords
-    Whooper's schemas use: type, enum, minimum, pattern, properties, required, additionalProperties,
-    items, and minItems."""
-    kind = schema.get("type")
-    types = {"object": dict, "array": list, "string": str, "integer": int, "number": (int, float), "boolean": bool}
+    Whooper's schemas use: type, one or a list of them, enum, minimum, pattern, properties, required,
+    additionalProperties, items, minItems, and maxItems."""
+    kinds = schema.get("type", [])
+    kinds = [kinds] if isinstance(kinds, str) else kinds
+    types = {"object": dict, "array": list, "string": str, "integer": int, "number": (int, float), "boolean": bool,
+             "null": type(None)}
     # Python's True is also an int, but JSON's true is not a number.
-    if kind and (not isinstance(value, types[kind]) or (kind in ("integer", "number") and isinstance(value, bool))):
-        raise ValueError(f"{where} is not of type {kind}")
+    if kinds and (not any(isinstance(value, types[kind]) for kind in kinds)
+                  or isinstance(value, bool) and "boolean" not in kinds):
+        raise ValueError(f"{where} is not of type {' or '.join(kinds)}")
     if "enum" in schema and value not in schema["enum"]:
         raise ValueError(f"{where} is {value!r}, not one of {schema['enum']}")
     if "minimum" in schema and isinstance(value, (int, float)) and not isinstance(value, bool) and value < schema["minimum"]:
@@ -690,6 +783,8 @@ def check_schema(value, schema, where="the value"):
                 check_schema(value[key], sub, f"{where}.{key}")
     if isinstance(value, list) and len(value) < schema.get("minItems", 0):
         raise ValueError(f"{where} has fewer than {schema['minItems']} items")
+    if isinstance(value, list) and len(value) > schema.get("maxItems", len(value)):
+        raise ValueError(f"{where} has more than {schema['maxItems']} items")
     if isinstance(value, list) and "items" in schema:
         for i, item in enumerate(value):
             check_schema(item, schema["items"], f"{where}[{i}]")
@@ -1711,7 +1806,8 @@ def append_digest(data, run_dir, item, verdicts):
 ASK_RECORD = {
     "failure.txt": "the reason whooper-review gave for stopping the review before it finished",
     "log.md": "the review's log: what the change does, the evidence for each finding, and the candidates it dropped",
-    "findings.json": "the review's findings, each with its draft comment, and its approval verdict with the reason",
+    "findings.json": "the review's findings, each with its draft comment, its approval verdict with the reason, and"
+                     " its overview of the change, if it kept one",
     "diff.patch": "the pull request's change, git diff <merge base> HEAD",
     "github.json": "the PR's title, body, reviews, and comments, as the review read them",
     "transcript.jsonl": "the review's whole conversation, with every command it ran and that command's output",
@@ -1942,6 +2038,19 @@ def main(command, *args):
         except FileNotFoundError:
             text = ""
         write_file(Path(run) / "failure.json", json.dumps(failure_cause(step, text)))
+    elif command == "overview":
+        # A findings.json that holds no JSON object is left for whooper-review's schema check.
+        run = Path(args[0])
+        findings = read_object(run / "findings.json")
+        if findings is None or "overview" not in findings:
+            return
+        try:
+            check_overview(findings["overview"], (run / "diff.patch").read_text(errors="replace"))
+        except ValueError as e:
+            dropped = findings.pop("overview")
+            write_file(run / "findings.json", json.dumps(findings, indent=2))
+            write_file(run / "overview.invalid.json", json.dumps({"reason": str(e), "overview": dropped}, indent=2))
+            print(f"whooper-review: dropped the run's overview: {e}", file=sys.stderr)
     elif command == "retry":
         data, run_id, head_now = args
         print(retry(Path(data), run_id, head_now, datetime.now(timezone.utc)))

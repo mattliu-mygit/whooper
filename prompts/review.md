@@ -95,6 +95,41 @@ available in this run, so no verdict covers them.
 `reason`: one or two sentences for {{user_name}} on what the verdict rests on: what you ran, and
 what you could not check.
 
+## The overview
+
+Also return `overview`, which {{user_name}} reads before the diff to understand the PR and to know
+where to look. Write it after your probes, so it can cite them. Whooper checks it against the diff
+and drops an overview that breaks a rule here; the findings still count.
+
+- `summary`: two or three sentences on what the PR does, for someone who calls the changed code, and
+  why, from the PR's body or the ask.
+- `verdict_reason`: one sentence on why the verdict is what it is, such as the finding that needs
+  the author's answer, or why nothing does.
+- `before_after`: each change a caller can see, with `label` naming who sees it, and `before` and
+  `after` each giving one concrete example, such as "GET /v1/runs returns at most 100 runs". Empty
+  when callers see no change.
+- `places`: at most 5 places to read closely, most important first: findings that need the author,
+  then risks that are not findings, then callers outside the diff that the change affects. Each has
+  an `id`, a `title`, a `reason`, its lines, and `evidence`: `kind` is `ran` when a probe or test you
+  ran shows it, `read` when you read the code without running it, and `searched` when you searched
+  the repository, and `detail` says what you ran, read, or searched for.
+- `layers`: the change in reading order, foundations first. Each has an `id`, a `title`, its
+  `intent` in one line, a `read_hint` of `read`, `skim`, or `skip` (for generated, vendored, or lock
+  files), and `ranges`, the lines it covers. Each file the diff shows lines of is in exactly one
+  layer. A file whose diff shows no lines, such as a binary file, a pure rename, or a mode change, is
+  in none.
+- `flow`: when the PR changes how calls pass between components, one call sequence for one input: a
+  `title`, the `input`, and `calls` in order, each with `from` and `to`, the components, a `label`,
+  a `status` of `same`, `added`, `removed`, or `changed` against the merge base, `old_label`, the
+  label at the merge base of a changed call and null otherwise, and the call's `path` and `line`, or
+  null. null when the PR changes no such flow.
+- `checked`: what you ran or read, one line each. `not_checked`: what you could not check, and why.
+
+A place's lines and each layer range are `path`, `start_line`, and `end_line`: the file's path as the
+diff names it, without `a/` or `b/`, and lines inside one hunk of that file. Lines count in the head,
+as the hunk header's `+start,count` does, except in a deleted file, where they count at the merge
+base, as its `-start,count` does.
+
 ## The log
 
 Before you return, write `log.md` in the run directory. A later session must be able to explain

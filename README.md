@@ -134,7 +134,9 @@ bin/whooper-show <run-id> --json   # one review in full, for its review screen
 
 whooper-show prints the run's `run.json`, the PR's title and author, its outcome, `findings.json`,
 the drafts whooper-draft prints for it, `diff.patch`, `failure.txt`, each of whooper-ask's answers in
-number order, and the review whooper-submit posted. It reads files only, the run directory and the
+number order, and the review whooper-submit posted. The overview the run wrote in `findings.json`
+([How a review run works](#how-a-review-run-works)) comes as `overview` beside the findings rather
+than in them, and is null for a run without one. It reads files only, the run directory and the
 review locks, and refuses a run ID that names no run directory. Reviews kept no `diff.patch` before
 whooper-review saved one, and for such a run whooper-show has git rebuild the diff from the repo's
 clone in the cache: `git diff` between the merge base and the head `run.json` records, with the flags
@@ -437,7 +439,16 @@ setup script, if the config names one, which may add variables to the run's envi
 a paragraph for the prompt. Then the agent that `[jobs] review` names runs from the head worktree
 through its launcher, `agents/<agent>/review`. The run follows `prompts/review.md`, filled in from
 the config with that agent's tool names and saved as `prompt.md` in the run directory, and leaves
-`findings.json`, which must fit `schemas/findings.json`. A run that passes
+`findings.json`, which must fit `schemas/findings.json`. Its `overview` says what the PR does and
+where to look first, for the review screen: a summary, why the verdict, each change a caller sees
+before and after, at most 5 places to read closely with how the run knows, the change in reading
+order as layers, at most one flow of calls, and what the run checked and did not. As soon as the run
+ends, whooper-review checks the overview against `diff.patch`: it fits the schema, each place's lines
+and each layer range lie inside one hunk of a file the diff changes, counted in the head, or for a
+deleted file at the merge base, and each file the diff shows lines of is in exactly one layer; a
+file whose diff shows no lines, such as a binary file, is in none. An overview that breaks a rule is
+dropped from `findings.json`, with why on whooper-review's error output and in
+`overview.invalid.json`, and the review goes on without it. A run that passes
 `[review] timeout_minutes` is stopped, and when whooper-review exits it stops the run and every
 process the run started. When whooper-review stops a review for a reason it names, such as the time
 limit, a failed setup script, or findings that do not fit the schema, it saves that reason in the
@@ -579,7 +590,8 @@ the recheck list while the commands above write to it.
   `git diff <merge base> HEAD`, as a plain patch. `prompt.md` is the prompt the run got.
   The transcript (`transcript.jsonl` for Claude, the ATIF export `transcript.json` for Devin, with
   `devin-config.json` and `stdout.log`) and `stderr.log` are the run, `findings.json` its result
-  (`findings.invalid.json` when it did not fit the schema), `failure.txt` the reason whooper-review
+  (`findings.invalid.json` when it did not fit the schema, and `overview.invalid.json` the overview
+  whooper-review dropped from it, with why), `failure.txt` the reason whooper-review
   gave when it stopped the run and `failure.json` its cause, `log.md` its evidence for each finding
   and the candidates it dropped,
   `verdicts.json` whooper-classify's output, and `post.json` and `post-request.json` whooper-post's.

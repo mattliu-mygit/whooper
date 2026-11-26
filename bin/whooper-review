@@ -17,7 +17,10 @@
 # review. Then the repo's setup script, if the config names one, prepares anything else the run
 # needs, such as dependencies or databases (examples/setup.example.sh). The run itself has no
 # GitHub login, and its launcher denies the Slack writes, so it can post nothing. Its findings.json
-# must fit schemas/findings.json, and a run that passes [review] timeout_minutes is stopped.
+# must fit schemas/findings.json, and a run that passes [review] timeout_minutes is stopped. As soon as
+# the run ends, an overview in findings.json that breaks a rule of prompts/review.md's overview, such
+# as lines outside the diff's hunks, is dropped, with why on this script's error output and in
+# overview.invalid.json, and the review goes on without it (lib/whooper.py's check_overview).
 # bin/whooper-classify <run dir> then applies rule v1 to its findings.
 #
 # While it runs, this script holds the PR's lock, <state>/locks/<owner>-<repo>-<pr>/, with its
@@ -266,6 +269,10 @@ agent_exit=0
 wait "$agent_group" || agent_exit=$?
 kill "$watchdog_pid" 2>/dev/null || true
 watchdog_pid=""
+
+# The overview is checked as soon as the run ends, even one past its time limit, so findings.json
+# keeps no overview that breaks its rules, and a broken overview costs the review only the overview.
+"$root/lib/python" "$root/lib/whooper.py" overview "$run"
 
 # Each check names its own step, which failure.json names the cause by.
 step=time-limit
