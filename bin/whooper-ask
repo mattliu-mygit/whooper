@@ -7,8 +7,9 @@
 # The run's directory is <state>/runs/<run-id>/, where <state> is $XDG_STATE_HOME/whooper (default
 # ~/.local/state/whooper). A review that is still running gets no ask: while a live whooper-review
 # holds the PR's lock for the run, this refuses and says so. A review whooper-review stopped before
-# it wrote run.json, such as when the fetch failed, left failure.txt and recorded no agent, so the
-# agent the config's [jobs] review names answers about it. The new run loads the review's skills
+# it wrote run.json, such as when the fetch failed or the skills could not be hashed, left
+# failure.txt and recorded no agent, so the agent the config's [jobs] review names answers about it.
+# An empty or unreadable run.json counts as none. The new run loads the review's skills
 # ([review] skills) and may read the review's record there: first failure.txt, the reason
 # whooper-review gave when it stopped the review, then log.md, findings.json, diff.patch, the
 # transcript, github.json, and the other record files the run has, earlier asks included. Its prompt
@@ -57,7 +58,9 @@ while (($#)); do
 done
 [[ -n "$run_id" && -n "$question" ]] || die "$usage"
 run="$WHOOPER_STATE/runs/$run_id"
-if [[ -f "$run/run.json" ]]; then
+# whooper-review fills run.json with one jq, and the file stays empty when that jq fails, as when the
+# skills cannot be hashed, so a run.json jq cannot read counts as missing.
+if jq -e . "$run/run.json" > /dev/null 2>&1; then
   # A review that is still running has not written its whole record. Its whooper-review holds the
   # PR's lock, which names the run; by whooper-review's own rule, a lock whose process is gone is
   # stale. The run's tmp folder cannot tell, since a kill -9 of whooper-review leaves it behind.
@@ -69,10 +72,10 @@ if [[ -f "$run/run.json" ]]; then
   # A run from before run.json recorded its agent was a claude run, as whooper-classify assumes.
   agent="$(jq -r '.agent // "claude"' "$run/run.json")"
 elif [[ -f "$run/failure.txt" ]]; then
-  # whooper-review stopped this review before it wrote run.json, such as when the fetch failed, and
-  # no agent ran. whooper-review writes failure.txt as it stops, so nothing more comes into the
-  # record, and this need not check whether the review still runs. With no agent recorded, the
-  # agent the config's [jobs] review names answers.
+  # whooper-review stopped this review before it wrote run.json, such as when the fetch failed or
+  # the skills could not be hashed, and no agent ran. whooper-review writes failure.txt as it stops,
+  # so nothing more comes into the record, and this need not check whether the review still runs.
+  # With no agent recorded, the agent the config's [jobs] review names answers.
   agent="$WHOOPER_REVIEW_AGENT"
 else
   die "no run $run_id in $WHOOPER_STATE/runs"

@@ -885,6 +885,21 @@ def review_request(head_sha, event, body, comments):
     }
 
 
+def read_findings(run_dir):
+    """The findings.json of the review in run_dir, or None when the review left no findings.json
+    Whooper can read: one that holds a list of findings, each with an ID, an empty list included.
+    whooper-review leaves findings.json as the run wrote it when it stops the review before its schema
+    check, such as at the time limit or for an empty file, so only a file that reads as findings shows
+    that the review finished."""
+    try:
+        result = json.loads((run_dir / "findings.json").read_text())
+        # Every caller looks findings up by ID.
+        {f["id"] for f in result["findings"]}
+    except (FileNotFoundError, ValueError, KeyError, TypeError):
+        return None
+    return result
+
+
 def read_drafts(run_dir):
     """The user's choices for a review run, from <run dir>/drafts.json, which bin/whooper-draft
     writes: the review's event, APPROVE or COMMENT, and message, and per finding ID whether its
@@ -1062,17 +1077,8 @@ def ask_facts(run_dir, question, finding_id=None):
     for a review that did not finish, its agent's output and the findings that did not fit the schema
     too; the finding the question is about when finding_id names one; and the question. None of it
     goes through fill, so braces in the question stay as written."""
-    # whooper-review leaves findings.json as the run wrote it when it stops the review before its
-    # schema check, such as at the time limit or for an empty file, so the review finished only when
-    # the file holds findings Whooper can read, even an empty list of them. findings stays empty
-    # without the file, and is None for a file Whooper cannot read as findings.
-    findings, finished = {}, False
-    if (run_dir / "findings.json").exists():
-        try:
-            findings = {f["id"]: f for f in json.loads((run_dir / "findings.json").read_text())["findings"]}
-            finished = True
-        except (ValueError, KeyError, TypeError):
-            findings = None
+    result = read_findings(run_dir)
+    finished = result is not None
     record = ASK_RECORD if finished else {**ASK_RECORD, **ASK_FAILURE_RECORD}
     lines = ["", "", "## The review's record", "", f"The review's run directory is {run_dir}. You may read these files:", ""]
     lines += [f"- {run_dir / name}: {what}" for name, what in record.items() if (run_dir / name).exists()]
@@ -1081,9 +1087,10 @@ def ask_facts(run_dir, question, finding_id=None):
     asks = sorted((p for p in (run_dir / "asks").glob("*.json") if p.stem.isdigit()), key=lambda p: int(p.stem))
     lines += [f"- {p}: an earlier question about this review, with its answer" for p in asks]
     if finding_id is not None:
-        if findings is None:
+        if not finished and (run_dir / "findings.json").exists():
             raise SystemExit(f"whooper-ask: the run has no finding {finding_id}; its findings.json holds no"
                              " findings Whooper can read")
+        findings = {f["id"]: f for f in result["findings"]} if finished else {}
         if finding_id not in findings:
             raise SystemExit(f"whooper-ask: the run has no finding {finding_id}; its findings are"
                              f" {', '.join(findings) or 'none'}")
@@ -1241,8 +1248,10 @@ def main(command, *args):
         # Not resolve(): the run's commands name its directory as whooper-review printed it, and on
         # macOS a directory under $TMPDIR resolves to another path through /private.
         data, run = Path(args[0]), Path(os.path.abspath(args[1]))
-        if not (run / "findings.json").exists():
-            raise SystemExit(f"whooper-classify: {run} has no findings.json, so its review did not finish")
+        result = read_findings(run)
+        if result is None:
+            raise SystemExit(f"whooper-classify: {run} has no findings.json Whooper can read, so its review"
+                             " did not finish")
         # verdicts.json is written last, so a run that has it already added its findings to the digest.
         if (run / "verdicts.json").exists():
             raise SystemExit(f"whooper-classify: {run} is already classified")
@@ -1251,7 +1260,6 @@ def main(command, *args):
         agent = item.get("agent", "claude")
         if agent not in SHELL_CALLS:
             raise SystemExit(f"whooper-classify: {run} ran on {agent}, which has no transcript reader")
-        result = load(run / "findings.json")
         verdicts = classify(result, SHELL_CALLS[agent](run), (run / "github.json").exists(), run)
         append_digest(data, run, item, [v for v in verdicts if v["verdict"] != "auto_post"])
         write_record(data / "prs", item, "done", datetime.now(timezone.utc), result["approval"])
@@ -1300,8 +1308,9 @@ def main(command, *args):
         if not (run / "run.json").exists():
             raise SystemExit(f"whooper-draft: no run {args[1]} in {run.parent}")
         # Drafts start from the run's findings (read_drafts), which only a finished review has.
-        if not (run / "findings.json").exists():
-            raise SystemExit(f"whooper-draft: {run} has no findings.json, so its review did not finish")
+        if read_findings(run) is None:
+            raise SystemExit(f"whooper-draft: {run} has no findings.json Whooper can read, so its review"
+                             " did not finish")
         print(json.dumps(change_drafts(run, *change) if change else read_drafts(run), indent=2))
     elif command == "submit":
         data, run, head_now, flags = Path(args[0]), Path(args[1]).resolve(), args[2], args[3:]
@@ -1312,9 +1321,11 @@ def main(command, *args):
                 raise SystemExit(f"whooper-submit: another submit of {run} is posting or did not finish, so its review"
                                  " may be on GitHub; check the PR, then delete submit.json to submit again")
             raise SystemExit(f"whooper-submit: {run} was already submitted; see its submit.json")
-        if not (run / "findings.json").exists():
-            raise SystemExit(f"whooper-submit: {run} has no findings.json, so its review did not finish")
-        item, result = load(run / "run.json"), load(run / "findings.json")
+        result = read_findings(run)
+        if result is None:
+            raise SystemExit(f"whooper-submit: {run} has no findings.json Whooper can read, so its review"
+                             " did not finish")
+        item = load(run / "run.json")
         if head_now != item["head_sha"]:
             mark_new_commits(data, item, head_now, datetime.now(timezone.utc))
             refuse(NEW_COMMITS_EXIT, f"whooper-submit: nothing posted: the PR has new commits since the review (head"

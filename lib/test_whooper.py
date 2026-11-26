@@ -973,6 +973,32 @@ class ClassifyTest(unittest.TestCase):
             with self.subTest(agent):
                 self.assertEqual(classify(result, calls, True, RUN), [])
 
+    def test_a_review_that_did_not_finish_is_not_classified(self):
+        # whooper-review leaves findings.json as the run wrote it when it stops the review before its
+        # schema check, such as at the time limit or for an empty file.
+        with tempfile.TemporaryDirectory() as data:
+            run = Path(data) / "runs" / "20310727T010246Z-12"
+            run.mkdir(parents=True)
+            (run / "run.json").write_text(json.dumps({
+                "kind": "first_review", "repo": "example-org/example-repo", "pr": 12, "head_sha": "h1",
+                "base_ref": "master", "source": "github_request", "slack": None, "reason": "r",
+                "run_id": run.name, "dry_run": True, "as_of": None, "agent": "claude"}))
+            (run / "transcript.jsonl").write_text("")
+            for name, content in [("no findings.json", None), ("empty", ""), ("not JSON", '{"status": "revi'),
+                                  ("no list of findings", "{}")]:
+                with self.subTest(name):
+                    if content is None:
+                        (run / "findings.json").unlink(missing_ok=True)
+                    else:
+                        (run / "findings.json").write_text(content)
+                    with self.assertRaises(SystemExit) as caught:
+                        main("classify", data, str(run))
+                    self.assertEqual(str(caught.exception), f"whooper-classify: {run} has no findings.json Whooper"
+                                                            " can read, so its review did not finish")
+            # Nothing went to the digest or the PR's record.
+            self.assertEqual(sorted(p.name for p in Path(data).iterdir()), ["runs"])
+            self.assertFalse((run / "verdicts.json").exists())
+
 
 class CheckSchemaTest(unittest.TestCase):
     SCHEMA = json.loads((ROOT / "schemas" / "findings.json").read_text())
@@ -1595,11 +1621,27 @@ class SubmitTest(unittest.TestCase):
                                  capture_output=True, text=True, timeout=60)
         self.assertEqual(missing.returncode, 1)
         self.assertIn("no run 20310101T000000Z-1", missing.stderr)
-        # A review that did not finish has no drafts to print.
-        (self.run / "findings.json").unlink()
-        with self.assertRaises(SystemExit) as caught:
-            self.draft()
-        self.assertIn("did not finish", str(caught.exception))
+
+    def test_a_review_that_did_not_finish_has_no_drafts_and_cannot_be_submitted(self):
+        # whooper-review leaves findings.json as the run wrote it when it stops the review before its
+        # schema check, such as at the time limit or for an empty file.
+        for name, content in [("no findings.json", None), ("empty", ""), ("not JSON", '{"status": "revi'),
+                              ("no list of findings", "{}")]:
+            if content is None:
+                (self.run / "findings.json").unlink(missing_ok=True)
+            else:
+                (self.run / "findings.json").write_text(content)
+            # whooper-submit names the run directory resolved, and on macOS a folder under $TMPDIR
+            # resolves through /private.
+            for command, args, run in [("draft", [self.run.name], self.run),
+                                       ("draft", [self.run.name, "approve"], self.run),
+                                       ("submit", [str(self.run), "h1"], self.run.resolve())]:
+                with self.subTest(name, command=command, args=args[1:]):
+                    with self.assertRaises(SystemExit) as caught:
+                        main(command, str(self.state), *args)
+                    self.assertEqual(str(caught.exception), f"whooper-{command}: {run} has no findings.json Whooper"
+                                                            " can read, so its review did not finish")
+        self.assertEqual(sorted(p.name for p in self.run.iterdir()), ["findings.json", "run.json"])
 
 
 class SlackGuardTest(unittest.TestCase):
@@ -2443,14 +2485,24 @@ class AskTest(unittest.TestCase):
         fake(self.fakes / "devin", 'cp "${0%/*}/answer" answer.md')
         (self.fakes / "answer").write_text("The fetch failed before the review started.\n")
         # A home of its own keeps the user's Devin config out of the run.
-        result = self.ask(stopped.name, "Why did this review fail?",
-                          env={"WHOOPER_CONFIG": str(config), "HOME": str(Path(self.tmp.name) / "home")})
+        env = {"WHOOPER_CONFIG": str(config), "HOME": str(Path(self.tmp.name) / "home")}
+        result = self.ask(stopped.name, "Why did this review fail?", env=env)
         self.assertEqual((result.returncode, result.stdout), (0, "The fetch failed before the review started.\n"),
                          result.stderr)
         self.assertEqual(json.loads((stopped / "asks" / "1.json").read_text())["agent"], "devin")
         prompt = (stopped / "asks" / "1.prompt.md").read_text()
         listed = [line for line in prompt.splitlines() if line.startswith(f"- {stopped}/")]
         self.assertTrue(listed[0].startswith(f"- {stopped / 'failure.txt'}: "), listed)
+        # whooper-review writes run.json with one jq, which leaves the file empty when it fails, as when
+        # the skills cannot be hashed. Such a run.json, like one cut short, records no agent either.
+        (self.fakes / "answer").write_text("The skills could not be hashed.\n")
+        for n, (name, run_json) in enumerate([("empty", ""), ("cut short", '{"repo": "example-org/exa')], start=2):
+            with self.subTest(run_json=name):
+                (stopped / "run.json").write_text(run_json)
+                result = self.ask(stopped.name, "Why did this review fail?", env=env)
+                self.assertEqual((result.returncode, result.stdout), (0, "The skills could not be hashed.\n"),
+                                 result.stderr)
+                self.assertEqual(json.loads((stopped / "asks" / f"{n}.json").read_text())["agent"], "devin")
 
     def test_a_findings_json_without_findings_whooper_can_read_counts_as_a_review_that_did_not_finish(self):
         # whooper-review leaves findings.json as the run wrote it when it stops the review before its
@@ -2496,33 +2548,28 @@ class AskTest(unittest.TestCase):
         self.assertIn(f"{asks / '1.json'}: ", prompt)
 
     def test_a_run_past_its_time_limit_is_stopped_and_saves_nothing(self):
-        # A limit of 3 seconds, and a run that would take 30.
+        # A limit of 3 seconds, and a run that would take 30. The fake runs sleep rather than exec it,
+        # so a process whose command line names the fake lasts the whole run.
         config = Path(self.tmp.name) / "config.toml"
         config.write_text(CONFIG + "\n[ask]\ntimeout_minutes = 0.05\n")
-        fake(self.fakes / "claude", 'echo $$ > "${0%/*}/pid"\nexec sleep 30')
+        fake(self.fakes / "claude", "sleep 30")
+        self.addCleanup(subprocess.run, ["pkill", "-KILL", "-f", self.tmp.name])
         started = monotonic()
         result = self.ask(self.run.name, self.QUESTION, env={"WHOOPER_CONFIG": str(config)})
         took = monotonic() - started
-        pid = int((self.fakes / "pid").read_text())
-
-        def kill():
-            with suppress(ProcessLookupError):
-                os.kill(pid, signal.SIGKILL)
-
-        self.addCleanup(kill)
         self.assertEqual((result.returncode, result.stdout), (1, ""))
         self.assertIn("passed its 0.05-minute limit", result.stderr)
         self.assertFalse((self.run / "asks" / "1.json").exists())
         # Stopped at the limit, not when the run would have ended.
         self.assertLess(took, 20)
+        # The limit counts from when whooper-ask starts the launcher, so on a busy machine it can pass
+        # before the launcher has started claude, and claude never runs. Either way nothing of the run
+        # is left: the launcher's command line names the ask's files in this test's folder, and the
+        # fake's names the fake.
         deadline = monotonic() + 10
-        while True:
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                break
+        while subprocess.run(["pgrep", "-f", self.tmp.name], capture_output=True).returncode == 0:
             if monotonic() > deadline:
-                self.fail(f"the run's process {pid} is still running")
+                self.fail("a process of the run is still running")
             sleep(0.1)
 
 

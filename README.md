@@ -131,7 +131,9 @@ A run is safe to approve when it reviewed the PR, its verdict is `approve_once_c
 every finding it has is a nit. A run that skipped the PR, as the review of a large PR from an
 untagged ask does, read too little to vouch for it, so it is not safe whatever its verdict says.
 Until the user changes anything, a safe run starts as an approval with every nit included, and any
-other run as a comment with nothing included, so the user decides.
+other run as a comment with nothing included, so the user decides. A review that did not finish,
+whose `findings.json` is missing or holds no findings Whooper can read, such as an empty file, has
+no drafts.
 
 `bin/whooper-submit <run-id>` posts the review with the user's own gh login, as one GitHub review
 at the head the run reviewed. Each comment is `AI comment (vetted)`, a blank line, and the text,
@@ -158,8 +160,8 @@ code, so Prompting Time can tell them apart:
 
 Any other failure exits 1, or with gh's or jq's own code, none of which is 10 to 13. A comment
 someone wrote on the same line since the review, and a link outside the configured orgs, do not
-stop it. It refuses a review that includes no comment and does not approve, and a run it already
-submitted, so a review never posts twice.
+stop it. It refuses a review that did not finish, a review that includes no comment and does not
+approve, and a run it already submitted, so a review never posts twice.
 
 ## Ask about a review
 
@@ -168,7 +170,8 @@ run, such as "Why is it bad to have invisible characters?", or "Why did this rev
 that did not finish, and prints the answer. Prompting Time's "Ask about this" runs it with the
 finding. A new run of the agent that did the review answers, with the review's skills, since Whooper
 ends each review's session. A review whooper-review stopped before it wrote `run.json`, such as
-when the fetch failed, recorded no agent, so the agent `[jobs] review` names answers about it. Its
+when the fetch failed or the skills could not be hashed, recorded no agent, so the agent
+`[jobs] review` names answers about it; an empty or unreadable `run.json` counts as none. Its
 prompt, `prompts/ask.md` filled in, names the question, the finding, and the path of each file of
 the review's record the run directory has: first `failure.txt`, the reason whooper-review gave when
 it stopped the review, then `log.md`, `findings.json`, `diff.patch`, the transcript, `github.json`,

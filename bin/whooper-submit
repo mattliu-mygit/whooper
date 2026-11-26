@@ -34,7 +34,8 @@
 #
 # Any other failure exits 1, or with gh's or jq's own code, none of which is 10 to 13. A comment
 # someone wrote on the same line since the review, and a link outside the configured orgs, do not
-# stop it. It refuses a review that includes no comment and does not approve.
+# stop it. It refuses a review that did not finish, which left no findings.json Whooper can read,
+# and a review that includes no comment and does not approve.
 #
 # Before it posts, it writes <run dir>/submit.json saying posting, and after, GitHub's response,
 # so the file records the request and the response, and a second call refuses: a review never posts
