@@ -83,8 +83,11 @@ run="$data/runs/$run_id"
 # script under set -e without saying why.
 read -r repo pr < <(jq -r '[.repo, .pr] | @tsv' "$run/run.json" 2>/dev/null) || die "cannot read $run/run.json"
 
-work="$(mktemp -d)"
+# As in whooper-summary, the traps come before the work folder, so no signal leaves it behind.
+work=""
 trap 'rm -rf "$work"' EXIT
+trap 'exit 130' INT TERM HUP
+work="$(trap '' INT TERM HUP; mktemp -d)"
 head_now="$(gh api "repos/$repo/pulls/$pr" --jq .head.sha)"
 # lib/whooper.py runs the checks and writes the request to submit-request.json. Without --print it
 # then writes submit.json saying posting, which only one whooper-submit can create.

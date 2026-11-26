@@ -34,8 +34,13 @@ done
 run="$data/runs/$run_id"
 [[ -f "$run/post.json" ]] || die "$run has not been through bin/whooper-post"
 
-work="$(mktemp -d)"
+# As in whooper-review, the work folder comes after the traps, from a mktemp that ignores INT, TERM,
+# and HUP, so no signal leaves it behind. The INT, TERM, and HUP trap is what makes bash set work
+# first: with only the EXIT trap, bash would run it on such a signal before work named the folder.
+work=""
 trap 'rm -rf "$work"' EXIT
+trap 'exit 130' INT TERM HUP
+work="$(trap '' INT TERM HUP; mktemp -d)"
 "$root/lib/python" "$root/lib/whooper.py" summary "$run" > "$work/summary.txt"
 if [[ "$print" == true ]]; then
   cat "$work/summary.txt"

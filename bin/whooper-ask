@@ -82,7 +82,7 @@ else
 fi
 [[ -x "$root/agents/$agent/ask" ]] || die "$run ran on $agent, which has no agents/$agent/ask"
 
-work="$(mktemp -d)"
+work=""
 agent_group="" watchdog_pid=""
 cleanup() {
   local status=$?
@@ -99,6 +99,9 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM HUP
+# As in whooper-review, the work folder comes after the traps, from a mktemp that ignores INT, TERM,
+# and HUP, so no signal leaves it behind.
+work="$(trap '' INT TERM HUP; mktemp -d)"
 
 # lib/whooper.py refuses a finding the run lacks before this ask takes a number.
 "$root/lib/python" "$root/lib/whooper.py" prompt ask "$agent" "$run" "$question" ${finding:+"$finding"} \

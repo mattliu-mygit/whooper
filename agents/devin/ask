@@ -20,8 +20,11 @@ jq -n --slurpfile user "$user_config" '
   ($user[0] // {})
   | .permissions.allow = []
   | .permissions.deny += ["exec", "mcp__slack-remote__*", "mcp__slack__*"]' > "$3.devin-config.json"
-work="$(mktemp -d)"
+# As in bin/whooper-summary, the traps come before the work folder, so no signal leaves it behind.
+work=""
 trap 'rm -rf "$work"' EXIT
+trap 'exit 130' INT TERM HUP
+work="$(trap '' INT TERM HUP; mktemp -d)"
 {
   cat "$1"
   printf '\nThis run rejects shell commands: read files with your file-reading and search tools, and write your answer to answer.md in the working directory with your file-writing tool. Write no other file.\n'

@@ -27,8 +27,11 @@ fi
 [[ -f "$entry" ]] || { echo "build-release: the build left no $entry, the page prompting-time-plugin.json names" >&2; exit 1; }
 
 name="whooper-$version"
-stage="$(mktemp -d)"
+# As in bin/whooper-summary, the traps come before the stage folder, so no signal leaves it behind.
+stage=""
 trap 'rm -rf "$stage"' EXIT
+trap 'exit 130' INT TERM HUP
+stage="$(trap '' INT TERM HUP; mktemp -d)"
 git archive --format=tar --prefix="$name/" HEAD | tar -x -C "$stage"
 cp -R page/dist "$stage/$name/page/dist"
 mkdir -p release

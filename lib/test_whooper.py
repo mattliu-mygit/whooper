@@ -2279,7 +2279,11 @@ class RunTest(unittest.TestCase):
 
     def command(self, name, *args, env=None):
         """Runs bin/<name> with args to its end."""
-        process = subprocess.Popen([str(ROOT / "bin" / name), *args], env={**self.env, **(env or {})},
+        return self.run_script(ROOT / "bin" / name, *args, env=env)
+
+    def run_script(self, path, *args, env=None):
+        """Runs the script at path with args to its end."""
+        process = subprocess.Popen([str(path), *args], env={**self.env, **(env or {})},
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
         self.addCleanup(self.stop, process)
         out, err = process.communicate(timeout=60)
@@ -2527,6 +2531,35 @@ class RunTest(unittest.TestCase):
                 # The first copy refused, and the lock still names the second.
                 self.assertEqual((first.returncode, first.communicate()[1], holder),
                                  (1, f"{refusal}\n", f"{second.pid}\n"))
+
+    def test_a_signal_the_moment_a_command_makes_its_temporary_folder_leaves_no_folder_behind(self):
+        # mktemp makes the folder, inside the test's folder rather than the user's temporary folder, then
+        # sends TERM to the command's whole process group, as Ctrl-C or kill -- -<pid> does, before it
+        # prints the folder's name. Each command stops there, so the setup is only what each needs to
+        # reach its mktemp.
+        mktemp = shutil.which("mktemp")
+        run = self.state / "runs" / "20310727T010246Z-12"
+        run.mkdir(parents=True)
+        (run / "run.json").write_text(json.dumps({"repo": "sample-org/plain-repo", "pr": 12, "agent": "claude"}))
+        (run / "post.json").write_text("{}")
+        item, prompt = Path(self.tmp.name) / "item.json", Path(self.tmp.name) / "prompt.md"
+        item.write_text(json.dumps({"kind": "first_review", "repo": "sample-org/plain-repo", "pr": 12,
+                                    "head_sha": "1" * 40, "base_ref": "main", "source": "github_request",
+                                    "slack": None, "reason": "r"}))
+        prompt.write_text("Why?\n")
+        launcher = [str(prompt), str(Path(self.tmp.name) / "answer"), str(run / "record")]
+        for path, args in [("bin/whooper-review", [str(item), "--dry-run"]), ("bin/whooper-poll", []),
+                           ("bin/whooper-ask", [run.name, "Why?"]), ("bin/whooper-summary", [run.name]),
+                           ("bin/whooper-post", [run.name, "--print"]), ("bin/whooper-submit", [run.name]),
+                           ("agents/claude/ask", launcher), ("agents/devin/ask", launcher),
+                           ("agents/devin/poll", launcher)]:
+            with self.subTest(path):
+                temporary = Path(self.tmp.name) / "temporary" / path.replace("/", "-")
+                temporary.mkdir(parents=True)
+                self.script(self.fakes / "mktemp", "\n".join([
+                    f'folder="$({mktemp} -d "{temporary}/folder.XXXXXX")" || exit', "kill -TERM 0", 'echo "$folder"']))
+                result = self.run_script(ROOT / path, *args, env=self.git_env())
+                self.assertEqual((result.returncode, list(temporary.iterdir())), (130, []), result.stderr)
 
     def test_a_round_refuses_to_start_while_another_round_runs(self):
         holder = self.holder("whooper-round")

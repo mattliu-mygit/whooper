@@ -23,7 +23,7 @@ if [[ -f "$poll/cursor" ]]; then
 else
   oldest="$((started - 86400))"
 fi
-work="$(mktemp -d)"
+work=""
 agent_group=""
 watchdog_pid=""
 cleanup() {
@@ -40,6 +40,9 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM HUP
+# As in whooper-review, the work folder comes after the traps, from a mktemp that ignores INT, TERM,
+# and HUP, so no signal leaves it behind.
+work="$(trap '' INT TERM HUP; mktemp -d)"
 
 die() {
   echo "whooper-poll: $*" >&2

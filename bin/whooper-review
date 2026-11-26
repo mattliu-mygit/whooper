@@ -101,13 +101,11 @@ run_id="$(date -u +%Y%m%dT%H%M%SZ)-$pr"
 run="$data/runs/$run_id"
 lock="$data/locks/${repo/\//-}-$pr"
 
-# The unfiltered GitHub data stays here, outside the run directory the model reads.
-work="$(mktemp -d)"
 finished=false
 # What failure.txt says when the review stops without die's reason: a command failed under set -e,
 # unless the trap below records that a signal stopped the review.
 stop_reason="the review stopped at an unexpected error; see whooper-review's error output"
-agent_group="" watchdog_pid=""
+work="" agent_group="" watchdog_pid=""
 cleanup() {
   local status=$?
   # Only the review whose process ID the lock holds has a run to clean up and a lock to remove. One
@@ -150,6 +148,12 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'stop_reason="the review was interrupted" step=interrupted step_log=""; exit 130' INT TERM HUP
+
+# The unfiltered GitHub data stays in work, outside the run directory the model reads. The traps come
+# before the folder, so no signal leaves it behind: bash runs the INT, TERM, and HUP trap only once
+# the command it is on ends, here once work names the folder, and mktemp, which makes the folder
+# before it prints its name, runs in a subshell that ignores those signals, so it always prints it.
+work="$(trap '' INT TERM HUP; mktemp -d)"
 
 # A lock whose process is gone is stale, and this review takes it over. As in whooper-run, the traps
 # come before the lock, take makes the lock and writes its pid in a subshell that ignores INT, TERM,
