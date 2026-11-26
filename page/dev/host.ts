@@ -1,8 +1,10 @@
 import { createFakeHost } from "../src/fakeHost";
+import { reviewRecords } from "../src/fixtures";
 
 // Shows the page as Prompting Time will: in an iframe sandboxed to scripts only, so the page has an
-// opaque origin and talks to this window through postMessage alone, here with the fake host.
-// ?review=<run id> opens that review at once, as when the user picks it in Prompting Time.
+// opaque origin and talks to this window through postMessage alone, here with the fake host. As in
+// Prompting Time, a review opens at once: ?review=<run id> names it, and without it the first of the
+// fake host's reviews opens.
 const frame = document.createElement("iframe");
 frame.title = "Whooper";
 frame.sandbox.add("allow-scripts");
@@ -11,7 +13,7 @@ document.body.append(frame);
 
 const host = createFakeHost((message) => frame.contentWindow?.postMessage(message, "*"), {
   confirmSubmit: (text) => window.confirm(text),
-  openOnReady: new URLSearchParams(location.search).get("review") ?? undefined,
+  openOnReady: new URLSearchParams(location.search).get("review") ?? reviewRecords()[0].run_id,
 });
 window.addEventListener("message", (event) => {
   if (event.source === frame.contentWindow) host.receive(event.data);

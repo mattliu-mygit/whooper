@@ -29,8 +29,20 @@
 //   answer {run_id, finding, question, answer}
 //   error {message}                     The request failed, with Whooper's message, such as
 //                                       whooper-draft's or whooper-submit's refusal.
+//
+// Whooper's page shows only the review Prompting Time opens, since Prompting Time's sidebar lists the
+// reviews and shows Whooper's status: it sends no open-review and shows neither part of status. Both
+// stay in protocol 1.
 
 export const PROTOCOL_VERSION = 1;
+
+/** What stopped a review: scope all for a cause that stops every review, such as Docker not running,
+ * and pr for one that stops only its PR's. */
+export interface Cause {
+  id: string;
+  summary: string;
+  scope: "all" | "pr";
+}
 
 /** `bin/whooper-status --json`, format version 1; its header describes each field. */
 export interface WhooperStatus {
@@ -44,8 +56,10 @@ export interface WhooperStatus {
     ended_at: string;
     result: "done" | "poll_failed" | "interrupted";
     selected: number | null;
-    reviews: { pr: string; outcome: "reviewed" | "failed" | "interrupted" }[];
+    reviews: { pr: string; outcome: "reviewed" | "failed" | "interrupted" | "waiting" }[];
   } | null;
+  /** What stops every review now, or null. */
+  blocked: (Cause & { scope: "all"; since: string; waiting: number }) | null;
   /** The review runs that started in the last 30 days, newest first. */
   reviews: {
     run_id: string;
@@ -53,15 +67,29 @@ export interface WhooperStatus {
     repo: string | null;
     pr: number;
     title: string | null;
+    author: string | null;
     url: string | null;
     started_at: string;
     ended_at: string | null;
-    outcome: "running" | "reviewed" | "failed";
+    outcome: "running" | "waiting" | "reviewed" | "failed";
     verdict: Verdict | null;
     skipped: boolean;
     findings: number;
     submitted: { event: "APPROVE" | "COMMENT"; at: string } | null;
     needs_you: boolean;
+    cause: Cause | null;
+    head_sha: string | null;
+    pr_head_sha: string | null;
+    skipped_by_user: boolean;
+    removed_by_user: boolean;
+  }[];
+  /** The last 50 rounds, newest first. */
+  rounds: {
+    started_at: string;
+    ended_at: string | null;
+    result: "done" | "poll_failed" | "interrupted" | "skipped";
+    selected: number;
+    reason: string | null;
   }[];
 }
 

@@ -1,7 +1,7 @@
 {
   "name": "whooper-page",
   "private": true,
-  "description": "Whooper's page in Prompting Time: the review queue and each review's diff with Whooper's draft comments.",
+  "description": "Whooper's page in Prompting Time: the review Prompting Time opens, its diff with Whooper's draft comments.",
   "type": "module",
   "scripts": {
     "dev": "vite",

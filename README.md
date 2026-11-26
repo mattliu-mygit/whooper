@@ -335,14 +335,15 @@ checkout.
 
 ### Whooper's page
 
-`page/` is the page Prompting Time shows for Whooper: the queue of reviews and each review's diff
-with Whooper's findings as draft comments under their lines, Include in review, Edit, Ask about
-this, Discard, and one bar that submits the review. It is a Solid 2.0 app built on Prompting Time's
-shared UI library, `@prompting-time/ui`. Prompting Time shows it in an iframe sandboxed to scripts
-only, so the page reaches nothing but its host: it sends Prompting Time the messages in
+`page/` is the page Prompting Time shows for one of Whooper's reviews: the review's diff with
+Whooper's findings as draft comments under their lines, Include in review, Edit, Ask about this,
+Discard, and one bar that submits the review. It is a Solid 2.0 app built on Prompting Time's shared
+UI library, `@prompting-time/ui`. Prompting Time shows it in an iframe sandboxed to scripts only, so
+the page reaches nothing but its host: it sends Prompting Time the messages in
 `page/src/protocol.ts`, which also says which Whooper command each one runs, and Prompting Time
-confirms a submit before `whooper-submit` posts. Prompting Time builds the queue from the reviews
-whooper-status lists, and whooper-show prints the review a screen opens
+confirms a submit before `whooper-submit` posts. The page shows the review Prompting Time opens as
+soon as it arrives, and nothing before: Prompting Time's sidebar lists the reviews whooper-status
+lists, so the page has no list of its own, and whooper-show prints the review the page shows
 ([See reviews](#see-reviews)).
 
 The page needs Node 22.12 or later. In `page/`:
@@ -355,7 +356,8 @@ npm run build   # page/dist, which the repo does not track
 ```
 
 The fake host answers from invented reviews in `page/src/fixtures.ts` the way Whooper's commands
-would, and reaches no Whooper, GitHub, or model; `/dev/?review=<run id>` opens one of its reviews.
+would, and reaches no Whooper, GitHub, or model; `/dev/` opens the first of its reviews, and
+`/dev/?review=<run id>` another.
 Until `@prompting-time/ui`'s first npm release, the page installs it from a Prompting Time checkout
 beside this one, `../../repos/prompting-time-actions/packages/ui` from `page/`, which `npm ci`
 copies in; it then switches to a pinned npm version. The checkout must be on branch `solid-actions`,

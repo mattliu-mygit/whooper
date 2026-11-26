@@ -5,9 +5,7 @@ import {
   type DraftChange,
   type HostMessage,
   type PageRequest,
-  type QueueItem,
   type Review,
-  type WhooperStatus,
 } from "./protocol";
 
 /** How the page reaches its host: in Prompting Time, the parent window; in tests, the fake host. */
@@ -33,9 +31,7 @@ export function parentLink(): HostLink {
 }
 
 export interface PageState {
-  status: WhooperStatus | null;
-  queue: QueueItem[];
-  /** The review on screen, or null for the queue. */
+  /** The review Prompting Time opened, or null until it sends one. */
   review: Review | null;
   /** This session's answers to Ask about this, by finding ID; "" holds questions about the whole review. */
   answers: Record<string, { question: string; answer: string }[]>;
@@ -54,8 +50,6 @@ export type PageStore = ReturnType<typeof createPageStore>;
  */
 export function createPageStore(link: HostLink) {
   const [state, setState] = createStore<PageState>({
-    status: null,
-    queue: [],
     review: null,
     answers: {},
     discarded: {},
@@ -66,11 +60,8 @@ export function createPageStore(link: HostLink) {
 
   function apply(message: HostMessage) {
     switch (message.type) {
+      // Prompting Time shows Whooper's status and lists its reviews itself, so the page keeps neither.
       case "status":
-        setState((s) => {
-          s.status = message.status;
-          s.queue = message.queue;
-        });
         break;
       case "review":
         setState((s) => {
@@ -131,7 +122,6 @@ export function createPageStore(link: HostLink) {
   return {
     state,
     ready: () => request({ type: "ready" }),
-    openReview: (run_id: string) => request({ type: "open-review", run_id }),
     changeDraft: (change: DraftChange) => request({ type: "change-draft", run_id: runId(), change }),
     submit: () => request({ type: "submit", run_id: runId() }),
     ask: (question: string, finding: string | null) => request({ type: "ask", run_id: runId(), question, finding }),
@@ -145,10 +135,6 @@ export function createPageStore(link: HostLink) {
     unfold: (finding: string) =>
       setState((s) => {
         s.discarded[finding] = false;
-      }),
-    showQueue: () =>
-      setState((s) => {
-        s.review = null;
       }),
     dispose: stop,
   };

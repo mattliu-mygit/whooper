@@ -19,18 +19,28 @@ const changes = (host: ReturnType<typeof renderWithFakeHost>) =>
   host.received.filter((m) => m.type === "change-draft").map((m) => (m.type === "change-draft" ? m.change : null));
 
 describe("Whooper's page with the fake host", () => {
-  it("lists the queue and opens a review that waits for the user", async () => {
-    const host = renderWithFakeHost();
-    const needsYou = await screen.findByRole("region", { name: "Needs you" });
-    fireEvent.click(within(needsYou).getByRole("button", { name: /separate the cache configuration/ }));
+  it("shows the review Prompting Time opened, with no queue of its own", async () => {
+    const host = renderWithFakeHost({ openOnReady: RUN });
     expect(await screen.findByRole("heading", { name: "refactor(cache): separate the cache configuration" })).toBeInTheDocument();
-    expect(host.received.map((m) => m.type)).toEqual(["ready", "open-review"]);
+    // Prompting Time's sidebar lists the reviews, so the page asks for no other review and has no way to one.
+    expect(host.received.map((m) => m.type)).toEqual(["ready"]);
+    expect(screen.queryByRole("button", { name: "Back to the queue" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Needs you" })).not.toBeInTheDocument();
     // The first file with a finding shows, with each finding under its line.
     expect(await thread("config_test.go:18")).toBeInTheDocument();
     expect(await thread("config_test.go:43")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Back to the queue" }));
-    expect(await screen.findByRole("region", { name: "Needs you" })).toBeInTheDocument();
   }, 30_000);
+
+  it("shows no queue before Prompting Time sends a review", async () => {
+    const host = renderWithFakeHost();
+    await waitFor(() => expect(host.received.map((m) => m.type)).toEqual(["ready"]));
+    // By the next task the host's answer, Whooper's status and the queue protocol 1 carries, is in.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    flush();
+    expect(screen.queryByRole("main", { name: "Whooper's reviews" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Needs you" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
 
   it("changes drafts only through the host and shows the drafts it answers with", async () => {
     const host = renderWithFakeHost({ openOnReady: RUN });

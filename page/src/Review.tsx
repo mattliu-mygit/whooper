@@ -1,7 +1,6 @@
 import { createMemo, createSignal, For, Show, untrack } from "solid-js";
-import { Button, Diff, IconButton, type DiffLineAnnotation } from "@prompting-time/ui";
+import { Button, Diff, type DiffLineAnnotation } from "@prompting-time/ui";
 import { DraftThread } from "./DraftThread";
-import { ArrowLeftIcon } from "./icons";
 import { readPatch, showsLine, type PatchFile } from "./patch";
 import type { Finding, Review } from "./protocol";
 import type { PageStore } from "./store";
@@ -34,9 +33,6 @@ export function ReviewScreen(props: { store: PageStore }) {
   return (
     <div class="w-review">
       <header class="w-header">
-        <IconButton label="Back to the queue" onClick={() => store.showQueue()}>
-          <ArrowLeftIcon />
-        </IconButton>
         <div class="w-title">
           <h1>{review().title ?? `${review().repo}#${review().pr}`}</h1>
           <p class="w-meta">

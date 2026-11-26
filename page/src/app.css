@@ -28,38 +28,6 @@ ul {
   font-size: var(--s-size-sm);
 }
 
-/* Queue */
-.w-queue {
-  display: grid;
-  align-content: start;
-  gap: var(--s-space-16);
-  max-inline-size: var(--s-content-max-narrow);
-  margin: 0 auto;
-  padding: var(--s-space-16);
-}
-
-.w-queue-header h1 {
-  font-size: var(--s-size-lg);
-  font-weight: var(--s-weight-medium);
-}
-
-.w-loop {
-  display: flex;
-  align-items: center;
-  gap: var(--s-space-8);
-  color: var(--s-text-muted);
-  font-size: var(--s-size-sm);
-}
-
-.w-group h2 {
-  margin-block-end: var(--s-space-4);
-  color: var(--s-text-subtle);
-  font-size: var(--s-size-xs);
-  font-weight: var(--s-weight-medium);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
 /* Review */
 .w-review {
   display: flex;
