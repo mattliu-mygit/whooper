@@ -13,6 +13,8 @@ from the user's config file (config_path), never from this code. The bin/ script
   whooper.py env                                                                   -> shell variables
   whooper.py repo <owner/repo>                                                     -> the repo's shell variables
   whooper.py prompt poll | review <owner/repo> <agent>                             -> a prompt, filled in
+                    | ask <agent> <run dir> <question> [<finding-id>]              -> an ask run's prompt, with the
+                                                                                      record files it may read
   whooper.py check <schema.json> <value.json>                                      -> fails unless value fits schema
   whooper.py posts <slackdump channel.json> <oldest>                               -> the channel's posts JSON
   whooper.py asks <posts.json> <answer.json> <oldest>                              -> asks JSON
@@ -81,6 +83,7 @@ LABELS = {"caller_visible_bug": "**issue:**", "ci_failure": "**issue:**", "nit":
           "question": "**question:**", "other": "**suggestion:**"}
 LINK = re.compile(r"(?:https?://|www\.)[^\s)>\]]*")
 # How prompts/review.md names each agent's tools, limits, and way of returning the findings.
+# prompts/ask.md uses skill_tool too.
 REVIEW_WORDING = {
     "claude": {
         "shell": "Bash",
@@ -127,6 +130,9 @@ DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 SCHEDULE_DEFAULTS = {"interval_minutes": 15, "start": "10:00", "end": "18:00", "days": ["mon", "tue", "wed", "thu", "fri"]}
 # whooper-poll's time limit for a poll run when the config's [poll] leaves out timeout_minutes.
 POLL_TIMEOUT_MINUTES = 10
+# whooper-ask's time limit for a run that answers a question about a review, when the config's [ask]
+# leaves out timeout_minutes.
+ASK_TIMEOUT_MINUTES = 10
 
 
 def read_schedule(config):
@@ -1016,6 +1022,51 @@ def append_digest(data, run_dir, item, verdicts):
             }) + "\n")
 
 
+# The files of a review run's record that an ask run's prompt lists, in this order, with what each
+# holds. A file the run directory lacks is left out: a Claude review leaves transcript.jsonl and a
+# Devin review transcript.json, and drafts.json, submit.json, and summary.md come only from the
+# user's choices or a Devin summary.
+ASK_RECORD = {
+    "log.md": "the review's log: what the change does, the evidence for each finding, and the candidates it dropped",
+    "findings.json": "the review's findings, each with its draft comment, and its approval verdict with the reason",
+    "github.json": "the PR's title, body, reviews, and comments, as the review read them",
+    "transcript.jsonl": "the review's whole conversation, with every command it ran and that command's output",
+    "transcript.json": "the review's whole conversation, with every command it ran and that command's output",
+    "run.json": "the work item: the PR, why it is the user's work, and the head and merge-base commits",
+    "prompt.md": "the instructions the review followed",
+    "verdicts.json": "which findings Whooper would post on its own, and the checks each other finding failed",
+    "post.json": "what Whooper's own posting would post, and what it held back and why",
+    "drafts.json": "the user's choices for the review: which comments go in, edited texts, approve or comment, and the message",
+    "submit.json": "the review the user submitted to GitHub",
+    "summary.md": "Whooper's summary of the review",
+}
+
+
+def ask_facts(run_dir, question, finding_id=None):
+    """The end of the prompt of a run that answers question about the finished review in run_dir: the
+    files of the review's record it may read, each with its path, earlier asks about the review among
+    them; the finding the question is about when finding_id names one; and the question. None of it
+    goes through fill, so braces in the question stay as written."""
+    if not (run_dir / "findings.json").exists():
+        raise SystemExit(f"whooper-ask: {run_dir} has no findings.json, so its review did not finish")
+    lines = ["", "", "## The review's record", "", f"The review's run directory is {run_dir}. You may read these files:", ""]
+    lines += [f"- {run_dir / name}: {what}" for name, what in ASK_RECORD.items() if (run_dir / name).exists()]
+    # bin/whooper-ask numbers its answers asks/1.json, asks/2.json, and so on; a Devin ask's config
+    # sits beside them as asks/<n>.devin-config.json.
+    asks = sorted((p for p in (run_dir / "asks").glob("*.json") if p.stem.isdigit()), key=lambda p: int(p.stem))
+    lines += [f"- {p}: an earlier question about this review, with its answer" for p in asks]
+    if finding_id is not None:
+        findings = {f["id"]: f for f in json.loads((run_dir / "findings.json").read_text())["findings"]}
+        if finding_id not in findings:
+            raise SystemExit(f"whooper-ask: the run has no finding {finding_id}; its findings are"
+                             f" {', '.join(findings) or 'none'}")
+        f = findings[finding_id]
+        lines += ["", "## The finding", "",
+                  f"The question is about finding {f['id']}, {f['title']} ({f['path']}:{f['line']}), in findings.json."]
+    lines += ["", "## The question", "", question]
+    return "\n".join(lines) + "\n"
+
+
 def skill_hashes(skills_dir):
     """A hash of each skill folder's files by relative path and content, so a run's record names the skill
     text it loaded. The same files give the same value wherever they sit, so a run's hash can be matched
@@ -1047,6 +1098,10 @@ def main(command, *args):
         # A poll takes 2 to 3 minutes, so a shorter limit would stop every poll.
         if type(poll_timeout) is not int or poll_timeout < 5:
             raise SystemExit(f"whooper: [poll] timeout_minutes takes a whole number of minutes, at least 5; see {config_path()}")
+        # whooper-ask's watchdog multiplies the limit in Python, so a fraction of a minute works too.
+        ask_timeout = config.get("ask", {}).get("timeout_minutes", ASK_TIMEOUT_MINUTES)
+        if type(ask_timeout) not in (int, float) or ask_timeout <= 0:
+            raise SystemExit(f"whooper: [ask] timeout_minutes takes a number of minutes above 0; see {config_path()}")
         values = {
             "WHOOPER_CONFIG_DIR": config["dir"],
             "WHOOPER_STATE": xdg_dir("XDG_STATE_HOME", ".local/state"),
@@ -1061,6 +1116,7 @@ def main(command, *args):
             "WHOOPER_REVIEW_TIMEOUT_MINUTES": config["review"]["timeout_minutes"],
             # A poll run that hangs, such as on a request the network dropped, holds up the loop.
             "WHOOPER_POLL_TIMEOUT_MINUTES": poll_timeout,
+            "WHOOPER_ASK_TIMEOUT_MINUTES": ask_timeout,
             # The script whooper-round runs after each review, relative to the config's directory.
             "WHOOPER_NOTIFY": config["dir"] / config["schedule"]["notify"] if "notify" in config.get("schedule", {}) else "",
             **{f"WHOOPER_{job.upper()}_AGENT": agent for job, agent in config["jobs"].items()},
@@ -1094,12 +1150,17 @@ def main(command, *args):
             "review_bots": bot_list(config["github"]["review_bots"], "login"),
             "skills": ", ".join(f"`{skill}`" for skill in config["review"]["skills"]),
         }
+        facts = ""
         if name == "review":
             repo, agent = rest
             notes = config["repos"][repo].get("notes")
             values["repo_notes"] = (config["dir"] / notes).read_text().strip() if notes else "None."
             values.update(REVIEW_WORDING[agent])
-        print(fill((ROOT / "prompts" / f"{name}.md").read_text(), values), end="")
+        elif name == "ask":
+            agent, run, question, *finding = rest
+            values["skill_tool"] = REVIEW_WORDING[agent]["skill_tool"]
+            facts = ask_facts(Path(run), question, *finding)
+        print(fill((ROOT / "prompts" / f"{name}.md").read_text(), values) + facts, end="")
     elif command == "check":
         schema, path = args
         try:

@@ -1982,6 +1982,7 @@ class ConfigTest(unittest.TestCase):
             os.environ["WHOOPER_CONFIG"] = test_config
         self.assertIn("WHOOPER_ORGS=example-org\n", env)
         self.assertIn("WHOOPER_REVIEW_AGENT=devin\n", env)
+        self.assertIn("WHOOPER_ASK_TIMEOUT_MINUTES=10\n", env)
         self.assertIn(f"WHOOPER_NOTIFY={ROOT / 'examples' / 'notify.sh'}\n", env)
         self.assertIn(f"WHOOPER_REPO_SETUP={ROOT / 'examples' / 'setup.sh'}\n", repo)
         self.assertEqual(int(round_at), int(at("wed", "10:21").timestamp()))
@@ -2026,6 +2027,20 @@ class ConfigTest(unittest.TestCase):
             finally:
                 os.environ["WHOOPER_CONFIG"] = test_config
         self.assertIn("WHOOPER_POLL_TIMEOUT_MINUTES=7\n", env)
+
+    def test_asks_stop_after_ten_minutes_unless_the_config_says_otherwise(self):
+        self.assertIn("WHOOPER_ASK_TIMEOUT_MINUTES=10\n", self.command("env"))
+        # (value in the config, whether it is a limit whooper-ask can keep)
+        for value, works in [("7", True), ("2.5", True), ("0", False), ('"7"', False), ("true", False)]:
+            with self.subTest(value), tempfile.TemporaryDirectory() as tmp:
+                config = Path(tmp) / "config.toml"
+                config.write_text(CONFIG + f"\n[ask]\ntimeout_minutes = {value}\n")
+                with mock.patch.dict(os.environ, WHOOPER_CONFIG=str(config)):
+                    if works:
+                        self.assertIn(f"WHOOPER_ASK_TIMEOUT_MINUTES={value}\n", self.command("env"))
+                    else:
+                        with self.assertRaises(SystemExit):
+                            self.command("env")
 
     def test_a_job_on_an_agent_without_a_launcher_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2105,6 +2120,264 @@ class ClaudeLauncherTest(unittest.TestCase):
         self.assertEqual(args[args.index("--max-budget-usd") + 1], "15")
 
 
+def fake(path, body):
+    """Writes an executable sh script at path, standing in for a command such as claude."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"#!/bin/sh\n{body}\n")
+    path.chmod(0o755)
+
+
+class AskTest(unittest.TestCase):
+    """bin/whooper-ask, and whooper.py prompt ask, which it runs, on a finished Claude review of
+    example-org/example-repo#12 in a throwaway state folder. claude is a fake that records its
+    prompt, arguments, and environment and answers with the text in the file answer; gh, slackdump,
+    and devin fail, so no test can reach GitHub, Slack, or a model."""
+
+    QUESTION = "Why is it bad to have invisible characters?"
+    NIT = finding(id="2", kind="nit", nit_kind="wording", path="README.md", line=3,
+                  title="Invisible characters in the setup steps", draft="**nit:** Line 3 has a zero-width space.")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        tmp = Path(self.tmp.name)
+        self.fakes = tmp / "bin"
+        for name in ["gh", "slackdump", "devin"]:
+            fake(self.fakes / name, "exit 1")
+        # The launcher passes the prompt right after -p.
+        fake(self.fakes / "claude", "\n".join([
+            'fakes="${0%/*}"',
+            'printf "%s" "$2" > "$fakes/prompt"',
+            'printf "%s\\n" "$@" > "$fakes/args"',
+            'env > "$fakes/env"',
+            """jq -n -c --rawfile answer "$fakes/answer" '{type: "result", subtype: "success", result: $answer}'""",
+        ]))
+        self.env = {**os.environ, "PATH": f"{self.fakes}:{os.environ['PATH']}", "XDG_STATE_HOME": str(tmp),
+                    "XDG_CACHE_HOME": str(tmp / "cache")}
+        self.run = tmp / "whooper" / "runs" / "20310727T010246Z-12"
+        self.run.mkdir(parents=True)
+        (self.run / "run.json").write_text(json.dumps({"repo": "example-org/example-repo", "pr": 12, "head_sha": "h1",
+                                                       "run_id": self.run.name, "agent": "claude"}))
+        (self.run / "findings.json").write_text(json.dumps({
+            "status": "reviewed", "skip_reason": "",
+            "approval": {"verdict": "look_first", "reason": "Finding 1 needs the author."},
+            "findings": [finding(), self.NIT]}))
+        for name in ["log.md", "github.json", "transcript.jsonl", "prompt.md", "stderr.log"]:
+            (self.run / name).write_text(f"the review's {name}")
+
+    def prompt(self, *args):
+        """whooper.py prompt ask with args, as bin/whooper-ask runs it."""
+        out = io.StringIO()
+        with redirect_stdout(out):
+            main("prompt", "ask", *args)
+        return out.getvalue()
+
+    def ask(self, *args, env=None):
+        return subprocess.run([str(ROOT / "bin" / "whooper-ask"), *args], env={**self.env, **(env or {})},
+                              capture_output=True, text=True, timeout=60)
+
+    def test_the_prompt_names_the_question_the_finding_and_each_record_file(self):
+        (self.run / "drafts.json").write_text("{}")
+        (self.run / "asks").mkdir()
+        (self.run / "asks" / "1.json").write_text("{}")
+        (self.run / "asks" / "1.prompt.md").write_text("an earlier ask's prompt")
+        # Braces in a question stay as written instead of reading as placeholders.
+        question = f"{self.QUESTION} Is {{{{this}}}} one?"
+        prompt = self.prompt("claude", str(self.run), question, "2")
+        for name in ["log.md", "findings.json", "github.json", "transcript.jsonl", "run.json", "prompt.md",
+                     "drafts.json", "asks/1.json"]:
+            self.assertIn(f"{self.run / name}: ", prompt)
+        # Files the run does not have, and files that hold nothing to answer from.
+        for name in ["transcript.json", "submit.json", "summary.md", "stderr.log", "asks/1.prompt.md"]:
+            self.assertNotIn(f"{self.run / name}: ", prompt)
+        self.assertIn("finding 2, Invisible characters in the setup steps (README.md:3)", prompt)
+        self.assertTrue(prompt.endswith(f"\n{question}\n"))
+        for text in ["sam-example", "`review-skill`, `language-skill`", "the Skill tool"]:
+            self.assertIn(text, prompt)
+        self.assertNotIn("{{", prompt.replace(question, ""))
+        self.assertIn("the skill tool", self.prompt("devin", str(self.run), self.QUESTION))
+
+    def test_refuses_a_run_it_cannot_ask_about(self):
+        # (case, arguments, part of the reason it prints)
+        for name, args, why in [
+            ("no such run", ["20310101T000000Z-1", self.QUESTION], "no run 20310101T000000Z-1"),
+            ("no question", [self.run.name], "usage: whooper-ask"),
+            ("a finding the run lacks", [self.run.name, self.QUESTION, "--finding", "9"],
+             "has no finding 9; its findings are 1, 2"),
+        ]:
+            with self.subTest(name):
+                result = self.ask(*args)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(why, result.stderr)
+        (self.run / "findings.json").unlink()
+        unfinished = self.ask(self.run.name, self.QUESTION)
+        self.assertEqual(unfinished.returncode, 1)
+        self.assertIn("its review did not finish", unfinished.stderr)
+        self.assertFalse((self.run / "asks").exists())
+
+    def test_saves_each_answer_numbered_in_order(self):
+        asks = self.run / "asks"
+        before = datetime.now(timezone.utc).replace(microsecond=0)
+        (self.fakes / "answer").write_text("Zero-width spaces hide a change from the reader.\n")
+        first = self.ask(self.run.name, self.QUESTION)
+        self.assertEqual((first.returncode, first.stdout), (0, "Zero-width spaces hide a change from the reader.\n"),
+                         first.stderr)
+        env = dict(line.split("=", 1) for line in (self.fakes / "env").read_text().splitlines() if "=" in line)
+        self.assertEqual((env["GH_TOKEN"], env["WHOOPER_RUN"]), ("disabled", str(self.run)))
+        (self.fakes / "answer").write_text("Nothing breaks; it reads as a nit.")
+        second = self.ask(self.run.name, "Does anything break?", "--finding", "2")
+        after = datetime.now(timezone.utc)
+        self.assertEqual((second.returncode, second.stdout), (0, "Nothing breaks; it reads as a nit.\n"), second.stderr)
+        saved = [json.loads((asks / f"{n}.json").read_text()) for n in (1, 2)]
+        for record in saved:
+            started, ended = (datetime.fromisoformat(record.pop(key)) for key in ["started_at", "ended_at"])
+            self.assertTrue(before <= started <= ended <= after, (started, ended))
+        self.assertEqual(saved, [
+            {"question": self.QUESTION, "finding": None, "answer": "Zero-width spaces hide a change from the reader.",
+             "agent": "claude", "transcript": str(asks / "1.transcript.jsonl")},
+            {"question": "Does anything break?", "finding": "2", "answer": "Nothing breaks; it reads as a nit.",
+             "agent": "claude", "transcript": str(asks / "2.transcript.jsonl")},
+        ])
+        # Each run got the prompt saved beside its answer, and the second may read the first ask.
+        prompt = (asks / "2.prompt.md").read_text()
+        self.assertEqual((self.fakes / "prompt").read_text(), prompt.rstrip("\n"))
+        self.assertIn(f"{asks / '1.json'}: ", prompt)
+
+    def test_a_run_past_its_time_limit_is_stopped_and_saves_nothing(self):
+        # A limit of 3 seconds, and a run that would take 30.
+        config = Path(self.tmp.name) / "config.toml"
+        config.write_text(CONFIG + "\n[ask]\ntimeout_minutes = 0.05\n")
+        fake(self.fakes / "claude", 'echo $$ > "${0%/*}/pid"\nexec sleep 30')
+        started = monotonic()
+        result = self.ask(self.run.name, self.QUESTION, env={"WHOOPER_CONFIG": str(config)})
+        took = monotonic() - started
+        pid = int((self.fakes / "pid").read_text())
+
+        def kill():
+            with suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+
+        self.addCleanup(kill)
+        self.assertEqual((result.returncode, result.stdout), (1, ""))
+        self.assertIn("passed its 0.05-minute limit", result.stderr)
+        self.assertFalse((self.run / "asks" / "1.json").exists())
+        # Stopped at the limit, not when the run would have ended.
+        self.assertLess(took, 20)
+        deadline = monotonic() + 10
+        while True:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            if monotonic() > deadline:
+                self.fail(f"the run's process {pid} is still running")
+            sleep(0.1)
+
+
+class AskLauncherTest(unittest.TestCase):
+    """agents/claude/ask and agents/devin/ask, each with a fake CLI on PATH that records how it was
+    started and then answers, in a throwaway folder that also stands in for the user's home."""
+
+    # The claude.ai Slack connector's writes, which review runs deny too.
+    SLACK_WRITES = [f"mcp__claude_ai_Slack__slack_{tool}" for tool in
+                    ["add_reaction", "create_canvas", "update_canvas", "schedule_message", "send_message_draft"]]
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        tmp = Path(self.tmp.name)
+        self.fakes, self.home, self.run = tmp / "bin", tmp / "home", tmp / "run"
+        (self.run / "asks").mkdir(parents=True)
+        self.prompt, self.answer, self.prefix = tmp / "prompt.md", tmp / "answer.md", self.run / "asks" / "1"
+        self.prompt.write_text("Why is it bad to have invisible characters?\n")
+        # Devin Desktop sets the last two in the shells it starts.
+        self.env = {**os.environ, "PATH": f"{self.fakes}:{os.environ['PATH']}", "HOME": str(self.home),
+                    "WHOOPER_RUN": str(self.run), "WHOOPER_CLAUDE_REVIEW_MODEL": "review-model",
+                    "WHOOPER_DEVIN_REVIEW_MODEL": "devin-review-model", "ACP_BACKEND": "windsurf",
+                    "WINDSURF_EXT_HOST_PID": "1"}
+
+    def launch(self, agent):
+        result = subprocess.run([str(ROOT / "agents" / agent / "ask"), str(self.prompt), str(self.answer),
+                                 str(self.prefix)], env=self.env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return self.answer.read_text()
+
+    def recorded(self, name):
+        return (self.fakes / name).read_text().splitlines()
+
+    def test_the_claude_run_gets_only_tools_that_read_files_and_every_slack_write_denied(self):
+        fake(self.fakes / "claude", "\n".join([
+            'fakes="${0%/*}"',
+            'printf "%s\\n" "$@" > "$fakes/args"',
+            'pwd > "$fakes/cwd"',
+            'ls -A > "$fakes/files"',
+            """echo '{"type": "result", "subtype": "success", "result": "They hide a change."}'""",
+        ]))
+        self.assertEqual(self.launch("claude"), "They hide a change.\n")
+        args = self.recorded("args")
+        self.assertEqual(args[args.index("--tools") + 1].split(","), ["Read", "Grep", "Glob", "Skill"])
+        self.assertEqual(args[args.index("--permission-mode") + 1], "dontAsk")
+        add_dir = args.index("--add-dir")
+        self.assertEqual(args[add_dir + 1:add_dir + 3], [str(self.run), f"{self.home}/.claude/skills"])
+        self.assertEqual(args[args.index("--disallowedTools") + 1].split(), self.SLACK_WRITES)
+        self.assertIn("--no-session-persistence", args)
+        self.assertNotIn("--allowedTools", args)
+        # It starts in an empty directory, not the run's.
+        [cwd] = self.recorded("cwd")
+        self.assertNotIn(str(self.run), cwd)
+        self.assertEqual(self.recorded("files"), [])
+
+    def test_the_devin_run_starts_read_only_in_an_empty_directory(self):
+        config = self.home / ".config" / "devin" / "config.json"
+        config.parent.mkdir(parents=True)
+        config.write_text(json.dumps({"agent": {"model": "user-model"},
+                                      "permissions": {"allow": ["Exec(git)", "Write(/**)"], "deny": ["Exec(rm)"]}}))
+        (self.fakes / "answer").parent.mkdir(parents=True)
+        (self.fakes / "answer").write_text("They hide a change.\n")
+        # The run writes answer.md in its working directory and its export where --export says. A
+        # second call, devin rm, deletes the run's session.
+        fake(self.fakes / "devin", "\n".join([
+            'fakes="${0%/*}"',
+            'if [ "$1" = rm ]; then echo "$@" > "$fakes/removed"; exit 0; fi',
+            'printf "%s\\n" "$@" > "$fakes/args"',
+            'env > "$fakes/env"',
+            'pwd > "$fakes/cwd"',
+            'ls -A > "$fakes/files"',
+            'cp prompt.md "$fakes/prompt"',
+            'while [ $# -gt 1 ]; do',
+            '  case "$1" in --config) cp "$2" "$fakes/config.json" ;; --export) export="$2" ;; esac',
+            '  shift',
+            'done',
+            'cp "$fakes/answer" answer.md',
+            """echo '{"session_id": "session-7", "steps": []}' > "$export\"""",
+        ]))
+        self.assertEqual(self.launch("devin"), "They hide a change.\n")
+        args = self.recorded("args")
+        for flag, value in [("--permission-mode", "accept-edits"), ("--model", "devin-review-model"),
+                            ("--config", f"{self.prefix}.devin-config.json"),
+                            ("--export", f"{self.prefix}.transcript.json")]:
+            self.assertEqual(args[args.index(flag) + 1], value)
+        # The user's config without its allow rules, which could approve a command or a write
+        # outside the working directory, and with the shell and Slack denied.
+        used = json.loads((self.fakes / "config.json").read_text())
+        self.assertEqual(used["agent"], {"model": "user-model"})
+        self.assertEqual(used["permissions"]["allow"], [])
+        self.assertEqual(sorted(used["permissions"]["deny"]),
+                         sorted(["Exec(rm)", "exec", "mcp__slack-remote__*", "mcp__slack__*"]))
+        env = [line.split("=", 1)[0] for line in self.recorded("env")]
+        self.assertNotIn("ACP_BACKEND", env)
+        self.assertNotIn("WINDSURF_EXT_HOST_PID", env)
+        # It starts in an empty directory, not the run's, with only its prompt, which asks for the
+        # answer in answer.md through the file-writing tool.
+        [cwd] = self.recorded("cwd")
+        self.assertNotIn(str(self.run), cwd)
+        self.assertEqual(self.recorded("files"), ["prompt.md"])
+        prompt = (self.fakes / "prompt").read_text()
+        self.assertTrue(prompt.startswith(self.prompt.read_text()))
+        self.assertIn("answer.md in the working directory with your file-writing tool", prompt)
+        self.assertEqual(self.recorded("removed"), ["rm session-7 --force"])
+
+
 class SettingsTest(unittest.TestCase):
     """whooper.py settings, which bin/whooper-settings runs, on a config file in a throwaway folder."""
 
@@ -2149,7 +2422,8 @@ class SettingsTest(unittest.TestCase):
             with self.subTest(values):
                 path = self.use_config(EXAMPLE)
                 self.settings("set", json.dumps(values))
-                self.assertEqual(path.read_text(), EXAMPLE.replace(old, new))
+                # [ask] has the same timeout_minutes line as [poll], below it, and keeps it.
+                self.assertEqual(path.read_text(), EXAMPLE.replace(old, new, 1))
 
     def test_a_claude_budget_is_optional_and_can_be_set(self):
         # With no budget_usd, as in the example config, a Claude review has no spending limit.

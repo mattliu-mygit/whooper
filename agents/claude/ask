@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Answers a question about a review on Claude Code: agents/claude/ask <prompt file> <answer file> <record prefix>.
+#
+# bin/whooper-ask starts this with no GitHub login and $WHOOPER_RUN, the review's run directory. The
+# run starts in an empty directory, so no project's settings or CLAUDE.md files load, and its only
+# tools read and search files (Read, Grep, Glob) or load skills (Skill), which come from
+# ~/.claude/skills as in a review. --add-dir lets it read the run directory and the skills' other
+# files. In dontAsk permission mode any call that would wait for an approval is denied, and the Slack
+# writes are denied by name, as in a review, since the user's MCP servers still load. Its last
+# message, the answer, becomes the answer file, and its transcript is <record prefix>.transcript.jsonl.
+set -euo pipefail
+
+prompt="$(<"$1")"
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+cd "$work"
+slack="mcp__claude_ai_Slack__slack"
+CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude -p "$prompt" \
+  --model "$WHOOPER_CLAUDE_REVIEW_MODEL" \
+  --tools "Read,Grep,Glob,Skill" --permission-mode dontAsk \
+  --add-dir "$WHOOPER_RUN" "$HOME/.claude/skills" \
+  --disallowedTools "${slack}_add_reaction ${slack}_create_canvas ${slack}_update_canvas ${slack}_schedule_message ${slack}_send_message_draft" \
+  --no-session-persistence --output-format stream-json --verbose > "$3.transcript.jsonl" 2> "$3.stderr.log"
+jq -e -r 'select(.type == "result" and .subtype == "success") | .result' "$3.transcript.jsonl" > "$2"

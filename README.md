@@ -161,6 +161,24 @@ someone wrote on the same line since the review, and a link outside the configur
 stop it. It refuses a review that includes no comment and does not approve, and a run it already
 submitted, so a review never posts twice.
 
+## Ask about a review
+
+`bin/whooper-ask <run-id> '<question>' [--finding <finding-id>]` answers a question about a review
+run that finished, such as "Why is it bad to have invisible characters?", and prints the answer.
+Prompting Time's "Ask about this" runs it with the finding. A new run of the agent that did the
+review answers, with the review's skills, since Whooper ends each review's session. Its prompt,
+`prompts/ask.md` filled in, names the question, the finding, and the path of each file of the
+review's record the run directory has: `log.md`, `findings.json`, the transcript, `github.json`,
+`run.json`, `prompt.md`, `verdicts.json`, `post.json`, `drafts.json`, `submit.json`, `summary.md`,
+and earlier asks. The PR's code is gone by then, since whooper-review removes the worktrees, so the
+run answers from the record. [Approvals](#approvals) says what the run may do.
+
+whooper-ask saves each answer in the run directory as `asks/<n>.json`, numbered in order from 1:
+`question`, `finding` (its ID or null), `answer`, `agent`, `started_at` and `ended_at` in UTC, and
+`transcript`, the transcript's path. `asks/<n>.prompt.md` is the run's prompt. A run that passes
+`[ask] timeout_minutes` (10 by default) is stopped with everything it started and, like a run that
+fails, saves no answer; its number is not used again.
+
 ## What counts as work
 
 `lib/whooper.py` applies the rules. `prompts/poll.md` is the only judgment, and it covers Slack
@@ -242,7 +260,13 @@ Devin starts in an empty directory in accept-edits mode, where anything but writ
 needs an approval nobody gives. A poll run that passes `[poll] timeout_minutes` (10 by default) is
 stopped with everything it started, and the cursor stays put, so the next poll reads the same posts.
 slackdump only reads. Review runs have no GitHub
-login and every Slack write denied, and whooper-review refuses to run without `--dry-run`. The summary run
+login and every Slack write denied, and whooper-review refuses to run without `--dry-run`. An ask run
+has no GitHub login either, and reads files but writes nothing except its answer. Claude gets only
+its Read, Grep, Glob, and Skill tools, can read the run directory and `~/.claude/skills`, runs in
+`dontAsk` mode, which denies any call that would wait for an approval, and has the Slack writes
+denied by name. Devin starts in an empty directory in accept-edits mode, where it reads any file but
+writes only there, with your Devin config minus its allow rules and plus deny rules for the shell
+and every Slack tool. The summary run
 may call only `slack_schedule_message`, and `hooks/slack-guard.sh` blocks any other Slack call,
 any other channel, a thread, a changed text or time, and a second summary. Only whooper-submit writes
 to GitHub, with the user's own login: the one review the user chose in a run's `drafts.json`, and an
@@ -263,8 +287,8 @@ whooper-submit refuses that run until you check the PR on GitHub and delete the 
 
 whooper-run and whooper-round write each of their files through a temporary file and a rename, so a
 program watching the directory never reads half of one, whooper-draft and whooper-submit write a
-run's `drafts.json`, `submit-request.json`, and `submit.json` the same way, and whooper-post and
-whooper-submit write the recheck list's files the same way too.
+run's `drafts.json`, `submit-request.json`, and `submit.json` the same way, whooper-ask its
+`asks/<n>.json`, and whooper-post and whooper-submit write the recheck list's files the same way too.
 
 - `poll/github.json`: whooper-fetch's latest output, one entry per PR as `queries/pr.graphql`
   returns it.
@@ -317,5 +341,7 @@ whooper-submit write the recheck list's files the same way too.
   `submit-request.json` is the exact request whooper-submit last showed with `--print` or set out
   to post, and its SHA-256 is the fingerprint `--print` prints. `submit.json` is the review it
   posted: the request and GitHub's `response`, with `status` `posted`, or `posting` while gh posts.
+  `asks/` holds whooper-ask's answers, `<n>.json`, each beside its run's `<n>.prompt.md`,
+  transcript, and `<n>.stderr.log`, and for Devin `<n>.devin-config.json`.
   The worktrees `head/` and `base/` exist only while the run does.
 - `digest.jsonl`: one line per finding that waits for the user, with its run.

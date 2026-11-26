@@ -46,6 +46,9 @@ timeout_minutes = 45               # whooper-review stops a review that runs lon
 # Skills each review run loads, from ~/.claude/skills. skills/ in this repo has public versions.
 skills = ["multi-angle-review", "code-shape-and-runtime-review"]
 
+[ask]
+timeout_minutes = 10               # whooper-ask stops a run that takes longer to answer, on any agent
+
 # When bin/whooper-run polls: a round starts interval_minutes after the last one ended, at or after
 # start and before end (24-hour local times) on these days. These four are the defaults.
 [schedule]
