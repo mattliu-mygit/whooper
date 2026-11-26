@@ -16,6 +16,8 @@
 #   outcome    running, waiting, reviewed, or failed, by the rule bin/whooper-status's reviews follow
 #   findings   findings.json, or null while the review runs and when the file is missing or does not
 #              fit schemas/findings.json
+#   safe_to_approve  whether whooper-submit would approve the review without --approve-anyway, false
+#              unless the outcome is reviewed, as in bin/whooper-status
 #   drafts     what bin/whooper-draft <run-id> prints, or null for a review whose findings are null
 #   diff       diff.patch, the PR's change the review read. Reviews kept no diff.patch before
 #              whooper-review saved one, and for such a run git rebuilds the same diff from the repo's

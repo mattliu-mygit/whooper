@@ -25,8 +25,8 @@
 #               once a review succeeds or stops at a cause of its PR's own
 #   reviews     the review runs in <state>/runs that started in the last 30 days, newest first, each
 #               {run_id, repo, pr, title, author, url, started_at, ended_at, outcome, verdict, skipped,
-#               findings, submitted, needs_you, cause, head_sha, pr_head_sha, skipped_by_user,
-#               removed_by_user}:
+#               findings, safe_to_approve, submitted, needs_you, cause, head_sha, pr_head_sha,
+#               skipped_by_user, removed_by_user}:
 #     repo        <owner>/<repo>, from run.json, or null when run.json cannot be read, as when
 #                 whooper-review stopped before it wrote the file
 #     pr          the PR's number, from the run ID, <UTC start time>-<PR number>
@@ -47,6 +47,10 @@
 #     skipped     whether the review skipped the PR, as it does a large PR from an untagged ask
 #     findings    how many findings it has, 0 when findings.json is missing or does not fit; a
 #                 review that runs counts none yet, since a Devin review may still change the file
+#     safe_to_approve true when the outcome is reviewed and whooper-submit would approve the review
+#                 without --approve-anyway: its verdict is approve_once_ci_passes, every finding is
+#                 a nit, and it did not skip the PR (lib/whooper.py's run_concerns); false for any
+#                 other review, as for one that runs, waits, or failed, even with findings that fit
 #     submitted   null, or {event, at} once whooper-submit posted the review: APPROVE or COMMENT, and
 #                 when submit.json recorded it; a submit.json that says posting counts as null, since
 #                 its review may or may not be on GitHub

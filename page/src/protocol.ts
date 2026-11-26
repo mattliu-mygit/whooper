@@ -75,6 +75,7 @@ export interface WhooperStatus {
     verdict: Verdict | null;
     skipped: boolean;
     findings: number;
+    safe_to_approve: boolean;
     submitted: { event: "APPROVE" | "COMMENT"; at: string } | null;
     needs_you: boolean;
     cause: Cause | null;

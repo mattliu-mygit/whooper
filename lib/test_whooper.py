@@ -1313,12 +1313,12 @@ class PostTest(unittest.TestCase):
 class SubmitTest(unittest.TestCase):
     """bin/whooper-submit, and whooper.py draft, which bin/whooper-draft runs, on a review run of
     example-org/example-repo#12 at head h1 in a throwaway state folder; a few tests run
-    bin/whooper-classify and bin/whooper-post on it too. gh is a fake: it reports the
-    PR's head from the file head and the CI checks on it from checks.json, lists a teammate's comment
-    on finding 1's line written after the review started, records the body of each review it is asked
-    to post in posted.jsonl, and fails any other call, so no test can reach GitHub. Unless a test
-    changes it, the run is not safe to approve: its verdict is look_first, and of its findings BUG,
-    QUESTION, and NIT, only NIT is a nit."""
+    bin/whooper-classify and bin/whooper-post on it too, and one runs whooper.py status and show. gh
+    is a fake: it reports the PR's head from the file head and the CI checks on it from checks.json,
+    lists a teammate's comment on finding 1's line written after the review started, records the body
+    of each review it is asked to post in posted.jsonl, and fails any other call, so no test can reach
+    GitHub. Unless a test changes it, the run is not safe to approve: its verdict is look_first, and of
+    its findings BUG, QUESTION, and NIT, only NIT is a nit."""
 
     # What GitHub answers a review it created with, in part.
     RESPONSE = {"id": 7001, "html_url": "https://github.com/example-org/example-repo/pull/12#pullrequestreview-7001"}
@@ -1721,6 +1721,40 @@ class SubmitTest(unittest.TestCase):
         approved = self.submit("--approve-anyway")
         self.assertEqual(approved.returncode, 0, approved.stderr)
         self.assertEqual(self.posted(), [{"commit_id": "h1", "event": "APPROVE", "body": "", "comments": []}])
+
+    def test_status_and_show_call_a_run_safe_to_approve_exactly_when_submit_approves_it_without_approve_anyway(self):
+        # Prompting Time reads safe_to_approve from whooper-status and whooper-show, so it must match what
+        # whooper-submit does with an approval.
+        why = "The PR changes 40 files across four services."
+        cases = {
+            "only nits": ("approve_once_ci_passes", [self.NIT, self.OTHER_NIT], ""),
+            "no finding": ("approve_once_ci_passes", [], ""),
+            "the verdict is look_first": ("look_first", [self.NIT], ""),
+            "a finding that is not a nit": ("approve_once_ci_passes", [self.NIT, self.QUESTION], ""),
+            "the review skipped the PR": ("approve_once_ci_passes", [], why),
+        }
+        seen = {}
+        for name, (verdict, findings, skip_reason) in cases.items():
+            with self.subTest(name):
+                self.setUp()
+                self.write_findings(verdict, findings, skip_reason)
+                self.draft("approve")
+                # --print runs every check whooper-submit runs before it posts, and posts nothing.
+                submitted = self.submit("--print")
+                self.assertIn(submitted.returncode, (0, 11), submitted.stderr)
+                status, show = io.StringIO(), io.StringIO()
+                with redirect_stdout(status):
+                    main("status", str(self.state))
+                with redirect_stdout(show):
+                    main("show", str(self.state), self.run.name)
+                [review] = json.loads(status.getvalue())["reviews"]
+                seen[name] = (submitted.returncode == 0, review["safe_to_approve"],
+                              json.loads(show.getvalue())["safe_to_approve"])
+        # Each case as (whooper-submit approves, whooper-status's safe_to_approve, whooper-show's).
+        self.assertEqual(seen, {"only nits": (True, True, True), "no finding": (True, True, True),
+                                "the verdict is look_first": (False, False, False),
+                                "a finding that is not a nit": (False, False, False),
+                                "the review skipped the PR": (False, False, False)})
 
     def test_an_approval_without_a_message_says_pre_approving_only_when_it_comments(self):
         self.write_findings("approve_once_ci_passes", [self.NIT, self.OTHER_NIT])
@@ -3300,8 +3334,8 @@ class ReviewsTest(unittest.TestCase):
                 "author": "alice",
                 "url": f"https://github.com/example-org/example-repo/pull/{pr}", "started_at": self.local(started),
                 "ended_at": self.local(started + timedelta(minutes=20)), "outcome": "reviewed",
-                "verdict": "look_first", "skipped": False, "findings": 0, "submitted": None, "needs_you": True,
-                "cause": None, "head_sha": "h1", "pr_head_sha": None, "skipped_by_user": False,
+                "verdict": "look_first", "skipped": False, "findings": 0, "safe_to_approve": False, "submitted": None,
+                "needs_you": True, "cause": None, "head_sha": "h1", "pr_head_sha": None, "skipped_by_user": False,
                 "removed_by_user": False, **fields}
 
     def show(self, *args):
@@ -3343,9 +3377,10 @@ class ReviewsTest(unittest.TestCase):
         self.finish(self.make_run(timedelta(days=31), pr=17))
         self.assertEqual(self.reviews(), [
             self.review(reviewed, findings=2),
-            self.review(submitted, verdict="approve_once_ci_passes", findings=1, needs_you=False, submitted={
-                "event": "APPROVE", "at": self.local(self.started(submitted) + timedelta(minutes=30))}),
-            self.review(posting, verdict="approve_once_ci_passes", findings=1),
+            self.review(submitted, verdict="approve_once_ci_passes", findings=1, safe_to_approve=True, needs_you=False,
+                        submitted={"event": "APPROVE",
+                                   "at": self.local(self.started(submitted) + timedelta(minutes=30))}),
+            self.review(posting, verdict="approve_once_ci_passes", findings=1, safe_to_approve=True),
             self.review(skipped, skipped=True),
             self.review(failed, outcome="failed", verdict=None, cause=CAUSES["agent_no_findings"],
                         ended_at=self.local(self.started(failed) + timedelta(minutes=21))),
@@ -3516,9 +3551,9 @@ class ReviewsTest(unittest.TestCase):
         # It has no findings, drafts, or diff yet, since its review has not fetched the merge base.
         self.assertEqual(self.shown(waits), {
             "version": 1, "run_id": waits.name, "run": json.loads((waits / "run.json").read_text()), "title": None,
-            "author": None, "outcome": "waiting", "findings": None, "drafts": None, "diff": None, "failure": None,
-            "asks": [], "submitted": None, "cause": CAUSES["docker_unavailable"], "head_sha": "h1",
-            "skipped_by_user": False, "removed_by_user": False})
+            "author": None, "outcome": "waiting", "findings": None, "safe_to_approve": False, "drafts": None,
+            "diff": None, "failure": None, "asks": [], "submitted": None, "cause": CAUSES["docker_unavailable"],
+            "head_sha": "h1", "skipped_by_user": False, "removed_by_user": False})
         # An ask about it may read why it waits.
         prompt = io.StringIO()
         with redirect_stdout(prompt):
@@ -3582,6 +3617,33 @@ class ReviewsTest(unittest.TestCase):
                           (16, None, None)])
         self.assertEqual((self.shown(runs[11])["head_sha"], self.shown(stopped)["head_sha"]), ("h1", None))
 
+    def test_status_and_show_call_a_review_safe_to_approve_only_once_it_is_reviewed(self):
+        # whooper-submit approves a run without --approve-anyway when its verdict is approve_once_ci_passes,
+        # every finding is a nit, and it did not skip the PR (SubmitTest), as for the first run.
+        safe = self.make_run(timedelta(hours=1))
+        self.finish(safe, "approve_once_ci_passes", [self.NIT])
+        look_first = self.make_run(timedelta(hours=2), pr=13)
+        self.finish(look_first, findings=[self.NIT])
+        # The next two have the first run's findings, but neither review finished: a Devin review that
+        # still runs may change its findings.json, and one that passed its time limit after writing
+        # findings that fit failed.
+        running = self.make_run(timedelta(minutes=10), pr=14)
+        self.finish(running, "approve_once_ci_passes", [self.NIT])
+        self.hold(running, os.getpid())
+        timed_out = self.make_run(timedelta(hours=3), pr=15)
+        self.finish(timed_out, "approve_once_ci_passes", [self.NIT])
+        self.write(timed_out, "failure.txt", "the review run passed its 45-minute limit\n", 45)
+        # A review that waits has no findings yet, and a run directory Whooper cannot read has none, as when
+        # whooper-review stopped before it wrote run.json.
+        waits = self.waiting(timedelta(hours=4), 16)
+        unreadable = self.make_run(timedelta(hours=5), pr=17, run_json=False)
+        self.write(unreadable, "failure.txt", "the review stopped at an unexpected error\n", 1)
+        expected = {safe.name: True, look_first.name: False, running.name: False, timed_out.name: False,
+                    waits.name: False, unreadable.name: False}
+        self.assertEqual({r["run_id"]: r["safe_to_approve"] for r in self.reviews()}, expected)
+        self.assertEqual({run_id: self.shown(self.state / "runs" / run_id)["safe_to_approve"] for run_id in expected},
+                         expected)
+
     def test_show_prints_a_finished_review(self):
         run = self.make_run(timedelta(hours=1))
         self.finish(run, findings=[finding(), self.NIT])
@@ -3592,7 +3654,7 @@ class ReviewsTest(unittest.TestCase):
             "outcome": "reviewed", "findings": self.findings(findings=[finding(), self.NIT]),
             # The run is not safe to approve, so until the user changes anything the review only comments
             # and includes nothing.
-            "drafts": {"event": "COMMENT", "message": "", "findings": {}},
+            "safe_to_approve": False, "drafts": {"event": "COMMENT", "message": "", "findings": {}},
             "diff": self.DIFF, "failure": None, "asks": [], "submitted": None, "cause": None, "head_sha": "h1",
             "skipped_by_user": False, "removed_by_user": False,
         })
@@ -3612,7 +3674,8 @@ class ReviewsTest(unittest.TestCase):
         self.fetched(failed)
         reason = f"the review run passed its 45-minute limit; see {failed}/stderr.log and the transcript in {failed}\n"
         self.write(failed, "failure.txt", reason, 45)
-        nothing = {"version": 1, "findings": None, "drafts": None, "asks": [], "submitted": None}
+        nothing = {"version": 1, "findings": None, "safe_to_approve": False, "drafts": None, "asks": [],
+                   "submitted": None}
         self.assertEqual(self.shown(failed), {
             **nothing, "run_id": failed.name, "run": json.loads((failed / "run.json").read_text()),
             "title": self.TITLE, "author": "alice", "outcome": "failed", "diff": self.DIFF, "failure": reason,

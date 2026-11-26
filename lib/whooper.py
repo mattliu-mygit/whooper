@@ -406,11 +406,12 @@ REMOVED_BY_USER = "removed-by-user"
 def read_review(run, running):
     """How the review in the run directory run went, as whooper-status and whooper-show report it:
     run.json's work item, the outcome, the findings, the review whooper-submit posted, for a failed or
-    waiting review, the cause (read_cause), whether the user marked it skipped (skip_review), and
-    whether the user removed it (remove_review). running holds the IDs of the runs a live
-    whooper-review still runs (running_runs). A file that is missing, empty, cut short, or does not
-    fit reads as None, so a run directory Whooper cannot read gives a failed review rather than an
-    error.
+    waiting review, the cause (read_cause), whether the user marked it skipped (skip_review), whether
+    the user removed it (remove_review), and whether it is safe to approve: reviewed, with nothing
+    run_concerns argues against approving, as whooper-submit then approves it without
+    --approve-anyway. running holds the IDs of the runs a live whooper-review still runs
+    (running_runs). A file that is missing, empty, cut short, or does not fit reads as None, so a run
+    directory Whooper cannot read gives a failed review rather than an error.
 
     The outcome is running while a live whooper-review runs the review; waiting for a review
     whooper-round did not start, because an earlier review in its round stopped at a cause that stops
@@ -435,8 +436,11 @@ def read_review(run, running):
         outcome = "reviewed" if result is not None and not (run / "failure.txt").exists() else "failed"
     submit = read_object(run / "submit.json")
     posted = submit if submit and submit.get("status") == "posted" else None
+    # Only a review that finished counts: one that runs may still change its findings.json, and one
+    # that failed, as at its time limit, stopped before it finished, whatever findings it left.
+    safe = outcome == "reviewed" and not run_concerns(result)
     return (read_object(run / "run.json"), outcome, result, posted, read_cause(run, outcome),
-            (run / SKIPPED_BY_USER).exists(), (run / REMOVED_BY_USER).exists())
+            (run / SKIPPED_BY_USER).exists(), (run / REMOVED_BY_USER).exists(), safe)
 
 
 def read_title_and_author(run):
@@ -528,7 +532,7 @@ def read_reviews(data, now):
     # matches only other runs without one.
     reviews, newer = [], set()
     for run, started, pr in runs:
-        item, outcome, result, submit, cause, skipped, removed = read_review(run, running)
+        item, outcome, result, submit, cause, skipped, removed, safe = read_review(run, running)
         title, author = read_title_and_author(run)
         repo = item["repo"] if item else None
         head = item.get("head_sha") if item and isinstance(item.get("head_sha"), str) else None
@@ -548,6 +552,7 @@ def read_reviews(data, now):
             "verdict": result["approval"]["verdict"] if result else None,
             "skipped": result is not None and result["status"] == "skipped",
             "findings": len(result["findings"]) if result else 0,
+            "safe_to_approve": safe,
             # whooper-submit renames submit.json saying posted into place once GitHub took the review.
             "submitted": {"event": submit["request"]["event"], "at": modified(run / "submit.json")}
                          if submit else None,
@@ -595,15 +600,16 @@ def rebuilt_diff(item):
 
 def show_review(data, run_id):
     """One review run for Prompting Time's review screen, as whooper-show --json prints it:
-    run.json, the outcome, the findings, and the posted review as read_review reads them, the PR's
-    title and author in github.json, the drafts whooper-draft prints, which only a review whose
-    findings fit has, diff.patch, or for a run from before reviews kept it, the diff rebuilt_diff
-    rebuilds, failure.txt, and whooper-ask's answers. Refuses a run ID that names no run directory."""
+    run.json, the outcome, the findings, whether it is safe to approve, and the posted review as
+    read_review reads them, the PR's title and author in github.json, the drafts whooper-draft prints,
+    which only a review whose findings fit has, diff.patch, or for a run from before reviews kept it,
+    the diff rebuilt_diff rebuilds, failure.txt, and whooper-ask's answers. Refuses a run ID that
+    names no run directory."""
     run = data / "runs" / run_id
     # A run ID names a directory right under runs, so a path such as ../x reads nothing outside it.
     if parse_run_id(run_id) is None or not run.is_dir():
         raise SystemExit(f"whooper-show: no run {run_id} in {data / 'runs'}")
-    item, outcome, result, submit, cause, skipped, removed = read_review(run, running_runs(data))
+    item, outcome, result, submit, cause, skipped, removed, safe = read_review(run, running_runs(data))
     title, author = read_title_and_author(run)
 
     def text(name):
@@ -623,6 +629,7 @@ def show_review(data, run_id):
         "author": author,
         "outcome": outcome,
         "findings": result,
+        "safe_to_approve": safe,
         "drafts": read_drafts(run) if result else None,
         "diff": diff if diff is not None else rebuilt_diff(item),
         "failure": text("failure.txt"),
@@ -1599,8 +1606,9 @@ def run_concerns(result):
     """What in a review run's findings.json argues against approving the PR, as lines for
     whooper-submit to list: a review the run skipped, with the run's reason; a verdict other than
     approve_once_ci_passes, with its reason; and each finding that is not a nit. A run with none is
-    safe to approve: its drafts start as an approval (read_drafts), and whooper-submit approves it
-    without --approve-anyway."""
+    safe to approve: its drafts start as an approval (read_drafts), whooper-submit approves it
+    without --approve-anyway, and whooper-status and whooper-show give safe_to_approve true once its
+    review is reviewed (read_review)."""
     approval, concerns = result["approval"], []
     # A run that skipped the PR, as prompts/review.md has it skip a large PR from an untagged ask,
     # read too little to vouch for it, whatever its verdict says.

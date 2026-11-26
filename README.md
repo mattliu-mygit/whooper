@@ -122,8 +122,9 @@ failure it prints why and leaves the file as it was. A change applies from the n
 
 `bin/whooper-status --json` lists, as `reviews`, the review runs in `<state>/runs` that started in
 the last 30 days, newest first: each one's PR, the PR's title and author, and times, how it went, its
-verdict and number of findings, what whooper-submit posted, and whether it needs you. Prompting Time
-builds its "Needs you" list and its history of past reviews from them.
+verdict and number of findings, whether it is safe to approve, what whooper-submit posted, and
+whether it needs you. Prompting Time builds its "Needs you" list and its history of past reviews
+from them.
 
 ```sh
 bin/whooper-show <run-id> --json   # one review in full, for its review screen
@@ -164,6 +165,12 @@ Each review also has `head_sha`, the commit it reviewed, from `run.json`, and `p
 newest head of its PR that Whooper knows: of the heads its latest poll saw, the recheck list holds,
 and the PR's records name, the one it learned last. The two differ once the PR has new commits since
 the review, and `pr_head_sha` is null when nothing names the PR. whooper-show gives `head_sha` too.
+
+`safe_to_approve` is true when a review's outcome is `reviewed` and whooper-submit would approve it
+without `--approve-anyway` ([Submit a review](#submit-a-review)): its verdict is
+`approve_once_ci_passes`, every finding is a nit, and it did not skip the PR. It is false for any
+other review, as for one that runs, waits, or failed, even with findings that fit, such as a Devin
+review that passed its time limit after writing them. whooper-show gives it too.
 
 A failed review's `cause` says what stopped it, as `id`, a short `summary`, and `scope`: `all` when
 the cause stops every review until you fix it, and `pr` when it stops only this PR's:
