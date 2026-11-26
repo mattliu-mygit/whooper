@@ -19,9 +19,9 @@ from zoneinfo import ZoneInfo
 
 import whooper
 from whooper import (REVIEW_WORDING, SETTINGS_SCHEMA, add_round, bot_list, change_drafts, check_overview, check_schema,
-                     claude_shell_calls, classify, conversation, devin_shell_calls, diff_files, failure_cause, fill, main, mark_new_commits, next_round,
-                     pr_link, poll_items, read_asks, read_drafts, read_schedule, select_work, skill_hashes, slack_posts,
-                     summary_text, wait_review, write_record, write_settings)
+                     claude_shell_calls, classify, co_change, conversation, devin_shell_calls, diff_files, failure_cause,
+                     fill, main, mark_new_commits, next_round, pr_link, poll_items, read_asks, read_drafts, read_schedule,
+                     select_work, skill_hashes, slack_posts, summary_text, wait_review, write_record, write_settings)
 
 LOGIN = "sam-example"
 # Every test runs on this made-up config, never on the user's own.
@@ -1343,6 +1343,42 @@ class OverviewTest(unittest.TestCase):
             self.assertEqual(json.loads((run / "overview.invalid.json").read_text()), {"reason": reason, "overview": broken})
 
 
+class CoChangeTest(unittest.TestCase):
+    """co_change, which picks the files whooper-show lists as changing together with the PR's files, from
+    the files each commit changed in the 90 days before the review."""
+
+    def test_a_file_counts_from_60_percent_of_a_pr_files_commits_and_3_commits(self):
+        # p changed in 3 of x's 5 commits, 60%; in 3 of 6, in both of y's 2, or as one of the PR's files, it
+        # does not count.
+        self.assertEqual(co_change([{"x", "p"}] * 3 + [{"x"}] * 2, {"x"}),
+                         [{"path": "p", "partner": "x", "ratio": 0.6, "commits": 3}])
+        self.assertEqual(co_change([{"x", "p"}] * 3 + [{"x"}] * 3, {"x"}), [])
+        self.assertEqual(co_change([{"y", "p"}] * 2, {"y"}), [])
+        self.assertEqual(co_change([{"x", "p"}] * 3, {"x", "p"}), [])
+
+    def test_lists_at_most_5_files_highest_ratio_first_each_with_the_pr_file_it_changes_with_most(self):
+        commits = [
+            {"app", "c1", "c2", "c3", "d1", "d2"},
+            {"app", "c1", "c2", "c3", "d1", "d2"},
+            {"app", "c1", "c2", "c3", "d1", "d2"},
+            {"app", "c1", "c2"},
+            {"app", "c1"},
+            {"lib", "d1", "e1"},
+            {"lib", "d1", "e1"},
+            {"lib", "d1", "e1"},
+            {"lib", "d1"},
+        ]
+        # d1 changed in 3 of app's 5 commits but in all 4 of lib's, so it counts once, with lib. d2 ties c3 at 3
+        # of app's 5 commits, and comes sixth by its path.
+        self.assertEqual(co_change(commits, {"app", "lib"}), [
+            {"path": "c1", "partner": "app", "ratio": 1.0, "commits": 5},
+            {"path": "d1", "partner": "lib", "ratio": 1.0, "commits": 4},
+            {"path": "c2", "partner": "app", "ratio": 0.8, "commits": 4},
+            {"path": "e1", "partner": "lib", "ratio": 0.75, "commits": 3},
+            {"path": "c3", "partner": "app", "ratio": 0.6, "commits": 3},
+        ])
+
+
 def review_comment(path="services/orders/internal/api/orders.go", line=88, start_line=None, side="RIGHT",
                    created_at="2031-07-27T01:30:00Z"):
     """A review comment as GitHub's REST API lists it, on the head's lines start_line to line."""
@@ -2289,18 +2325,23 @@ class RunTest(unittest.TestCase):
         self.script(self.fakes / "claude",
                     """echo '{"type": "result", "subtype": "success", "structured_output": {"asks": [], "not_asks": []}}'""")
 
+    def git_env(self):
+        """The environment for git and the review, with Sam as each commit's author. Its home has no
+        skills, and git reads only home/.gitconfig, which does not exist until a test writes it, so
+        neither the user's git config nor the system's reaches a test."""
+        home = Path(self.tmp.name) / "home"
+        (home / ".claude" / "skills").mkdir(parents=True, exist_ok=True)
+        return {**self.env, "HOME": str(home), "GIT_CONFIG_GLOBAL": str(home / ".gitconfig"), "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_AUTHOR_NAME": "Sam", "GIT_AUTHOR_EMAIL": "sam@example.com",
+                "GIT_COMMITTER_NAME": "Sam", "GIT_COMMITTER_EMAIL": "sam@example.com"}
+
     def pull_request(self):
         """Makes PR 12 of sample-org/plain-repo in a local origin, the cache's clone of it, and its work
-        item, and returns the environment for git and the review, the work item's path, and the PR's
-        merge base. The environment's home has no skills, and git reads only home/.gitconfig, which
-        does not exist until a test writes it, so neither the user's git config nor the system's
-        reaches a test."""
+        item, and returns the environment for git and the review (git_env), the work item's path, and
+        the PR's merge base."""
         tmp = Path(self.tmp.name)
-        home, origin = tmp / "home", tmp / "origin"
-        (home / ".claude" / "skills").mkdir(parents=True)
-        env = {**self.env, "HOME": str(home), "GIT_CONFIG_GLOBAL": str(home / ".gitconfig"), "GIT_CONFIG_NOSYSTEM": "1",
-               "GIT_AUTHOR_NAME": "Sam", "GIT_AUTHOR_EMAIL": "sam@example.com",
-               "GIT_COMMITTER_NAME": "Sam", "GIT_COMMITTER_EMAIL": "sam@example.com"}
+        origin = tmp / "origin"
+        env = self.git_env()
 
         def git(*args):
             return subprocess.run(["git", *args], cwd=origin, env=env, check=True, capture_output=True,
@@ -2661,6 +2702,96 @@ class RunTest(unittest.TestCase):
                 self.assertEqual(json.loads((run / "overview.invalid.json").read_text()),
                                  {"reason": reason, "overview": broken})
                 self.assertEqual(shown(run), {"outcome": "reviewed", "findings": findings, "overview": None})
+
+    def test_show_gives_the_commits_since_the_review_and_the_files_that_change_with_the_prs_from_the_clone(self):
+        env = {**self.git_env(), "TZ": "America/Los_Angeles"}
+        tmp = Path(self.tmp.name)
+        origin, clone = tmp / "origin", tmp / "cache" / "whooper" / "repos" / "sample-org-plain-repo"
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+
+        def git(*args, days_ago=0):
+            when = (now - timedelta(days=days_ago)).isoformat()
+            return subprocess.run(["git", *args], cwd=origin, env={**env, "GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when},
+                                  check=True, capture_output=True, text=True).stdout.strip()
+
+        def commit(message, *names, days_ago=0):
+            """Commits a line added to each file of names, days_ago days before now, and returns its SHA."""
+            for name in names:
+                with (origin / name).open("a") as file:
+                    file.write(f"{message}\n")
+            git("add", *names)
+            git("commit", "--quiet", "-m", message, days_ago=days_ago)
+            return git("rev-parse", "HEAD")
+
+        def at(days_ago):
+            return (now - timedelta(days=days_ago)).astimezone(ZoneInfo("America/Los_Angeles")).isoformat()
+
+        def newest_head(head):
+            """Has the latest poll see PR 12 at head, after every record of its reviews."""
+            (self.state / "poll").mkdir(exist_ok=True)
+            (self.state / "poll" / "github.json").write_text(json.dumps([
+                {"repository": {"nameWithOwner": "sample-org/plain-repo"}, "number": 12, "headRefOid": head}]))
+
+        def shown():
+            result = self.command("whooper-show", run.name, "--json", env=env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return {key: json.loads(result.stdout)[key] for key in ["commits_since_review", "co_change"]}
+
+        origin.mkdir()
+        git("init", "--quiet", "--initial-branch=main")
+        # More than 90 days before the review, app.txt changed three times with old.txt. In the 90 days,
+        # config.txt changed in 3 of app.txt's 4 commits, and docs.md in 2.
+        for n in range(3):
+            commit(f"old {n}", "app.txt", "old.txt", days_ago=100 - n)
+        commit("a1", "app.txt", "config.txt", "docs.md", days_ago=80)
+        commit("a2", "app.txt", "config.txt", "docs.md", days_ago=60)
+        commit("a3", "app.txt", "config.txt", days_ago=40)
+        commit("a4", "app.txt", days_ago=20)
+        # PR 12 changes app.txt. After the commit its review reads, main changes app.txt and config.txt once
+        # more, and the PR merges main, keeping its own app.txt, and adds a commit.
+        git("checkout", "--quiet", "-b", "pr-12")
+        head = commit("the PR", "app.txt", days_ago=3)
+        git("checkout", "--quiet", "main")
+        commit("later on main", "app.txt", "config.txt", days_ago=2)
+        git("checkout", "--quiet", "pr-12")
+        git("merge", "--quiet", "--no-edit", "--strategy-option=ours", "main", days_ago=1)
+        merge = git("rev-parse", "HEAD")
+        newest = commit("pr: tidy up", "app.txt", "notes.txt")
+        git("clone", "--quiet", "--no-checkout", str(origin), str(clone))
+        item = tmp / "item.json"
+        item.write_text(json.dumps({"kind": "first_review", "repo": "sample-org/plain-repo", "pr": 12, "head_sha": head,
+                                    "base_ref": "main", "source": "github_request", "slack": None, "reason": "r"}))
+        # The review fails, since claude is the fake that exits 1, after it saved run.json and the diff.
+        self.command("whooper-review", str(item), "--dry-run", env=env)
+        [run] = (self.state / "runs").iterdir()
+        # The newest head Whooper knows is the one the review read, from its record. config.txt's 3 of 4
+        # commits count, read from the merge base back: the 3 commits before the 90 days would make them
+        # 3 of 7, and main's later commit 4 of 5.
+        co_changed = [{"path": "config.txt", "partner": "app.txt", "ratio": 0.75, "commits": 3}]
+        self.assertEqual(shown(), {"commits_since_review": [], "co_change": co_changed})
+        # Once the poll sees the PR's newest head, the commits since come newest first, the merge as one
+        # commit with the files it brought from main.
+        newest_head(newest)
+        self.assertEqual(shown(), {"commits_since_review": [
+            {"sha": newest, "title": "pr: tidy up", "author": "Sam", "at": at(0), "files": ["app.txt", "notes.txt"]},
+            {"sha": merge, "title": "Merge branch 'main' into pr-12", "author": "Sam", "at": at(1),
+             "files": ["config.txt"]},
+        ], "co_change": co_changed})
+        # The clone made again as README.md makes it, a partial clone, which fetches a file only when
+        # something needs it, and a newest head it never fetched, which origin would hand over: the commits
+        # since are unknown, git fetches nothing and writes nothing there, and the clone still lacks it.
+        git("config", "uploadpack.allowFilter", "true")
+        git("config", "uploadpack.allowAnySHA1InWant", "true")
+        shutil.rmtree(clone)
+        git("clone", "--quiet", "--filter=blob:none", "--no-checkout", f"file://{origin}", str(clone))
+        unfetched = commit("after the clone", "app.txt")
+        newest_head(unfetched)
+        before = files(clone)
+        self.assertEqual(shown(), {"commits_since_review": None, "co_change": co_changed})
+        self.assertEqual(files(clone), before)
+        lacks = subprocess.run(["git", "--git-dir", str(clone / ".git"), "--no-lazy-fetch", "cat-file", "-e", unfetched],
+                               env=env, capture_output=True)
+        self.assertNotEqual(lacks.returncode, 0)
 
     def test_a_failed_review_keeps_its_reason_and_an_ask_lists_it_first(self):
         env, item, _ = self.pull_request()
@@ -3905,7 +4036,8 @@ class ReviewsTest(unittest.TestCase):
             "version": 1, "run_id": waits.name, "run": json.loads((waits / "run.json").read_text()), "title": None,
             "author": None, "outcome": "waiting", "findings": None, "safe_to_approve": False, "drafts": None,
             "diff": None, "failure": None, "asks": [], "submitted": None, "cause": CAUSES["docker_unavailable"],
-            "head_sha": "h1", "skipped_by_user": False, "removed_by_user": False, "overview": None})
+            "head_sha": "h1", "skipped_by_user": False, "removed_by_user": False, "overview": None,
+            "commits_since_review": None, "co_change": []})
         # An ask about it may read why it waits.
         prompt = io.StringIO()
         with redirect_stdout(prompt):
@@ -4009,8 +4141,8 @@ class ReviewsTest(unittest.TestCase):
             "safe_to_approve": False, "drafts": {"event": "COMMENT", "message": "", "findings": {}},
             "diff": self.DIFF, "failure": None, "asks": [], "submitted": None, "cause": None, "head_sha": "h1",
             "skipped_by_user": False, "removed_by_user": False,
-            # The run wrote no overview.
-            "overview": None,
+            # The run wrote no overview, nothing names a newer head of the PR, and the cache has no clone.
+            "overview": None, "commits_since_review": None, "co_change": [],
         })
         drafts = subprocess.run([str(ROOT / "bin" / "whooper-draft"), run.name], env=self.env, capture_output=True,
                                 text=True, timeout=60)
@@ -4029,7 +4161,7 @@ class ReviewsTest(unittest.TestCase):
         reason = f"the review run passed its 45-minute limit; see {failed}/stderr.log and the transcript in {failed}\n"
         self.write(failed, "failure.txt", reason, 45)
         nothing = {"version": 1, "findings": None, "safe_to_approve": False, "drafts": None, "asks": [],
-                   "submitted": None, "overview": None}
+                   "submitted": None, "overview": None, "commits_since_review": None, "co_change": []}
         self.assertEqual(self.shown(failed), {
             **nothing, "run_id": failed.name, "run": json.loads((failed / "run.json").read_text()),
             "title": self.TITLE, "author": "alice", "outcome": "failed", "diff": self.DIFF, "failure": reason,

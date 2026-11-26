@@ -136,8 +136,9 @@ whooper-show prints the run's `run.json`, the PR's title and author, its outcome
 the drafts whooper-draft prints for it, `diff.patch`, `failure.txt`, each of whooper-ask's answers in
 number order, and the review whooper-submit posted. The overview the run wrote in `findings.json`
 ([How a review run works](#how-a-review-run-works)) comes as `overview` beside the findings rather
-than in them, and is null for a run without one. It reads files only, the run directory and the
-review locks, and refuses a run ID that names no run directory. Reviews kept no `diff.patch` before
+than in them, and is null for a run without one. It reads files only: the run directory, the review
+locks, the files that name the PR's newest head, which whooper-status reads too, and the repo's
+clone. It refuses a run ID that names no run directory. Reviews kept no `diff.patch` before
 whooper-review saved one, and for such a run whooper-show has git rebuild the diff from the repo's
 clone in the cache: `git diff` between the merge base and the head `run.json` records, with the flags
 whooper-review's diff uses and the head's `.gitattributes`. git fetches nothing and writes nothing
@@ -169,6 +170,18 @@ Each review also has `head_sha`, the commit it reviewed, from `run.json`, and `p
 newest head of its PR that Whooper knows: of the heads its latest poll saw, the recheck list holds,
 and the PR's records name, the one it learned last. The two differ once the PR has new commits since
 the review, and `pr_head_sha` is null when nothing names the PR. whooper-show gives `head_sha` too.
+
+whooper-show also reads the PR's history from the repo's clone in the cache, where git fetches
+nothing and writes nothing. `commits_since_review` lists the commits between `head_sha` and the
+newest head Whooper knows, newest first, each with its SHA, title, author, time, and the files it
+changed; a merge, such as of the base branch into the PR, is one commit with the files it brought.
+It is `[]` when the review read the newest head, and null when either head is unknown or the clone
+lacks either commit, as when no review fetched the new head yet. `co_change` lists the files outside
+the PR that changed together with one of its files in at least 60% of that file's commits, and in at
+least 3, in the 90 days before the review started, from the history the merge base ends, merges left
+out: each with the PR's file as `partner`, that share as `ratio`, and how many as `commits`, at most
+5, highest ratio first. For example, a file that changed in 7 of `load.go`'s 9 commits lists as ratio
+0.78 and commits 7. It is `[]` without the diff, the merge base, or the clone.
 
 `safe_to_approve` is true exactly when whooper-submit would approve a review without
 `--approve-anyway` ([Submit a review](#submit-a-review)): its outcome is `reviewed`, its verdict is

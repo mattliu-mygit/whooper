@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Prints one review run as one JSON object, for Prompting Time's review screen and its history of
 # past reviews, read from the run's directory, <state>/runs/<run-id>/, with no network calls, where
-# <state> is $XDG_STATE_HOME/whooper (default ~/.local/state/whooper), and for an older run's diff,
-# from the repo's clone in the cache:
+# <state> is $XDG_STATE_HOME/whooper (default ~/.local/state/whooper), and for the PR's history and an
+# older run's diff, from the repo's clone in the cache, <cache>/repos/<owner>-<repo>, where <cache> is
+# $XDG_CACHE_HOME/whooper (default ~/.cache/whooper), in which git fetches nothing and writes nothing:
 #
 #   whooper-show <run-id> --json
 #
@@ -21,11 +22,10 @@
 #   drafts     what bin/whooper-draft <run-id> prints, or null for a review whose findings are null
 #   diff       diff.patch, the PR's change the review read. Reviews kept no diff.patch before
 #              whooper-review saved one, and for such a run git rebuilds the same diff from the repo's
-#              clone, <cache>/repos/<owner>-<repo>, where <cache> is $XDG_CACHE_HOME/whooper (default
-#              ~/.cache/whooper): git diff between the merge base and the head run.json records, with
-#              whooper-review's flags and the head's .gitattributes. It fetches nothing and writes
-#              nothing there, so diff is null when the clone lacks either commit or one of their
-#              files, without run.json, and for a review that waits, which has no merge base yet.
+#              clone: git diff between the merge base and the head run.json records, with
+#              whooper-review's flags and the head's .gitattributes. diff is null when the clone lacks
+#              either commit or one of their files, without run.json, and for a review that waits,
+#              which has no merge base yet.
 #   failure    failure.txt, the reason whooper-review gave when it stopped the review, or null
 #   asks       whooper-ask's answers, each asks/<n>.json, in number order
 #   submitted  submit.json once whooper-submit posted the review: the request and GitHub's response;
@@ -40,6 +40,17 @@
 #              diff.patch (README.md, "How a review run works"): summary, verdict_reason, before_after,
 #              places, layers, flow, checked, and not_checked; null when the findings are null or have
 #              none
+#   commits_since_review  the commits between head_sha and the PR's newest head that Whooper knows,
+#              the pr_head_sha of bin/whooper-status, newest first, each as {sha, title, author, at,
+#              files}, read from the clone, where a merge, such as of the base branch, is one commit
+#              with the files it brought; [] when the review read the newest head, and null when
+#              either head is unknown or the clone lacks either commit
+#   co_change  the files outside the PR that changed together with one of its files in at least 60% of
+#              that file's commits, and in at least 3, in the 90 days before the review started, read
+#              from the clone's history up to the merge base, merges left out: each as {path, partner,
+#              ratio, commits}, where partner is the PR's file, ratio the share of its commits, and
+#              commits how many; at most 5, highest ratio first, and [] without the diff, the merge
+#              base, or the clone
 #
 # A run ID that names no run directory gets "no run <run-id>" and exit 1. Prompting Time runs this
 # as the manifest's show-review action, whose fixed argument --json comes before the run ID; either

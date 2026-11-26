@@ -43,6 +43,7 @@ from the user's config file (config_path), never from this code. The bin/ script
   whooper.py show <data dir> <run-id>                                              -> whooper-show's JSON
   whooper.py settings get | set <json>                                             -> settings JSON | saves the given ones
 """
+from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import fcntl
@@ -587,21 +588,27 @@ def repo_clone(repo):
     return xdg_dir("XDG_CACHE_HOME", ".cache") / "repos" / repo.replace("/", "-")
 
 
+def read_clone(repo, *args):
+    """What git <args> prints in repo's clone (repo_clone), or None when git fails, as when the clone
+    lacks an object args need or does not exist. --no-lazy-fetch keeps git from fetching an object the
+    partial clone lacks, so this only reads the clone. As in diff.patch, a file in an encoding other
+    than UTF-8 leaves bytes that read as U+FFFD."""
+    git = subprocess.run(["git", "--git-dir", str(repo_clone(repo) / ".git"), "--no-lazy-fetch", *args],
+                         capture_output=True)
+    return git.stdout.decode(errors="replace") if git.returncode == 0 else None
+
+
 def rebuilt_diff(item):
     """The diff a review read, for a run from before whooper-review kept it as diff.patch: git diff
-    between the merge base and the head that item, the run's run.json, records, in the repo's clone,
-    with whooper-review's PLAIN_DIFF flags, or None without run.json or its merge base, as for a review
-    that waits, and when the clone lacks either commit or one of their files. The clone has no checkout, so git reads .gitattributes from the head
-    commit, which whooper-review's diff read from the head worktree: a file marked -diff shows as
-    binary. --no-lazy-fetch keeps git from fetching a file the partial clone lacks, so this only reads
-    the clone."""
+    between the merge base and the head that item, the run's run.json, records, in the repo's clone
+    (read_clone), with whooper-review's PLAIN_DIFF flags, or None without run.json or its merge base,
+    as for a review that waits, and when the clone lacks either commit or one of their files. The clone
+    has no checkout, so git reads .gitattributes from the head commit, which whooper-review's diff read
+    from the head worktree: a file marked -diff shows as binary."""
     if item is None or not item.get("merge_base"):
         return None
     base, head = item["merge_base"], item["head_sha"]
-    git = subprocess.run(["git", "--git-dir", str(repo_clone(item["repo"]) / ".git"), "--no-lazy-fetch",
-                          f"--attr-source={head}", "diff", *PLAIN_DIFF, base, head], capture_output=True)
-    # As in diff.patch, a file in an encoding other than UTF-8 leaves bytes that read as U+FFFD.
-    return git.stdout.decode(errors="replace") if git.returncode == 0 else None
+    return read_clone(item["repo"], f"--attr-source={head}", "diff", *PLAIN_DIFF, base, head)
 
 
 # A hunk header of a patch git diff wrote: the hunk's first line in the old file and how many lines it
@@ -690,6 +697,54 @@ def check_overview(overview, patch):
             raise ValueError(f"{path} is in {' and '.join(layers) or 'no layer'}")
 
 
+def clone_log(repo, *args):
+    """The commits git log <args> lists in repo's clone (read_clone), newest first, each as its sha,
+    title, author's name, time (local_time), and the files it changed, or None when git fails, as when
+    the clone lacks a commit args name. A rename lists as a delete and an add, since finding renames
+    takes file contents that a partial clone lacks."""
+    log = read_clone(repo, "log", "-z", "--no-renames", "--name-only", "--format=//%H%x00%s%x00%an%x00%at", *args)
+    if log is None:
+        return None
+    # -z ends each field and each file's path with a NUL, and puts a newline before a commit's first path.
+    # No path starts with /, so // marks where a commit starts, and its other fields come after it.
+    commits, fields = [], iter(log.split("\0"))
+    for field in fields:
+        if field.startswith("//"):
+            commits.append({"sha": field[2:], "title": next(fields), "author": next(fields),
+                            "at": local_time(int(next(fields))), "files": []})
+        elif field:
+            commits[-1]["files"].append(field.removeprefix("\n"))
+    return commits
+
+
+# whooper-show's co_change: a file outside the PR counts when it changed in at least CO_CHANGE_SHARE of
+# the commits of one of the PR's files in the CO_CHANGE_DAYS days before the review started, and in at
+# least CO_CHANGE_COMMITS of them; whooper-show lists at most CO_CHANGE_MAX.
+CO_CHANGE_DAYS, CO_CHANGE_SHARE, CO_CHANGE_COMMITS, CO_CHANGE_MAX = 90, 0.6, 3, 5
+
+
+def co_change(commits, paths):
+    """The files outside paths, the PR's files, that changed together with one of them in commits, the
+    set of files each commit changed: each with the PR's file it changed with most (partner), the share
+    of that file's commits it changed in too (ratio), and in how many (commits). A file counts from a
+    ratio of CO_CHANGE_SHARE and CO_CHANGE_COMMITS commits; at most CO_CHANGE_MAX of them, highest ratio
+    first, then most commits, then by path."""
+    changes, together = Counter(), Counter()
+    for files in commits:
+        for partner in files & paths:
+            changes[partner] += 1
+            for path in files - paths:
+                together[path, partner] += 1
+    rows = [{"path": path, "partner": partner, "ratio": n / changes[partner], "commits": n}
+            for (path, partner), n in together.items()]
+    best = {}
+    # In this order each file's first row is its best, and the files come as whooper-show lists them.
+    for row in sorted(rows, key=lambda row: (-row["ratio"], -row["commits"], row["path"], row["partner"])):
+        if row["commits"] >= CO_CHANGE_COMMITS and row["ratio"] >= CO_CHANGE_SHARE:
+            best.setdefault(row["path"], row)
+    return list(best.values())[:CO_CHANGE_MAX]
+
+
 def show_review(data, run_id):
     """One review run for Prompting Time's review screen, as whooper-show --json prints it:
     run.json, the outcome, the findings, whether it is safe to approve, and the posted review as
@@ -697,11 +752,15 @@ def show_review(data, run_id):
     which only a review whose findings fit has, diff.patch, or for a run from before reviews kept it,
     the diff rebuilt_diff rebuilds, failure.txt, and whooper-ask's answers. The overview the run wrote
     in findings.json, which whooper-review checked (check_overview), comes on its own, not in the
-    findings. Refuses a run ID that names no run directory."""
-    run = data / "runs" / run_id
+    findings. From the repo's clone, without fetching (clone_log): the commits between the head the
+    review read and the PR's newest head Whooper knows (pr_head), and the files that changed together
+    with the PR's in the CO_CHANGE_DAYS days before the review started, in the history the PR's merge
+    base ends (co_change). Refuses a run ID that names no run directory."""
+    run, parsed = data / "runs" / run_id, parse_run_id(run_id)
     # A run ID names a directory right under runs, so a path such as ../x reads nothing outside it.
-    if parse_run_id(run_id) is None or not run.is_dir():
+    if parsed is None or not run.is_dir():
         raise SystemExit(f"whooper-show: no run {run_id} in {data / 'runs'}")
+    started, pr = parsed
     item, outcome, result, submit, cause, skipped, removed, safe = read_review(run, running_runs(data))
     title, author = read_title_and_author(run)
 
@@ -714,6 +773,22 @@ def show_review(data, run_id):
             return None
 
     diff = text("diff.patch")
+    if diff is None:
+        diff = rebuilt_diff(item)
+    repo = item["repo"] if item else None
+    head = item.get("head_sha") if item and isinstance(item.get("head_sha"), str) else None
+    newest = pr_head(data, polled_heads(data), repo, pr) if repo else None
+    if head is None or newest is None:
+        since = None
+    elif newest == head:
+        since = []
+    else:
+        # A merge, such as of the base branch into the PR, lists as one commit, with the files it brought.
+        since = clone_log(repo, "--first-parent", f"{head}..{newest}")
+    # The PR's files, by their paths in the head and at the merge base, so a renamed file's history counts.
+    paths = {path for new, old, _ in diff_files(diff or "") for path in (new, old) if path}
+    history = (clone_log(repo, f"--since={(started - timedelta(days=CO_CHANGE_DAYS)).isoformat()}", "--no-merges",
+                         item["merge_base"]) if paths and item and item.get("merge_base") else None)
     return {
         "version": 1,
         "run_id": run_id,
@@ -724,15 +799,17 @@ def show_review(data, run_id):
         "findings": {key: value for key, value in result.items() if key != "overview"} if result else None,
         "safe_to_approve": safe,
         "drafts": read_drafts(run) if result else None,
-        "diff": diff if diff is not None else rebuilt_diff(item),
+        "diff": diff,
         "failure": text("failure.txt"),
         "asks": [json.loads(path.read_text()) for path in ask_files(run)],
         "submitted": submit,
         "cause": cause,
-        "head_sha": item.get("head_sha") if item and isinstance(item.get("head_sha"), str) else None,
+        "head_sha": head,
         "skipped_by_user": skipped,
         "removed_by_user": removed,
         "overview": result.get("overview") if result else None,
+        "commits_since_review": since,
+        "co_change": co_change([set(commit["files"]) for commit in history or []], paths),
     }
 
 
