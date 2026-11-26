@@ -1045,9 +1045,10 @@ ASK_RECORD = {
     "submit.json": "the review the user submitted to GitHub",
     "summary.md": "Whooper's summary of the review",
 }
-# The files an ask run's prompt also lists for a review that did not finish, and so left no
-# findings.json: its agent's output, which may say why, and the findings whooper-review set aside
-# because they did not fit the schema. Only a Devin review leaves stdout.log.
+# The files an ask run's prompt also lists for a review that did not finish, one that left no
+# findings.json Whooper can read: its agent's output, which may say why, and the findings
+# whooper-review set aside because they did not fit the schema. Only a Devin review leaves
+# stdout.log.
 ASK_FAILURE_RECORD = {
     "stderr.log": "the error output of the review's agent, which may say why the review did not finish",
     "stdout.log": "the rest of the review agent's output",
@@ -1061,7 +1062,17 @@ def ask_facts(run_dir, question, finding_id=None):
     for a review that did not finish, its agent's output and the findings that did not fit the schema
     too; the finding the question is about when finding_id names one; and the question. None of it
     goes through fill, so braces in the question stay as written."""
-    finished = (run_dir / "findings.json").exists()
+    # whooper-review leaves findings.json as the run wrote it when it stops the review before its
+    # schema check, such as at the time limit or for an empty file, so the review finished only when
+    # the file holds findings Whooper can read, even an empty list of them. findings stays empty
+    # without the file, and is None for a file Whooper cannot read as findings.
+    findings, finished = {}, False
+    if (run_dir / "findings.json").exists():
+        try:
+            findings = {f["id"]: f for f in json.loads((run_dir / "findings.json").read_text())["findings"]}
+            finished = True
+        except (ValueError, KeyError, TypeError):
+            findings = None
     record = ASK_RECORD if finished else {**ASK_RECORD, **ASK_FAILURE_RECORD}
     lines = ["", "", "## The review's record", "", f"The review's run directory is {run_dir}. You may read these files:", ""]
     lines += [f"- {run_dir / name}: {what}" for name, what in record.items() if (run_dir / name).exists()]
@@ -1070,12 +1081,7 @@ def ask_facts(run_dir, question, finding_id=None):
     asks = sorted((p for p in (run_dir / "asks").glob("*.json") if p.stem.isdigit()), key=lambda p: int(p.stem))
     lines += [f"- {p}: an earlier question about this review, with its answer" for p in asks]
     if finding_id is not None:
-        # A review whooper-review stopped before its schema check, such as at the time limit or for an
-        # empty file, leaves findings.json as the run wrote it.
-        try:
-            findings = ({f["id"]: f for f in json.loads((run_dir / "findings.json").read_text())["findings"]}
-                        if finished else {})
-        except (ValueError, KeyError, TypeError):
+        if findings is None:
             raise SystemExit(f"whooper-ask: the run has no finding {finding_id}; its findings.json holds no"
                              " findings Whooper can read")
         if finding_id not in findings:

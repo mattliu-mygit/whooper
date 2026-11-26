@@ -167,15 +167,18 @@ submitted, so a review never posts twice.
 run, such as "Why is it bad to have invisible characters?", or "Why did this review fail?" about one
 that did not finish, and prints the answer. Prompting Time's "Ask about this" runs it with the
 finding. A new run of the agent that did the review answers, with the review's skills, since Whooper
-ends each review's session. Its prompt, `prompts/ask.md` filled in, names the question, the finding,
-and the path of each file of the review's record the run directory has: first `failure.txt`, the
-reason whooper-review gave when it stopped the review, then `log.md`, `findings.json`,
-`diff.patch`, the transcript, `github.json`, `run.json`, `prompt.md`, `verdicts.json`, `post.json`,
-`drafts.json`, `submit.json`, `summary.md`, and earlier asks. For a review that did not finish,
-which left no `findings.json`, it also names the review agent's `stderr.log` and `stdout.log`, which
-may say why, and `findings.invalid.json`, the findings that did not fit the schema. The PR's code is
-gone by then, since whooper-review removes the worktrees, so the run answers from the record, where
-`diff.patch` holds the PR's change. [Approvals](#approvals) says what the run may do.
+ends each review's session. A review whooper-review stopped before it wrote `run.json`, such as
+when the fetch failed, recorded no agent, so the agent `[jobs] review` names answers about it. Its
+prompt, `prompts/ask.md` filled in, names the question, the finding, and the path of each file of
+the review's record the run directory has: first `failure.txt`, the reason whooper-review gave when
+it stopped the review, then `log.md`, `findings.json`, `diff.patch`, the transcript, `github.json`,
+`run.json`, `prompt.md`, `verdicts.json`, `post.json`, `drafts.json`, `submit.json`, `summary.md`,
+and earlier asks. For a review that did not finish, whose `findings.json` is missing or holds no
+findings Whooper can read, such as an empty file, it also names the review agent's `stderr.log` and
+`stdout.log`, which may say why, and `findings.invalid.json`, the findings that did not fit the
+schema. The PR's code is gone by then, since whooper-review removes the worktrees, so the run
+answers from the record, where `diff.patch` holds the PR's change. [Approvals](#approvals) says what
+the run may do.
 
 whooper-ask refuses a review that is still running, and says so: one whose whooper-review holds the
 PR's lock with the run's ID in it. A lock whose process is gone, as after a `kill -9`, does not

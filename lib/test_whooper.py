@@ -2427,6 +2427,46 @@ class AskTest(unittest.TestCase):
         self.assertEqual(no_finding.returncode, 1)
         self.assertIn("has no finding 1; its findings are none", no_finding.stderr)
 
+    def test_a_review_stopped_before_it_wrote_run_json_is_asked_about_on_the_configs_review_agent(self):
+        stopped = self.run.parent / "20310727T020000Z-12"
+        # While whooper-review fetches, the run directory has neither run.json nor failure.txt.
+        stopped.mkdir()
+        fetching = self.ask(stopped.name, "Why did this review fail?")
+        self.assertEqual(fetching.returncode, 1)
+        self.assertIn(f"no run {stopped.name}", fetching.stderr)
+        # The fetch failed, so whooper-review saved why before it wrote run.json, and no agent ran.
+        # The agent the config's [jobs] review names answers: Devin, whose fake writes the answer.
+        (stopped / "failure.txt").write_text(
+            "the review stopped at an unexpected error; see whooper-review's error output\n")
+        config = Path(self.tmp.name) / "config.toml"
+        config.write_text(CONFIG.replace('review = "claude"', 'review = "devin"'))
+        fake(self.fakes / "devin", 'cp "${0%/*}/answer" answer.md')
+        (self.fakes / "answer").write_text("The fetch failed before the review started.\n")
+        # A home of its own keeps the user's Devin config out of the run.
+        result = self.ask(stopped.name, "Why did this review fail?",
+                          env={"WHOOPER_CONFIG": str(config), "HOME": str(Path(self.tmp.name) / "home")})
+        self.assertEqual((result.returncode, result.stdout), (0, "The fetch failed before the review started.\n"),
+                         result.stderr)
+        self.assertEqual(json.loads((stopped / "asks" / "1.json").read_text())["agent"], "devin")
+        prompt = (stopped / "asks" / "1.prompt.md").read_text()
+        listed = [line for line in prompt.splitlines() if line.startswith(f"- {stopped}/")]
+        self.assertTrue(listed[0].startswith(f"- {stopped / 'failure.txt'}: "), listed)
+
+    def test_a_findings_json_without_findings_whooper_can_read_counts_as_a_review_that_did_not_finish(self):
+        # whooper-review leaves findings.json as the run wrote it when it stops the review before its
+        # schema check, such as at the time limit or for an empty file. The prompt then lists what may
+        # say why, as for any review that did not finish.
+        (self.run / "findings.invalid.json").write_text("{}")
+        for name, content in [("empty", ""), ("not JSON", '{"status": "revi'), ("no list of findings", "{}")]:
+            with self.subTest(name):
+                (self.run / "findings.json").write_text(content)
+                prompt = self.prompt("claude", str(self.run), "Why did this review fail?")
+                for record in ["stderr.log", "findings.invalid.json"]:
+                    self.assertIn(f"{self.run / record}: ", prompt)
+        # An empty list of findings is a finished review that found nothing.
+        (self.run / "findings.json").write_text(json.dumps({"findings": []}))
+        self.assertNotIn(f"{self.run / 'stderr.log'}: ", self.prompt("claude", str(self.run), self.QUESTION))
+
     def test_saves_each_answer_numbered_in_order(self):
         asks = self.run / "asks"
         before = datetime.now(timezone.utc).replace(microsecond=0)
