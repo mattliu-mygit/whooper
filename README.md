@@ -118,7 +118,18 @@ failure it prints why and leaves the file as it was. A change applies from the n
 `bin/whooper-status --json` lists, as `reviews`, the review runs in `<state>/runs` that started in
 the last 30 days, newest first: each one's PR, title, and times, how it went, its verdict and number
 of findings, what whooper-submit posted, and whether it needs you. Prompting Time builds its "Needs
-you" list and its history of past reviews from them. whooper-status's header lists each field.
+you" list and its history of past reviews from them.
+
+```sh
+bin/whooper-show <run-id> --json   # one review in full, for its review screen
+```
+
+whooper-show prints the run's `run.json`, its outcome, `findings.json`, the drafts whooper-draft
+prints for it, `diff.patch`, `failure.txt`, each of whooper-ask's answers in number order, and the
+review whooper-submit posted. It reads files only, the run directory and the review locks, and
+refuses a run ID that names no run directory. Prompting Time runs it as the manifest's `show-review`
+action, which puts `--json` before the run ID; either order works. The headers of both commands list
+each field.
 
 A review's outcome is `running` while a live whooper-review holds the PR's lock for the run, the
 rule whooper-ask follows; `reviewed` once the review left findings that fit `schemas/findings.json`
@@ -128,11 +139,11 @@ was whole, such as when its fetch failed, and in a review's first seconds, befor
 file; the PR number and start come from the run ID. A review needs you once it ends, reviewed or
 failed, until whooper-submit posts it. A `submit.json` that still says `posting` does not count as
 posted, since its review may or may not be on GitHub; whooper-submit then asks you to check the PR.
-The verdict and the findings come only from findings that fit the schema, and none while the review
-runs, since a Devin review writes `findings.json` itself and may still change it. Nothing records
-when a review ended, so its end is when whooper-review saved `failure.txt`, or else when the run
-wrote `findings.json`, and a posted review's time is when whooper-submit wrote GitHub's answer to
-`submit.json`.
+The verdict, the findings, and the drafts come only from findings that fit the schema, and none
+while the review runs, since a Devin review writes `findings.json` itself and may still change it.
+Nothing records when a review ended, so its end is when whooper-review saved `failure.txt`, or else
+when the run wrote `findings.json`, and a posted review's time is when whooper-submit wrote GitHub's
+answer to `submit.json`.
 
 ## Submit a review
 
@@ -235,7 +246,8 @@ shared UI library, `@prompting-time/ui`. Prompting Time shows it in an iframe sa
 only, so the page reaches nothing but its host: it sends Prompting Time the messages in
 `page/src/protocol.ts`, which also says which Whooper command each one runs, and Prompting Time
 confirms a submit before `whooper-submit` posts. Prompting Time builds the queue from the reviews
-whooper-status lists ([See reviews](#see-reviews)).
+whooper-status lists, and whooper-show prints the review a screen opens
+([See reviews](#see-reviews)).
 
 The page needs Node 22.12 or later. In `page/`:
 
@@ -408,7 +420,7 @@ run's `drafts.json`, `submit-request.json`, and `submit.json` the same way, whoo
   the listed head is done or has failed 3 times.
 - `locks/<owner>-<repo>-<pr>/`: the lock of the review that holds the PR, with its process ID in
   `pid` and its run ID in `run_id`. A lock whose process is gone is stale: the next review takes
-  it, and whooper-ask and whooper-status no longer count its review as running.
+  it, and whooper-ask, whooper-status, and whooper-show no longer count its review as running.
 - `run.lock/`: the running whooper-run's lock, with its process ID in `pid`. A lock whose process is
   gone, or is now some other program, is stale, and the next whooper-run takes it over.
 - `next-round`: the Unix time of the round whooper-run waits for, written before each wait and

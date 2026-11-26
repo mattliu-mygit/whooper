@@ -1983,6 +1983,11 @@ class RunTest(unittest.TestCase):
         self.assertIn("\n+two\n", diff)
         self.assertIn("Binary files a/generated.txt and b/generated.txt differ", diff)
         self.assertFalse((run / "head").exists() or (run / "base").exists())
+        # A past review shows the diff it kept.
+        shown = self.command("whooper-show", run.name, "--json")
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertEqual({key: json.loads(shown.stdout)[key] for key in ["outcome", "diff"]},
+                         {"outcome": "reviewed", "diff": diff})
 
     def test_the_kept_diff_is_a_plain_patch_whatever_the_git_config_says(self):
         env, item, merge_base = self.pull_request()
@@ -2769,9 +2774,10 @@ class AskLauncherTest(unittest.TestCase):
 
 
 class ReviewsTest(unittest.TestCase):
-    """The reviews bin/whooper-status --json lists, read from review runs of example-org/example-repo in
-    a throwaway state folder, with times in Los Angeles. It reads files only, and gh, slackdump, claude,
-    and devin are fakes that fail, so no test can reach GitHub, Slack, or a model."""
+    """The reviews bin/whooper-status --json lists and the review bin/whooper-show --json prints, read
+    from review runs of example-org/example-repo in a throwaway state folder, with times in Los
+    Angeles. Both read files only, and gh, slackdump, claude, and devin are fakes that fail, so no test
+    can reach GitHub, Slack, or a model."""
 
     LA = ZoneInfo("America/Los_Angeles")
     TITLE = "Return 422 for bad order JSON"
@@ -2793,7 +2799,8 @@ class ReviewsTest(unittest.TestCase):
         self.now = datetime.now(timezone.utc).replace(microsecond=0)
 
     def local(self, when):
-        """A time as whooper-status prints it here: in Los Angeles, in ISO 8601 with the offset."""
+        """A time as whooper-status and whooper-show print it here: in Los Angeles, in ISO 8601 with the
+        offset."""
         return when.astimezone(self.LA).isoformat(timespec="seconds")
 
     def started(self, run):
@@ -2865,6 +2872,16 @@ class ReviewsTest(unittest.TestCase):
                 "ended_at": self.local(started + timedelta(minutes=20)), "outcome": "reviewed",
                 "verdict": "look_first", "skipped": False, "findings": 0, "submitted": None, "needs_you": True,
                 **fields}
+
+    def show(self, *args):
+        return subprocess.run([str(ROOT / "bin" / "whooper-show"), *args], env=self.env, capture_output=True,
+                              text=True, timeout=60)
+
+    def shown(self, run):
+        """What whooper-show prints for the run."""
+        result = self.show(run.name, "--json")
+        self.assertEqual((result.returncode, result.stderr), (0, ""))
+        return json.loads(result.stdout)
 
     def test_status_lists_the_reviews_of_the_last_30_days_newest_first(self):
         reviewed = self.make_run(timedelta(hours=1))
@@ -2964,6 +2981,109 @@ class ReviewsTest(unittest.TestCase):
             self.review(empty, **failed, ended_at=self.local(self.started(empty) + timedelta(minutes=21))),
             self.review(unfit, **failed),
         ])
+
+    def test_show_prints_a_finished_review(self):
+        run = self.make_run(timedelta(hours=1))
+        self.finish(run, findings=[finding(), self.NIT])
+        shown = self.shown(run)
+        self.assertEqual(shown, {
+            "version": 1, "run_id": run.name, "run": json.loads((run / "run.json").read_text()),
+            "outcome": "reviewed", "findings": self.findings(findings=[finding(), self.NIT]),
+            # The run is not safe to approve, so until the user changes anything the review only comments
+            # and includes nothing.
+            "drafts": {"event": "COMMENT", "message": "", "findings": {}},
+            "diff": self.DIFF, "failure": None, "asks": [], "submitted": None,
+        })
+        drafts = subprocess.run([str(ROOT / "bin" / "whooper-draft"), run.name], env=self.env, capture_output=True,
+                                text=True, timeout=60)
+        self.assertEqual(json.loads(drafts.stdout), shown["drafts"])
+        # Prompting Time runs the manifest's show-review action with the run ID after its fixed arguments.
+        [action] = [a for a in json.loads((ROOT / "prompting-time-plugin.json").read_text())["actions"]
+                    if a["name"] == "show-review"]
+        command = action["command"]
+        result = subprocess.run([str(ROOT / command[0]), *command[1:], run.name], env=self.env, capture_output=True,
+                                text=True, timeout=60)
+        self.assertEqual((result.returncode, json.loads(result.stdout)), (0, shown), result.stderr)
+
+    def test_show_prints_a_review_that_failed_or_still_runs(self):
+        failed = self.make_run(timedelta(hours=1))
+        self.fetched(failed)
+        reason = f"the review run passed its 45-minute limit; see {failed}/stderr.log and the transcript in {failed}\n"
+        self.write(failed, "failure.txt", reason, 45)
+        nothing = {"version": 1, "findings": None, "drafts": None, "asks": [], "submitted": None}
+        self.assertEqual(self.shown(failed), {
+            **nothing, "run_id": failed.name, "run": json.loads((failed / "run.json").read_text()),
+            "outcome": "failed", "diff": self.DIFF, "failure": reason,
+        })
+        # A Devin review that wrote findings that fit before its time limit has them and whooper-draft's
+        # drafts, though it failed.
+        self.write(failed, "findings.json", self.findings(findings=[finding()]), 40)
+        self.assertEqual({key: self.shown(failed)[key] for key in ["outcome", "findings", "drafts", "failure"]},
+                         {"outcome": "failed", "findings": self.findings(findings=[finding()]),
+                          "drafts": {"event": "COMMENT", "message": "", "findings": {}}, "failure": reason})
+        # whooper-review stopped this review before it wrote run.json.
+        stopped = self.make_run(timedelta(hours=2), pr=13, run_json=False)
+        self.write(stopped, "failure.txt", "the review stopped at an unexpected error\n", 1)
+        self.assertEqual(self.shown(stopped), {
+            **nothing, "run_id": stopped.name, "run": None, "outcome": "failed", "diff": None,
+            "failure": "the review stopped at an unexpected error\n",
+        })
+        # A Devin review that is still running may still change the findings.json it wrote, so it shows
+        # no findings yet.
+        running = self.make_run(timedelta(minutes=5), pr=14)
+        self.fetched(running)
+        self.write(running, "findings.json", self.findings(findings=[finding()]), 4)
+        self.hold(running, os.getpid())
+        self.assertEqual(self.shown(running), {
+            **nothing, "run_id": running.name, "run": json.loads((running / "run.json").read_text()),
+            "outcome": "running", "diff": self.DIFF, "failure": None,
+        })
+
+    def test_show_prints_the_drafts_and_the_review_whooper_submit_posted(self):
+        run = self.make_run(timedelta(hours=1))
+        self.finish(run, "approve_once_ci_passes", [self.NIT])
+        drafts = {"event": "APPROVE", "message": "Thanks!",
+                  "findings": {"2": {"included": True, "text": "**nit:** --quick"}}}
+        self.write(run, "drafts.json", drafts, 25)
+        # A submit stopped while gh posted leaves submit.json saying posting, which does not count as
+        # submitted, as in whooper-status.
+        self.write(run, "submit.json", {"status": "posting", "request": self.REQUEST}, 30)
+        self.assertEqual({key: self.shown(run)[key] for key in ["outcome", "drafts", "submitted"]},
+                         {"outcome": "reviewed", "drafts": drafts, "submitted": None})
+        posted = {"status": "posted", "request": self.REQUEST, "response": {
+            "id": 7001, "html_url": "https://github.com/example-org/example-repo/pull/12#pullrequestreview-7001"}}
+        self.write(run, "submit.json", posted, 31)
+        self.assertEqual({key: self.shown(run)[key] for key in ["outcome", "drafts", "submitted"]},
+                         {"outcome": "reviewed", "drafts": drafts, "submitted": posted})
+
+    def test_show_lists_the_asks_in_number_order(self):
+        run = self.make_run(timedelta(hours=1))
+        self.finish(run, findings=[finding()])
+        asks = {n: {"question": f"Question {n}?", "finding": "1" if n == 2 else None, "answer": f"Answer {n}.",
+                    "agent": "claude", "started_at": "2031-07-27T02:00:00Z", "ended_at": "2031-07-27T02:01:00Z",
+                    "transcript": str(run / "asks" / f"{n}.transcript.jsonl")} for n in (2, 10, 1)}
+        for n, ask in asks.items():
+            self.write(run, f"asks/{n}.json", ask, 30 + n)
+        # Beside the answers: each ask's prompt and transcript, a Devin ask's config, an answer being
+        # written, and the prompt of an ask that failed and saved no answer.
+        for name in ["1.prompt.md", "1.transcript.jsonl", "10.devin-config.json", "11.json.tmp", "3.prompt.md"]:
+            (run / "asks" / name).write_text("{}")
+        self.assertEqual(self.shown(run)["asks"], [asks[1], asks[2], asks[10]])
+
+    def test_show_refuses_an_unknown_run(self):
+        run = self.make_run(timedelta(hours=1))
+        self.finish(run)
+        # A run ID names a folder right under runs/, so a path reads nothing outside it.
+        for run_id in ["20310101T000000Z-1", "..", "../whooper", f"../runs/{run.name}"]:
+            with self.subTest(run_id):
+                result = self.show(run_id, "--json")
+                self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                 (1, "", f"whooper-show: no run {run_id} in {self.state / 'runs'}\n"))
+        for args in [[], ["--json"], [run.name], [run.name, run.name, "--json"]]:
+            with self.subTest(args=args):
+                result = self.show(*args)
+                self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                 (1, "", "usage: whooper-show <run-id> --json\n"))
 
 
 class SettingsTest(unittest.TestCase):

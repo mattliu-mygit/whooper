@@ -32,6 +32,7 @@ from the user's config file (config_path), never from this code. The bin/ script
   whooper.py skills <skills dir>                                                   -> {skill: content hash}
   whooper.py next-round [<Unix time the last round ended>]                         -> the next round's Unix time
   whooper.py status <data dir>                                                     -> whooper-status's JSON
+  whooper.py show <data dir> <run-id>                                              -> whooper-show's JSON
   whooper.py settings get | set <json>                                             -> settings JSON | saves the given ones
 """
 from datetime import datetime, timedelta, timezone
@@ -170,7 +171,7 @@ def next_round(schedule, earliest):
 
 
 def local_time(unix):
-    """A Unix time as whooper-status prints times: local, in ISO 8601 with the offset."""
+    """A Unix time as whooper-status and whooper-show print times: local, in ISO 8601 with the offset."""
     return datetime.fromtimestamp(unix, timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
@@ -262,11 +263,11 @@ def read_object(path):
 
 
 def read_review(run, running):
-    """How the review in the run directory run went, as whooper-status reports it: run.json's work
-    item, the outcome, the findings, and the review whooper-submit posted. running holds the IDs of
-    the runs a live whooper-review still runs (running_runs). A file that is missing, empty, cut
-    short, or does not fit reads as None, so a run directory Whooper cannot read gives a failed
-    review rather than an error.
+    """How the review in the run directory run went, as whooper-status and whooper-show report it:
+    run.json's work item, the outcome, the findings, and the review whooper-submit posted. running
+    holds the IDs of the runs a live whooper-review still runs (running_runs). A file that is
+    missing, empty, cut short, or does not fit reads as None, so a run directory Whooper cannot read
+    gives a failed review rather than an error.
 
     The outcome is running while a live whooper-review runs the review; reviewed once the review ended
     with findings that fit FINDINGS_SCHEMA and without failure.txt, the reason whooper-review saves
@@ -335,6 +336,39 @@ def read_reviews(data, now):
             "needs_you": outcome != "running" and submit is None,
         })
     return reviews
+
+
+def show_review(data, run_id):
+    """One review run for Prompting Time's review screen, as whooper-show --json prints it:
+    run.json, the outcome, the findings, and the posted review as read_review reads them, the drafts
+    whooper-draft prints, which only a review whose findings fit has, diff.patch, failure.txt, and
+    whooper-ask's answers. Refuses a run ID that names no run directory."""
+    run = data / "runs" / run_id
+    # A run ID names a directory right under runs, so a path such as ../x reads nothing outside it.
+    if parse_run_id(run_id) is None or not run.is_dir():
+        raise SystemExit(f"whooper-show: no run {run_id} in {data / 'runs'}")
+    item, outcome, result, submit = read_review(run, running_runs(data))
+
+    def text(name):
+        # git copies a file's bytes into diff.patch as they are, so a file in an encoding other than
+        # UTF-8 leaves bytes that do not decode, which read as U+FFFD.
+        try:
+            return (run / name).read_text(errors="replace")
+        except FileNotFoundError:
+            return None
+
+    return {
+        "version": 1,
+        "run_id": run_id,
+        "run": item,
+        "outcome": outcome,
+        "findings": result,
+        "drafts": read_drafts(run) if result else None,
+        "diff": text("diff.patch"),
+        "failure": text("failure.txt"),
+        "asks": [json.loads(path.read_text()) for path in ask_files(run)],
+        "submitted": submit,
+    }
 
 
 def pr_link(orgs):
@@ -1226,6 +1260,12 @@ ASK_FAILURE_RECORD = {
 }
 
 
+def ask_files(run_dir):
+    """whooper-ask's saved answers about the review in run_dir, asks/1.json, asks/2.json, and so on, in
+    number order. A Devin ask's config sits beside them as asks/<n>.devin-config.json."""
+    return sorted((p for p in (run_dir / "asks").glob("*.json") if p.stem.isdigit()), key=lambda p: int(p.stem))
+
+
 def ask_facts(run_dir, question, finding_id=None):
     """The end of the prompt of a run that answers question about the review in run_dir: the files of
     the review's record it may read, each with its path, earlier asks about the review among them, and
@@ -1244,10 +1284,7 @@ def ask_facts(run_dir, question, finding_id=None):
         record = {name: what for name, what in record.items() if name != "run.json"}
     lines = ["", "", "## The review's record", "", f"The review's run directory is {run_dir}. You may read these files:", ""]
     lines += [f"- {run_dir / name}: {what}" for name, what in record.items() if (run_dir / name).exists()]
-    # bin/whooper-ask numbers its answers asks/1.json, asks/2.json, and so on; a Devin ask's config
-    # sits beside them as asks/<n>.devin-config.json.
-    asks = sorted((p for p in (run_dir / "asks").glob("*.json") if p.stem.isdigit()), key=lambda p: int(p.stem))
-    lines += [f"- {p}: an earlier question about this review, with its answer" for p in asks]
+    lines += [f"- {p}: an earlier question about this review, with its answer" for p in ask_files(run_dir)]
     if finding_id is not None:
         if not finished and (run_dir / "findings.json").exists():
             raise SystemExit(f"whooper-ask: the run has no finding {finding_id}; its findings.json holds no"
@@ -1566,6 +1603,8 @@ def main(command, *args):
         print(int(when.timestamp()))
     elif command == "status":
         print(json.dumps(read_status(Path(args[0])), indent=2))
+    elif command == "show":
+        print(json.dumps(show_review(Path(args[0]), args[1]), indent=2))
     else:
         raise SystemExit(f"whooper.py: unknown command {command!r}")
 

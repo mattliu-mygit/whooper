@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Prints one review run as one JSON object, for Prompting Time's review screen and its history of
+# past reviews, read from the run's directory, <state>/runs/<run-id>/, with no network calls, where
+# <state> is $XDG_STATE_HOME/whooper (default ~/.local/state/whooper):
+#
+#   whooper-show <run-id> --json
+#
+#   version    1, the number of this format
+#   run_id     the run's ID
+#   run        run.json, the work item with the run's own fields, or null when it cannot be read, as
+#              when whooper-review stopped before it wrote the file
+#   outcome    running, reviewed, or failed, by the rule bin/whooper-status's reviews follow
+#   findings   findings.json, or null while the review runs and when the file is missing or does not
+#              fit schemas/findings.json
+#   drafts     what bin/whooper-draft <run-id> prints, or null for a review whose findings are null
+#   diff       diff.patch, the PR's change the review read, or null
+#   failure    failure.txt, the reason whooper-review gave when it stopped the review, or null
+#   asks       whooper-ask's answers, each asks/<n>.json, in number order
+#   submitted  submit.json once whooper-submit posted the review: the request and GitHub's response;
+#              null before, and while the file says posting
+#
+# A run ID that names no run directory gets "no run <run-id>" and exit 1. Prompting Time runs this
+# as the manifest's show-review action, whose fixed argument --json comes before the run ID; either
+# order works.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+usage="usage: whooper-show <run-id> --json"
+run_id="" json=false
+while (($#)); do
+  case "$1" in
+    --json) json=true ;;
+    *)
+      [[ -z "$run_id" ]] || { echo "$usage" >&2; exit 1; }
+      run_id="$1"
+      ;;
+  esac
+  shift
+done
+[[ -n "$run_id" && "$json" == true ]] || { echo "$usage" >&2; exit 1; }
+eval "$("$root/lib/python" "$root/lib/whooper.py" env)"
+exec "$root/lib/python" "$root/lib/whooper.py" show "$WHOOPER_STATE" "$run_id"

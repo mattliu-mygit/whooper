@@ -38,7 +38,8 @@
 #                 its review may or may not be on GitHub
 #     needs_you   true for a review that ended, reviewed or failed, and is not submitted
 #
-# Times are local, in ISO 8601 with the offset.
+# Times are local, in ISO 8601 with the offset. bin/whooper-show <run-id> --json prints one review
+# in full.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
