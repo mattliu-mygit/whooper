@@ -231,6 +231,16 @@ beside this one, `../../repos/prompting-time-ui/packages/ui` from `page/`, which
 it then switches to a pinned npm version. Versions are exact and resolved as of `.npmrc`'s `before`
 date, at least a week before they were pinned, and no install script runs.
 
+### Releases
+
+The repo tracks no build output. Pushing a version tag, `v` and the manifest's version, runs
+`.github/workflows/release.yml`, which builds the release archive with `scripts/build-release` and
+attaches it and its SHA-256 to the tag's GitHub release; Prompting Time installs that archive,
+pinned by the tag and the checksum. `scripts/build-release [<tag>]` builds the same archive locally:
+`release/whooper-<version>.tar.gz`, HEAD's files plus `page/dist`, and its `.sha256`. Until
+`@prompting-time/ui` is on npm, the workflow stops at its first check, since the runner has no
+Prompting Time checkout to install it from.
+
 ## What counts as work
 
 `lib/whooper.py` applies the rules. `prompts/poll.md` is the only judgment, and it covers Slack

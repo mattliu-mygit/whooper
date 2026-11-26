@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Builds Whooper's release archive, which Prompting Time installs, pinned by its tag and SHA-256, so
+# the user's Mac needs no Node:
+#
+#   scripts/build-release [<tag>]
+#
+# It writes release/whooper-<version>.tar.gz, where <version> is prompting-time-plugin.json's, and
+# release/whooper-<version>.tar.gz.sha256 beside it, as shasum -a 256 prints it. The archive holds
+# one folder, whooper-<version>/: the files HEAD tracks, as git archive writes them, and page/dist,
+# which npm ci and npm run build make from page/. page/ must have no changes git sees, so the built
+# page is HEAD's. With a tag, as .github/workflows/release.yml passes it, the tag must be v<version>.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$root"
+version="$(jq -r .version prompting-time-plugin.json)"
+entry="$(jq -r .page.entry prompting-time-plugin.json)"
+if (($# > 0)) && [[ "$1" != "v$version" ]]; then
+  echo "build-release: the tag $1 is not v$version, the version in prompting-time-plugin.json" >&2
+  exit 1
+fi
+if [[ -n "$(git status --porcelain -- page)" ]]; then
+  echo "build-release: page/ has changes git sees, and the archive holds HEAD's page; commit or stash them" >&2
+  exit 1
+fi
+(cd page && npm ci --no-audit --no-fund && npm run build)
+[[ -f "$entry" ]] || { echo "build-release: the build left no $entry, the page prompting-time-plugin.json names" >&2; exit 1; }
+
+name="whooper-$version"
+stage="$(mktemp -d)"
+trap 'rm -rf "$stage"' EXIT
+git archive --format=tar --prefix="$name/" HEAD | tar -x -C "$stage"
+cp -R page/dist "$stage/$name/page/dist"
+mkdir -p release
+# COPYFILE_DISABLE keeps macOS's tar from adding ._ files for extended attributes.
+COPYFILE_DISABLE=1 tar -czf "release/$name.tar.gz" -C "$stage" "$name"
+(cd release && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+echo "release/$name.tar.gz"
+echo "release/$name.tar.gz.sha256"

@@ -1,0 +1,44 @@
+# When a version tag such as v0.1.0 is pushed, builds Whooper's release archive, the repo plus the
+# built page, with scripts/build-release, and attaches it and its SHA-256 to the tag's GitHub
+# release, which Prompting Time installs from. The repo tracks no build output.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24.12.0
+
+      # Until @prompting-time/ui's first npm release, the page installs it from a Prompting Time
+      # checkout, which this runner does not have.
+      - name: Check that the page's packages come from npm
+        run: |
+          jq -e '[.dependencies[], .devDependencies[]] | all(startswith("file:") | not)' page/package.json > /dev/null || {
+            echo "page/package.json installs a local package; switch it to its npm release first"
+            exit 1
+          }
+
+      - name: Build the archive
+        run: scripts/build-release "$GITHUB_REF_NAME"
+
+      - name: Attach it to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "Whooper $version" --generate-notes \
+            "release/whooper-$version.tar.gz" "release/whooper-$version.tar.gz.sha256"
