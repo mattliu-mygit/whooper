@@ -1126,8 +1126,16 @@ def ask_facts(run_dir, question, finding_id=None):
             raise SystemExit(f"whooper-ask: the run has no finding {finding_id}; its findings are"
                              f" {', '.join(findings) or 'none'}")
         f = findings[finding_id]
-        lines += ["", "## The finding", "",
-                  f"The question is about finding {f['id']}, {f['title']} ({f['path']}:{f['line']}), in findings.json."]
+        # read_findings takes findings that do not fit the schema, such as those of a review
+        # whooper-review stopped before its schema check, so a finding may lack its title, path, or
+        # line. The prompt names it with the ones it has, and gives the line only with its path, since
+        # a line number alone points nowhere.
+        name = f"finding {f['id']}"
+        if f.get("title"):
+            name += f", {f['title']}"
+        if f.get("path"):
+            name += f" ({f['path']}:{f['line']})" if f.get("line") else f" ({f['path']})"
+        lines += ["", "## The finding", "", f"The question is about {name}, in findings.json."]
     lines += ["", "## The question", "", question]
     return "\n".join(lines) + "\n"
 

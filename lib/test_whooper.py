@@ -2576,6 +2576,23 @@ class AskTest(unittest.TestCase):
         self.assertIn("finding 2, Invisible characters in the setup steps (README.md:3)",
                       (self.run / "asks" / "1.prompt.md").read_text())
 
+    def test_a_finding_without_its_title_path_or_line_is_named_by_the_fields_it_has(self):
+        # whooper-review leaves findings.json as the run wrote it when it stops the review before its
+        # schema check, such as at the time limit, so a finding can lack any field but its ID.
+        # (the finding, how the prompt names it)
+        for f, named in [
+            ({"id": "1", "title": "Bad JSON now returns 500"}, "finding 1, Bad JSON now returns 500"),
+            ({"id": "1"}, "finding 1"),
+            ({"id": "1", "path": "api/orders.go", "line": 88}, "finding 1 (api/orders.go:88)"),
+            ({"id": "1", "path": "api/orders.go"}, "finding 1 (api/orders.go)"),
+            # A line number without its file points nowhere.
+            ({"id": "1", "title": "Bad JSON now returns 500", "line": 88}, "finding 1, Bad JSON now returns 500"),
+        ]:
+            with self.subTest(finding=f):
+                (self.run / "findings.json").write_text(json.dumps({"findings": [f]}))
+                prompt = self.prompt("claude", str(self.run), self.QUESTION, "1")
+                self.assertIn(f"The question is about {named}, in findings.json.", prompt)
+
     def test_saves_each_answer_numbered_in_order(self):
         asks = self.run / "asks"
         before = datetime.now(timezone.utc).replace(microsecond=0)
