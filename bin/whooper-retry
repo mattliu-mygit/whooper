@@ -2,7 +2,7 @@
 # Queues another review of a review run's PR, such as one whose setup script failed, for the next
 # round, at the head the PR has now:
 #
-#   whooper-retry <run-id>
+#   whooper-retry [--item] <run-id>
 #
 # It reads the PR's head with the user's gh login, puts the run's work item at that head on the
 # recheck list, <state>/rechecks/<owner>-<repo>-<pr>.json, where <state> is $XDG_STATE_HOME/whooper
@@ -16,7 +16,8 @@
 #
 # It refuses a run ID that names no run directory, a review still running, which a live whooper-review
 # holds the PR's lock for, and a run whose run.json it cannot read, since only run.json names the
-# PR's repo. Prompting Time runs it as the manifest's retry action.
+# PR's repo. Prompting Time runs it as the manifest's retry action: Whooper's page adds the run ID,
+# and a row's menu adds --item and the run ID, as for each of the manifest's status.item_actions.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -28,7 +29,9 @@ die() {
   exit 1
 }
 
-[[ $# == 1 ]] || { echo "usage: whooper-retry <run-id>" >&2; exit 1; }
+# A row's menu in Prompting Time passes the run ID after --item.
+[[ $# == 2 && "$1" == --item ]] && shift
+[[ $# == 1 && "$1" != --item ]] || { echo "usage: whooper-retry [--item] <run-id>" >&2; exit 1; }
 run_id="$1"
 run="$data/runs/$run_id"
 [[ -d "$run" ]] || die "no run $run_id in $data/runs"

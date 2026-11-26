@@ -340,7 +340,8 @@ leaves the empty file `skipped-by-user` in the run directory, so whooper-status 
 `bin/whooper-skip <run-id> --undo` deletes the file. Nothing else changes: nothing posts to GitHub,
 and the drafts and records stay, so a skipped review can still be submitted. It refuses a run ID that
 names no run directory and a review that is still running. Prompting Time runs it as the manifest's
-`skip` action, adding the run ID, and `--undo` after it to undo.
+`skip` action, adding the run ID, and `--undo` after it to undo; a review's row menu there adds
+`--item` before the run ID, which works too.
 
 ## Remove a review
 
@@ -364,7 +365,8 @@ removed run that waits. `--undo` puts a review that waits back on the recheck li
 took it off, so the next round reviews it again.
 
 It refuses a run ID that names no run directory and a review that is still running. Prompting Time
-runs it as the manifest's `remove` action, adding the run ID, and `--undo` after it to undo.
+runs it as the manifest's `remove` action, adding the run ID, and `--undo` after it to undo; a
+review's row menu there adds `--item` before the run ID, which works too.
 
 ## Ask about a review
 
@@ -410,7 +412,7 @@ its record counts toward both limits as usual, and as the PR's newest run it sup
 retried, which no longer needs you. It unmarks a run you removed ([Remove a review](#remove-a-review)).
 whooper-retry refuses a run ID that names no run directory, a review that is still running, and a run
 whose `run.json` it cannot read, since only that file names the PR's repo. Prompting Time runs it as
-the manifest's `retry` action.
+the manifest's `retry` action, adding the run ID; a review's row menu there adds `--item` before it.
 
 ## Whooper in Prompting Time
 

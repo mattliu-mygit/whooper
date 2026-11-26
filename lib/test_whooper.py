@@ -6327,6 +6327,11 @@ class ReviewsTest(unittest.TestCase):
         self.assertEqual(self.reviews(), [self.review(run, findings=1)])
         self.assertEqual(self.skip("--undo", run.name).stdout,
                          f"{run.name} (example-org/example-repo#12) is not marked as skipped\n")
+        # A row's menu in Prompting Time passes the run ID after --item, as for each of status.item_actions.
+        self.assertEqual(self.skip("--item", run.name).stdout, f"marked {run.name} (example-org/example-repo#12) as"
+                                                               f" skipped, without submitting it; {undo}\n")
+        self.assertEqual(self.skip("--item", run.name, "--undo").stdout,
+                         f"unmarked {run.name} (example-org/example-repo#12) as skipped\n")
         # A review whooper-review stopped before it wrote run.json, which names the PR, can be skipped too.
         stopped = self.make_run(timedelta(hours=2), pr=13, run_json=False)
         self.write(stopped, "failure.txt", "the review stopped at an unexpected error\n", 1)
@@ -6350,11 +6355,12 @@ class ReviewsTest(unittest.TestCase):
                 result = self.skip(*args)
                 self.assertEqual((result.returncode, result.stdout, result.stderr),
                                  (1, "", "whooper-skip: the review is still running; skip it once it ends\n"))
-        for args in [[], ["--undo"], [run.name, run.name], [run.name, "--undo", "--undo"]]:
+        for args in [[], ["--undo"], [run.name, run.name], [run.name, "--undo", "--undo"], ["--item"],
+                     ["--item", run.name, run.name], [run.name, "--item", run.name]]:
             with self.subTest(args=args):
                 result = self.skip(*args)
                 self.assertEqual((result.returncode, result.stdout, result.stderr),
-                                 (1, "", "usage: whooper-skip <run-id> [--undo]\n"))
+                                 (1, "", "usage: whooper-skip [--item] <run-id> [--undo]\n"))
         self.assertEqual(list(run.glob("skipped*")), [])
 
     def remove(self, *args):
@@ -6386,6 +6392,10 @@ class ReviewsTest(unittest.TestCase):
         self.assertEqual((undone.returncode, undone.stdout), (0, f"unmarked {name} as removed\n"))
         self.assertEqual(self.reviews(), [self.review(run, findings=1)])
         self.assertEqual(self.remove("--undo", run.name).stdout, f"{name} is not marked as removed\n")
+        # A row's menu in Prompting Time passes the run ID after --item, as for each of status.item_actions.
+        self.assertEqual(self.remove("--item", run.name).stdout, f"marked {name} as removed; its files stay, and"
+                                                                 f" bin/whooper-remove {run.name} --undo unmarks it\n")
+        self.assertEqual(self.remove("--undo", "--item", run.name).stdout, f"unmarked {name} as removed\n")
         # A review whooper-review stopped before it wrote run.json, which names the PR, can be removed too.
         stopped = self.make_run(timedelta(hours=2), pr=13, run_json=False)
         self.write(stopped, "failure.txt", "the review stopped at an unexpected error\n", 1)
@@ -6409,11 +6419,12 @@ class ReviewsTest(unittest.TestCase):
                 result = self.remove(*args)
                 self.assertEqual((result.returncode, result.stdout, result.stderr),
                                  (1, "", "whooper-remove: the review is still running; remove it once it ends\n"))
-        for args in [[], ["--undo"], [run.name, run.name], [run.name, "--undo", "--undo"]]:
+        for args in [[], ["--undo"], [run.name, run.name], [run.name, "--undo", "--undo"], ["--item"],
+                     ["--item", run.name, run.name], [run.name, "--item", run.name]]:
             with self.subTest(args=args):
                 result = self.remove(*args)
                 self.assertEqual((result.returncode, result.stdout, result.stderr),
-                                 (1, "", "usage: whooper-remove <run-id> [--undo]\n"))
+                                 (1, "", "usage: whooper-remove [--item] <run-id> [--undo]\n"))
         self.assertEqual(list(run.glob("removed*")), [])
 
     def test_a_removed_review_that_waits_no_longer_counts_as_waiting(self):
@@ -6632,6 +6643,14 @@ class RetryTest(unittest.TestCase):
         self.assertFalse((self.state / "rechecks" / "example-org-example-repo-12.json").exists())
         self.assertEqual(self.select(), [self.work])
 
+    def test_a_rows_menu_retries_a_review_with_item(self):
+        # Prompting Time runs each of status.item_actions as the action's command, --item, and the run ID.
+        result = self.retry("--item", self.run.name)
+        self.assertEqual((result.returncode, result.stdout),
+                         (0, "queued another review of example-org/example-repo#12 at h1 for the next round;"
+                             " bin/whooper-round runs that round now\n"), result.stderr)
+        self.assertEqual(json.loads(self.record("h1").read_text()), {**self.failed, "status": "retry"})
+
     def test_a_retry_reviews_the_head_the_pr_has_now_whatever_brought_it_in(self):
         # A review of a PR only a Slack ask brought in, which a poll reads once, finished at h1.
         slack = {"ts": "1943194837.000100", "tagged_user": True,
@@ -6678,11 +6697,12 @@ class RetryTest(unittest.TestCase):
         result = self.retry(stopped.name)
         self.assertEqual((result.returncode, result.stdout, result.stderr),
                          (1, "", f"whooper-retry: cannot read {stopped}/run.json, which names the PR to review again\n"))
-        for args in [[], [self.run.name, stopped.name]]:
+        for args in [[], [self.run.name, stopped.name], ["--item"], ["--item", "--item"],
+                     ["--item", self.run.name, stopped.name], [self.run.name, "--item"]]:
             with self.subTest(args=args):
                 result = self.retry(*args)
                 self.assertEqual((result.returncode, result.stdout, result.stderr),
-                                 (1, "", "usage: whooper-retry <run-id>\n"))
+                                 (1, "", "usage: whooper-retry [--item] <run-id>\n"))
         # Nothing was queued.
         self.assertFalse((self.state / "rechecks").exists())
         self.assertEqual(json.loads(self.record("h1").read_text()), self.failed)

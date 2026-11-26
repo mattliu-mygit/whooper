@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Marks a finished review run as skipped by the user, done without being submitted, or unmarks it:
 #
-#   whooper-skip <run-id> [--undo]
+#   whooper-skip [--item] <run-id> [--undo]
 #
 # The mark is the empty file skipped-by-user in the run's directory, <state>/runs/<run-id>/, where
 # <state> is $XDG_STATE_HOME/whooper (default ~/.local/state/whooper), and --undo deletes it. While
@@ -11,18 +11,24 @@
 # prints what it did, and when the mark was already so, says that and changes nothing.
 #
 # It refuses a run ID that names no run directory and a review still running, which a live
-# whooper-review holds the PR's lock for. Prompting Time runs it as the manifest's skip action,
-# adding the run ID, and --undo after it; either order works.
+# whooper-review holds the PR's lock for. Prompting Time runs it as the manifest's skip action:
+# Whooper's page adds the run ID, and --undo after it, in either order, and a row's menu adds
+# --item and the run ID, as for each of the manifest's status.item_actions.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-usage="usage: whooper-skip <run-id> [--undo]"
+usage="usage: whooper-skip [--item] <run-id> [--undo]"
 run_id="" undo=""
 while (($#)); do
   case "$1" in
     --undo)
       [[ -z "$undo" ]] || { echo "$usage" >&2; exit 1; }
       undo=--undo
+      ;;
+    --item)
+      (($# > 1)) && [[ -z "$run_id" ]] || { echo "$usage" >&2; exit 1; }
+      shift
+      run_id="$1"
       ;;
     *)
       [[ -z "$run_id" ]] || { echo "$usage" >&2; exit 1; }
