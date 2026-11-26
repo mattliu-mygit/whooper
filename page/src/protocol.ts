@@ -46,6 +46,23 @@ export interface WhooperStatus {
     selected: number | null;
     reviews: { pr: string; outcome: "reviewed" | "failed" | "interrupted" }[];
   } | null;
+  /** The review runs that started in the last 30 days, newest first. */
+  reviews: {
+    run_id: string;
+    /** <owner>/<repo> */
+    repo: string | null;
+    pr: number;
+    title: string | null;
+    url: string | null;
+    started_at: string;
+    ended_at: string | null;
+    outcome: "running" | "reviewed" | "failed";
+    verdict: Verdict | null;
+    skipped: boolean;
+    findings: number;
+    submitted: { event: "APPROVE" | "COMMENT"; at: string } | null;
+    needs_you: boolean;
+  }[];
 }
 
 /**

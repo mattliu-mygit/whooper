@@ -291,11 +291,21 @@ def read_review(run, running):
     return read_object(run / "run.json"), outcome, result, posted
 
 
+def read_title_and_author(run):
+    """The PR's title and its author's login in the run's github.json, the PR conversation the review
+    read, since run.json has neither. Each is None when the file is missing, as when the review's
+    GitHub fetch failed, or does not hold it as text, as when the file is cut short."""
+    github = read_object(run / "github.json") or {}
+    pr = github["pr"] if isinstance(github.get("pr"), dict) else {}
+    return [pr.get(key) if isinstance(pr.get(key), str) else None for key in ("title", "author")]
+
+
 def read_reviews(data, now):
     """The review runs under data/runs that started in the REVIEW_DAYS days before now, newest first, as
     whooper-status lists them. A review's PR number and start come from its run ID, its repo from
-    run.json, its title from github.json, and the rest from read_review. A name in runs that is not a
-    run ID, such as Finder's .DS_Store, is no run."""
+    run.json, its title from github.json, and the rest from read_review. Only the newest run of each PR
+    can need the user, since a newer run supersedes the older ones, even while it runs. A name in runs
+    that is not a run ID, such as Finder's .DS_Store, is no run."""
     def modified(path):
         try:
             return local_time(path.stat().st_mtime)
@@ -310,10 +320,13 @@ def read_reviews(data, now):
     # whooper-review takes the PR's lock before it makes the run directory, so the locks, read after
     # the runs are listed, name every listed run whose review still runs.
     running = running_runs(data)
-    reviews = []
+    # runs is newest first, so a PR, by repo and number, is in newer once its newest run is listed, and
+    # its older runs no longer need the user. A run without a readable run.json has repo None, which
+    # matches only other runs without one.
+    reviews, newer = [], set()
     for run, started, pr in runs:
         item, outcome, result, submit = read_review(run, running)
-        github = read_object(run / "github.json")
+        title, _ = read_title_and_author(run)
         repo = item["repo"] if item else None
         # No file records when a review ended, so it ended when whooper-review saved failure.txt as it
         # stopped the review, or else when the run wrote findings.json as it ended.
@@ -322,7 +335,7 @@ def read_reviews(data, now):
             "run_id": run.name,
             "repo": repo,
             "pr": pr,
-            "title": github["pr"]["title"] if github else None,
+            "title": title,
             "url": f"https://github.com/{repo}/pull/{pr}" if repo else None,
             "started_at": local_time(started.timestamp()),
             "ended_at": ended,
@@ -333,21 +346,24 @@ def read_reviews(data, now):
             # whooper-submit renames submit.json saying posted into place once GitHub took the review.
             "submitted": {"event": submit["request"]["event"], "at": modified(run / "submit.json")}
                          if submit else None,
-            "needs_you": outcome != "running" and submit is None,
+            "needs_you": (repo, pr) not in newer and outcome != "running" and submit is None,
         })
+        newer.add((repo, pr))
     return reviews
 
 
 def show_review(data, run_id):
     """One review run for Prompting Time's review screen, as whooper-show --json prints it:
-    run.json, the outcome, the findings, and the posted review as read_review reads them, the drafts
-    whooper-draft prints, which only a review whose findings fit has, diff.patch, failure.txt, and
-    whooper-ask's answers. Refuses a run ID that names no run directory."""
+    run.json, the outcome, the findings, and the posted review as read_review reads them, the PR's
+    title and author in github.json, the drafts whooper-draft prints, which only a review whose
+    findings fit has, diff.patch, failure.txt, and whooper-ask's answers. Refuses a run ID that names
+    no run directory."""
     run = data / "runs" / run_id
     # A run ID names a directory right under runs, so a path such as ../x reads nothing outside it.
     if parse_run_id(run_id) is None or not run.is_dir():
         raise SystemExit(f"whooper-show: no run {run_id} in {data / 'runs'}")
     item, outcome, result, submit = read_review(run, running_runs(data))
+    title, author = read_title_and_author(run)
 
     def text(name):
         # git copies a file's bytes into diff.patch as they are, so a file in an encoding other than
@@ -361,6 +377,8 @@ def show_review(data, run_id):
         "version": 1,
         "run_id": run_id,
         "run": item,
+        "title": title,
+        "author": author,
         "outcome": outcome,
         "findings": result,
         "drafts": read_drafts(run) if result else None,

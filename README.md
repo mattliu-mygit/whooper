@@ -124,26 +124,28 @@ you" list and its history of past reviews from them.
 bin/whooper-show <run-id> --json   # one review in full, for its review screen
 ```
 
-whooper-show prints the run's `run.json`, its outcome, `findings.json`, the drafts whooper-draft
-prints for it, `diff.patch`, `failure.txt`, each of whooper-ask's answers in number order, and the
-review whooper-submit posted. It reads files only, the run directory and the review locks, and
-refuses a run ID that names no run directory. Prompting Time runs it as the manifest's `show-review`
-action, which puts `--json` before the run ID; either order works. The headers of both commands list
-each field.
+whooper-show prints the run's `run.json`, the PR's title and author, its outcome, `findings.json`,
+the drafts whooper-draft prints for it, `diff.patch`, `failure.txt`, each of whooper-ask's answers in
+number order, and the review whooper-submit posted. It reads files only, the run directory and the
+review locks, and refuses a run ID that names no run directory. Prompting Time runs it as the
+manifest's `show-review` action, which puts `--json` before the run ID; either order works. The
+headers of both commands list each field.
 
 A review's outcome is `running` while a live whooper-review holds the PR's lock for the run, the
 rule whooper-ask follows; `reviewed` once the review left findings that fit `schemas/findings.json`
 and no `failure.txt`; and `failed` otherwise, as for a run directory Whooper cannot read. Only
 `run.json` names the repo, so the repo is null for a review whooper-review stopped before that file
 was whole, such as when its fetch failed, and in a review's first seconds, before it writes the
-file; the PR number and start come from the run ID. A review needs you once it ends, reviewed or
-failed, until whooper-submit posts it. A `submit.json` that still says `posting` does not count as
-posted, since its review may or may not be on GitHub; whooper-submit then asks you to check the PR.
-The verdict, the findings, and the drafts come only from findings that fit the schema, and none
-while the review runs, since a Devin review writes `findings.json` itself and may still change it.
-Nothing records when a review ended, so its end is when whooper-review saved `failure.txt`, or else
-when the run wrote `findings.json`, and a posted review's time is when whooper-submit wrote GitHub's
-answer to `submit.json`.
+file; the PR number and start come from the run ID. The title and author come from `github.json`,
+the PR conversation the review read, since `run.json` has neither, and are null when the review's
+GitHub fetch failed or the file cannot be read. A review needs you once it ends, reviewed or failed,
+until whooper-submit posts it or a newer review of the same PR starts, which supersedes it. A
+`submit.json` that still says `posting` does not count as posted, since its review may or may not be
+on GitHub; whooper-submit then asks you to check the PR. The verdict, the findings, and the drafts
+come only from findings that fit the schema, and none while the review runs, since a Devin review
+writes `findings.json` itself and may still change it. Nothing records when a review ended, so its
+end is when whooper-review saved `failure.txt`, or else when the run wrote `findings.json`, and a
+posted review's time is when whooper-submit wrote GitHub's answer to `submit.json`.
 
 ## Submit a review
 

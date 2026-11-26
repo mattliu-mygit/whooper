@@ -9,6 +9,9 @@
 #   run_id     the run's ID
 #   run        run.json, the work item with the run's own fields, or null when it cannot be read, as
 #              when whooper-review stopped before it wrote the file
+#   title      the PR's title in github.json, the PR conversation the review read, since run.json has
+#              none; null when the review's GitHub fetch failed or the file cannot be read
+#   author     the login of the PR's author in github.json, or null the same way
 #   outcome    running, reviewed, or failed, by the rule bin/whooper-status's reviews follow
 #   findings   findings.json, or null while the review runs and when the file is missing or does not
 #              fit schemas/findings.json

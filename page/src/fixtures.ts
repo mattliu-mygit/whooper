@@ -224,5 +224,21 @@ export function status(): WhooperStatus {
         { pr: "example-org/widgets#107", outcome: "reviewed" },
       ],
     },
+    // The runs the queue lists; #112's review has no run directory yet.
+    reviews: [
+      { run_id: "20310727T011502Z-107", repo: "example-org/widgets", pr: 107, title: "fix(store): make writers honor version constraints",
+        url: "https://github.com/example-org/widgets/pull/107", started_at: "2031-07-26T18:15:02-07:00", ended_at: "2031-07-26T18:31:27-07:00",
+        outcome: "reviewed", verdict: "look_first", skipped: false, findings: 2, submitted: null, needs_you: true },
+      { run_id: "20310727T010246Z-101", repo: "example-org/widgets", pr: 101, title: "refactor(cache): separate the cache configuration",
+        url: "https://github.com/example-org/widgets/pull/101", started_at: "2031-07-26T18:02:46-07:00", ended_at: "2031-07-26T18:14:58-07:00",
+        outcome: "reviewed", verdict: "approve_once_ci_passes", skipped: false, findings: 2, submitted: null, needs_you: true },
+      { run_id: "20310727T005510Z-109", repo: "sample-org/gadgets", pr: 109, title: "keep only shared types in domain",
+        url: "https://github.com/sample-org/gadgets/pull/109", started_at: "2031-07-26T17:55:10-07:00", ended_at: "2031-07-26T18:02:31-07:00",
+        outcome: "failed", verdict: null, skipped: false, findings: 0, submitted: null, needs_you: true },
+      { run_id: "20310726T201133Z-99", repo: "example-org/widgets", pr: 99, title: "move the score projection to domain",
+        url: "https://github.com/example-org/widgets/pull/99", started_at: "2031-07-26T13:11:33-07:00", ended_at: "2031-07-26T13:29:40-07:00",
+        outcome: "reviewed", verdict: "approve_once_ci_passes", skipped: false, findings: 1,
+        submitted: { event: "APPROVE", at: "2031-07-26T14:05:12-07:00" }, needs_you: false },
+    ],
   };
 }

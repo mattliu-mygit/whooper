@@ -2807,15 +2807,15 @@ class ReviewsTest(unittest.TestCase):
         """When the run started, which its ID says."""
         return datetime.strptime(run.name.split("-")[0], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
 
-    def make_run(self, ago, pr=12, run_json=True):
-        """Makes the directory of a review run of example-org/example-repo#<pr> that started ago before
-        now, with the run.json whooper-review writes unless run_json is False, and returns it."""
+    def make_run(self, ago, pr=12, run_json=True, repo="example-org/example-repo"):
+        """Makes the directory of a review run of <repo>#<pr> that started ago before now, with the
+        run.json whooper-review writes unless run_json is False, and returns it."""
         started = self.now - ago
         run = self.state / "runs" / f"{started:%Y%m%dT%H%M%SZ}-{pr}"
         run.mkdir(parents=True)
         if run_json:
             (run / "run.json").write_text(json.dumps({
-                "kind": "first_review", "repo": "example-org/example-repo", "pr": pr, "head_sha": "h1",
+                "kind": "first_review", "repo": repo, "pr": pr, "head_sha": "h1",
                 "base_ref": "master", "source": "github_request", "slack": None, "reason": "r", "run_id": run.name,
                 "merge_base": "m1", "as_of": None, "dry_run": True, "agent": "claude", "skills": {}}))
         return run
@@ -2946,8 +2946,35 @@ class ReviewsTest(unittest.TestCase):
         self.assertEqual(self.reviews(), [
             self.review(fetching, **running, repo=None, url=None, title=None),
             self.review(current, **running),
-            self.review(earlier),
+            # The run the lock names is newer, so the earlier run of its PR no longer needs the user.
+            self.review(earlier, needs_you=False),
             self.review(killed, outcome="failed", verdict=None, ended_at=None),
+        ])
+
+    def test_a_newer_run_of_a_pr_supersedes_its_older_runs(self):
+        # Only the newest run of a PR can need the user, as when whooper-submit found new commits after the
+        # older review and the next round reviewed them.
+        older = self.make_run(timedelta(hours=5))
+        self.finish(older, findings=[finding()])
+        newer = self.make_run(timedelta(hours=1))
+        self.finish(newer)
+        # The same number in another repo is another PR.
+        elsewhere = self.make_run(timedelta(hours=3), repo="sample-org/plain-repo")
+        self.finish(elsewhere)
+        # A newer run supersedes a failed one too, from the time it starts.
+        failed = self.make_run(timedelta(hours=6), pr=13)
+        self.fetched(failed)
+        self.write(failed, "failure.txt", "the review run passed its 45-minute limit\n", 45)
+        running = self.make_run(timedelta(minutes=10), pr=13)
+        self.fetched(running)
+        self.hold(running, os.getpid())
+        self.assertEqual(self.reviews(), [
+            self.review(running, outcome="running", ended_at=None, verdict=None, needs_you=False),
+            self.review(newer),
+            self.review(elsewhere, repo="sample-org/plain-repo", url="https://github.com/sample-org/plain-repo/pull/12"),
+            self.review(older, findings=1, needs_you=False),
+            self.review(failed, outcome="failed", verdict=None, needs_you=False,
+                        ended_at=self.local(self.started(failed) + timedelta(minutes=45))),
         ])
 
     def test_a_run_directory_whooper_cannot_read_lists_as_a_failed_review(self):
@@ -2982,12 +3009,33 @@ class ReviewsTest(unittest.TestCase):
             self.review(unfit, **failed),
         ])
 
+    def test_status_and_show_take_the_title_and_author_from_github_json(self):
+        # run.json has neither, so both come from github.json, the PR conversation the review read.
+        run = self.make_run(timedelta(hours=1))
+        self.finish(run)
+        # whooper-review saves no github.json when the review's GitHub fetch fails. The other files are not
+        # the github.json it writes: one cut short, one without the PR, one whose PR is text, and one whose
+        # title and author are not text.
+        unread = []
+        for hours, github in [(2, None), (3, '{"pr": {"title": "Return 4'), (4, {"reviews": [], "comments": []}),
+                              (5, {"pr": self.TITLE}), (6, {"pr": {"title": 422, "author": {"login": "alice"}}})]:
+            other = self.make_run(timedelta(hours=hours), pr=20 + hours)
+            if github is not None:
+                self.write(other, "github.json", github, 1)
+            self.write(other, "findings.json", self.findings(), 20)
+            unread.append(other)
+        self.assertEqual(self.reviews(), [self.review(run), *[self.review(other, title=None) for other in unread]])
+        shown = [self.shown(r) for r in [run, *unread]]
+        self.assertEqual([(s["title"], s["author"]) for s in shown],
+                         [(self.TITLE, "alice")] + [(None, None)] * len(unread))
+
     def test_show_prints_a_finished_review(self):
         run = self.make_run(timedelta(hours=1))
         self.finish(run, findings=[finding(), self.NIT])
         shown = self.shown(run)
         self.assertEqual(shown, {
             "version": 1, "run_id": run.name, "run": json.loads((run / "run.json").read_text()),
+            "title": self.TITLE, "author": "alice",
             "outcome": "reviewed", "findings": self.findings(findings=[finding(), self.NIT]),
             # The run is not safe to approve, so until the user changes anything the review only comments
             # and includes nothing.
@@ -3013,7 +3061,7 @@ class ReviewsTest(unittest.TestCase):
         nothing = {"version": 1, "findings": None, "drafts": None, "asks": [], "submitted": None}
         self.assertEqual(self.shown(failed), {
             **nothing, "run_id": failed.name, "run": json.loads((failed / "run.json").read_text()),
-            "outcome": "failed", "diff": self.DIFF, "failure": reason,
+            "title": self.TITLE, "author": "alice", "outcome": "failed", "diff": self.DIFF, "failure": reason,
         })
         # A Devin review that wrote findings that fit before its time limit has them and whooper-draft's
         # drafts, though it failed.
@@ -3025,8 +3073,8 @@ class ReviewsTest(unittest.TestCase):
         stopped = self.make_run(timedelta(hours=2), pr=13, run_json=False)
         self.write(stopped, "failure.txt", "the review stopped at an unexpected error\n", 1)
         self.assertEqual(self.shown(stopped), {
-            **nothing, "run_id": stopped.name, "run": None, "outcome": "failed", "diff": None,
-            "failure": "the review stopped at an unexpected error\n",
+            **nothing, "run_id": stopped.name, "run": None, "title": None, "author": None, "outcome": "failed",
+            "diff": None, "failure": "the review stopped at an unexpected error\n",
         })
         # A Devin review that is still running may still change the findings.json it wrote, so it shows
         # no findings yet.
@@ -3036,7 +3084,7 @@ class ReviewsTest(unittest.TestCase):
         self.hold(running, os.getpid())
         self.assertEqual(self.shown(running), {
             **nothing, "run_id": running.name, "run": json.loads((running / "run.json").read_text()),
-            "outcome": "running", "diff": self.DIFF, "failure": None,
+            "title": self.TITLE, "author": "alice", "outcome": "running", "diff": self.DIFF, "failure": None,
         })
 
     def test_show_prints_the_drafts_and_the_review_whooper_submit_posted(self):
