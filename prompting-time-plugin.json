@@ -14,9 +14,21 @@
     { "command": "devin", "purpose": "Runs the jobs the settings give to Devin.", "only_when": { "setting": "jobs", "value": "devin" } }
   ],
   "page": { "entry": "page/dist/index.html", "protocol": 1 },
+  "status": {
+    "format": 2,
+    "groups": [
+      { "id": "ready", "title": "Ready to approve", "needs_you": true, "order": 1 },
+      { "id": "look", "title": "Needs a look", "needs_you": true, "order": 2 },
+      { "id": "failed", "title": "Review failed", "needs_you": true, "order": 3 },
+      { "id": "reviewing", "title": "Reviewing", "needs_you": false, "order": 4 },
+      { "id": "waiting", "title": "Waiting", "needs_you": false, "order": 5 },
+      { "id": "done", "title": "Done", "needs_you": false, "order": 6, "folded": true }
+    ],
+    "item_actions": ["retry", "skip", "remove"]
+  },
   "settings": "schemas/settings.json",
   "actions": [
-    { "name": "status", "title": "Status", "description": "Prints whether Whooper runs or is paused, the next round, the last round, the last 50 rounds, what stops every review, and the reviews of the last 30 days, as JSON. Reads files only.", "command": ["bin/whooper-status", "--json"], "confirm": false },
+    { "name": "status", "title": "Status", "description": "Prints whether Whooper runs or is paused, the next round, the last round, the last 50 rounds, what stops every review, and the reviews of the last 30 days, as JSON, with the same in Prompting Time's status format 2. Reads files only.", "command": ["bin/whooper-status", "--json"], "confirm": false },
     { "name": "round", "title": "Poll now", "description": "Runs a round now: polls GitHub and Slack and reviews what it finds. Posts nothing.", "command": ["bin/whooper-round"], "confirm": false },
     { "name": "pause", "title": "Pause", "description": "Skips the scheduled rounds until you resume or Whooper starts again.", "command": ["bin/whooper-pause"], "confirm": false },
     { "name": "resume", "title": "Resume", "description": "Ends a pause.", "command": ["bin/whooper-resume"], "confirm": false },

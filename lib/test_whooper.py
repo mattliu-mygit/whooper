@@ -6959,7 +6959,10 @@ class ManifestTest(unittest.TestCase):
             ("a version that is not <major>.<minor>.<patch>", {"version": "v0.1"}),
             ("an empty start command", {"start": []}),
             ("actions without their confirm flag", {"actions": unflagged}),
-            ("a page protocol the format does not know", {"page": {"entry": "page/dist/index.html", "protocol": 2}}),
+            ("a page protocol the format does not know", {"page": {"entry": "page/dist/index.html", "protocol": 3}}),
+            ("a status format Prompting Time does not read", {"status": {**self.MANIFEST["status"], "format": 1}}),
+            ("a status group whose id is not lowercase", {"status": {**self.MANIFEST["status"], "groups": [
+                {"id": "Ready", "title": "Ready", "needs_you": True, "order": 1}]}}),
             ("an unexpected key", {"socket": "whooper.sock"}),
         ]:
             with self.subTest(name), self.assertRaises(ValueError):
@@ -6977,6 +6980,21 @@ class ManifestTest(unittest.TestCase):
         self.assertTrue((ROOT / "page" / "index.html").exists())
         protocol = re.search(r"PROTOCOL_VERSION = (\d+);", (ROOT / "page" / "src" / "protocol.ts").read_text())
         self.assertEqual(int(protocol[1]), self.MANIFEST["page"]["protocol"])
+
+    def test_status_names_the_groups_whooper_status_puts_items_in_and_row_actions_it_declares(self):
+        status = self.MANIFEST["status"]
+        # Prompting Time's sections for Whooper before status format 2, in their order.
+        self.assertEqual([(g["id"], g["needs_you"], g.get("folded", False)) for g in sorted(status["groups"],
+                                                                                          key=lambda g: g["order"])], [
+            ("ready", True, False), ("look", True, False), ("failed", True, False), ("reviewing", False, False),
+            ("waiting", False, False), ("done", False, True)])
+        names = {a["name"]: a for a in self.MANIFEST["actions"]}
+        for name in status["item_actions"]:
+            with self.subTest(name):
+                # Prompting Time runs a row action without its confirmation flow only when it needs none.
+                self.assertFalse(names[name]["confirm"])
+        # Each blocker's action is one the manifest declares.
+        self.assertIn("round", names)
 
     def test_only_submitting_a_review_waits_for_a_confirmation(self):
         # As README.md's Approvals has it, only whooper-submit writes outside this Mac, to GitHub.

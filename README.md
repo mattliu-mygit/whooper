@@ -419,9 +419,10 @@ the manifest's `retry` action, adding the run ID; a review's row menu there adds
 Prompting Time reads `prompting-time-plugin.json`, which fits `schemas/prompting-time-plugin.json`:
 Whooper's name and version, the command it starts (`bin/whooper-run`), the programs it checks for
 first (`gh`, slackdump, `jq`, uv, and the CLI of each agent the settings' `[jobs]` name), the page,
-the settings schema (`schemas/settings.json`), and the commands it runs as actions. An action with
-`confirm: true` waits for the user's yes in Prompting Time; only `submit` has it, since only
-whooper-submit writes outside this Mac. The tests check the manifest against the schema and the
+the settings schema (`schemas/settings.json`), the groups whooper-status's status format 2 puts
+its items in and the actions their rows offer ([See reviews](#see-reviews)), and the commands it runs
+as actions. An action with `confirm: true` waits for the user's yes in Prompting Time; only `submit`
+has it, since only whooper-submit writes outside this Mac. The tests check the manifest against the schema and the
 checkout.
 
 ### Whooper's page
