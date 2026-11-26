@@ -33,26 +33,30 @@ save() {
 # mkdir is atomic, so of two copies started at once only one gets the lock, as in whooper-review.
 # A lock whose process is gone, or is now some other program, is stale and this run takes it over:
 # a kill -9 or a restart leaves the lock behind, and its process ID can later belong to anything.
-if ! mkdir "$lock" 2>/dev/null; then
+# An INT, TERM, or HUP never does: the traps come before the lock, and take makes the lock and
+# writes its pid in a subshell that ignores those signals, so one that comes meanwhile stops this
+# script only once the lock has its pid. The EXIT trap removes the lock only when its pid is this
+# process's, so a copy refused below leaves the other copy's lock.
+nap=""
+trap '[[ "$(cat "$lock/pid" 2>/dev/null)" != "$$" ]] || rm -rf "$lock"; [[ -z "$nap" ]] || kill "$nap" 2>/dev/null || true' EXIT
+trap 'exit 130' INT TERM HUP
+take() { (trap '' INT TERM HUP; mkdir "$lock" 2>/dev/null && save "$lock/pid" echo "$$"); }
+if ! take; then
   holder="$(cat "$lock/pid" 2>/dev/null || true)"
   if [[ -n "$holder" ]] && ps -o command= -p "$holder" 2>/dev/null | grep -q whooper-run; then
     echo "whooper-run: process $holder is already running Whooper; see $lock/pid" >&2
     exit 1
   fi
   rm -rf "$lock"
-  if ! mkdir "$lock" 2>/dev/null; then
+  if ! take; then
     echo "whooper-run: another copy took $lock first" >&2
     exit 1
   fi
 fi
-save "$lock/pid" echo "$$"
 # A pause does not survive a restart: Prompting Time starts whooper-run each time it opens, and
 # reopening it leaves Whooper running. Only the copy that holds the lock deletes the pause, so a
 # second copy refused above leaves it.
 rm -f "$WHOOPER_STATE/paused"
-nap=""
-trap 'rm -rf "$lock"; [[ -z "$nap" ]] || kill "$nap" 2>/dev/null || true' EXIT
-trap 'exit 130' INT TERM HUP
 
 ended=""
 while true; do

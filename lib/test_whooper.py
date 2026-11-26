@@ -2463,6 +2463,19 @@ class RunTest(unittest.TestCase):
         process.wait(timeout=10)
         self.assertFalse(self.lock.exists())
 
+    def test_a_signal_the_moment_a_command_makes_its_lock_leaves_no_lock_behind(self):
+        # mkdir sends TERM to the command's whole process group, as Ctrl-C or kill -- -<pid> does, the
+        # moment it makes the lock, before the command has written its process ID there.
+        env, item, _ = self.pull_request()
+        mkdir = shutil.which("mkdir")
+        for name, args, lock in [("whooper-run", [], self.lock), ("whooper-round", [], self.state / "round.lock"),
+                                 ("whooper-review", [str(item), "--dry-run"],
+                                  self.state / "locks" / "sample-org-plain-repo-12")]:
+            with self.subTest(name):
+                self.script(self.fakes / "mkdir", f'{mkdir} "$@" || exit\nif [ "$1" = "{lock}" ]; then kill -TERM 0; fi')
+                result = self.command(name, *args, env=env)
+                self.assertEqual((result.returncode, lock.exists()), (130, False), result.stderr)
+
     def test_a_round_refuses_to_start_while_another_round_runs(self):
         holder = self.holder("whooper-round")
         self.hold(self.state / "round.lock", holder)
@@ -2470,6 +2483,17 @@ class RunTest(unittest.TestCase):
         self.assertEqual((result.returncode, (self.state / "round.lock" / "pid").read_text()), (1, f"{holder}\n"))
         self.assertIn("a round is already running", result.stderr)
         self.assertFalse((self.state / "last-round.json").exists())
+
+    def test_a_review_of_a_pr_another_live_review_holds_stops_and_leaves_that_reviews_lock(self):
+        env, item, _ = self.pull_request()
+        holder = self.holder("whooper-review")
+        lock = self.state / "locks" / "sample-org-plain-repo-12"
+        self.hold(lock, holder)
+        result = self.command("whooper-review", str(item), "--dry-run", env=env)
+        self.assertEqual((result.returncode, result.stdout, result.stderr),
+                         (1, "", f"whooper-review: process {holder} is already reviewing sample-org/plain-repo#12\n"))
+        # The other review's lock stays, and this review made no run and counted no failure.
+        self.assertEqual(((lock / "pid").read_text(), [p.name for p in self.state.iterdir()]), (f"{holder}\n", ["locks"]))
 
     def test_a_round_reviews_each_selected_item_and_reports_how_it_ended(self):
         self.fake_one_review_request()

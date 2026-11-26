@@ -100,19 +100,6 @@ git check-ref-format --branch "$base_ref" >/dev/null || die "base_ref $base_ref 
 run_id="$(date -u +%Y%m%dT%H%M%SZ)-$pr"
 run="$data/runs/$run_id"
 lock="$data/locks/${repo/\//-}-$pr"
-mkdir -p "$data/locks"
-if ! mkdir "$lock" 2>/dev/null; then
-  holder="$(cat "$lock/pid" 2>/dev/null || true)"
-  if [[ -n "$holder" ]] && kill -0 "$holder" 2>/dev/null; then
-    die "process $holder is already reviewing $repo#$pr"
-  fi
-  rm -rf "$lock"
-  mkdir "$lock"
-fi
-echo "$$" > "$lock/pid"
-# The lock names the run, so whooper-ask refuses an ask about this review, and not about an earlier
-# review of the PR, while this script runs.
-echo "$run_id" > "$lock/run_id"
 
 # The unfiltered GitHub data stays here, outside the run directory the model reads.
 work="$(mktemp -d)"
@@ -123,8 +110,14 @@ stop_reason="the review stopped at an unexpected error; see whooper-review's err
 agent_group="" watchdog_pid=""
 cleanup() {
   local status=$?
-  # This comes first, so a second Ctrl-C during a slow teardown, which would end the cleanup, cannot
-  # lose the reason.
+  # Only the review whose process ID the lock holds has a run to clean up and a lock to remove. One
+  # refused the lock below, or stopped before it took it, removes only its work folder.
+  if [[ "$(cat "$lock/pid" 2>/dev/null)" != "$$" ]]; then
+    rm -rf "$work"
+    exit "$status"
+  fi
+  # This comes before the rest, so a second Ctrl-C during a slow teardown, which would end the
+  # cleanup, cannot lose the reason.
   if [[ "$finished" != true && -n "$failure" && ! -e "$failure" ]]; then
     save_failure "$stop_reason" || true
   fi
@@ -157,6 +150,23 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'stop_reason="the review was interrupted" step=interrupted step_log=""; exit 130' INT TERM HUP
+
+# A lock whose process is gone is stale, and this review takes it over. As in whooper-run, the traps
+# come before the lock, and take makes the lock and writes its pid in a subshell that ignores INT,
+# TERM, and HUP, so no such signal leaves the lock behind.
+mkdir -p "$data/locks"
+take() { (trap '' INT TERM HUP; mkdir "$lock" && echo "$$" > "$lock/pid"); }
+if ! take 2>/dev/null; then
+  holder="$(cat "$lock/pid" 2>/dev/null || true)"
+  if [[ -n "$holder" ]] && kill -0 "$holder" 2>/dev/null; then
+    die "process $holder is already reviewing $repo#$pr"
+  fi
+  rm -rf "$lock"
+  take
+fi
+# The lock names the run, so whooper-ask refuses an ask about this review, and not about an earlier
+# review of the PR, while this script runs.
+echo "$run_id" > "$lock/run_id"
 
 mkdir -p "$run/tmp"
 # whooper-round reads why a review that fails stopped from its run directory.
