@@ -5,7 +5,8 @@
 # uv builds the environment lib/python runs Whooper's Python in from this block, with the versions
 # whooper.py.lock pins. Pin only releases at least a week old.
 """Whooper's exact rules: which PRs are the user's review work, which of it is already done, what a
-review run may read about a PR, which of a run's findings pass rule v1, and when whooper-run polls.
+review run may read about a PR, which of a run's findings pass rule v1, what a review the user
+submits posts, and when whooper-run polls.
 
 Every identifiable value, such as the user, the GitHub orgs, the Slack channels, and the bots, comes
 from the user's config file (config_path), never from this code. The bin/ scripts call it as:
@@ -21,6 +22,8 @@ from the user's config file (config_path), never from this code. The bin/ script
   whooper.py record <data dir> <work-item.json> running|failed                     -> writes the PR record
   whooper.py classify <data dir> <run dir>                                         -> verdicts, digest, record
   whooper.py post <data dir> <run dir> <head now> <review comments.json>          -> post.json, digest, record
+  whooper.py draft <data dir> <run-id> [<change>]                                  -> the run's drafts JSON
+  whooper.py submit <data dir> <run dir> <head now> [--print] [--allow-mentions]   -> submit-request.json, submit.json
   whooper.py summary <run dir>                                                     -> the summary channel's text
   whooper.py skills <skills dir>                                                   -> {skill: content hash}
   whooper.py next-round [<Unix time the last round ended>]                         -> the next round's Unix time
@@ -54,8 +57,18 @@ RULE_V1 = ("ran_and_saw_failure", "caller_or_ci_visible", "introduced_by_pr", "n
 # Whooper's review body and every comment it posts start with this.
 MARKER = "Whooper AI"
 # A draft posts under the user's name, so it may not ping anyone or link outside the org's GitHub.
-# The lookbehind keeps email addresses and paths from counting as mentions.
-MENTION = re.compile(r"(?<![\w.@/])@[A-Za-z0-9]")
+# The lookbehind keeps email addresses and paths from counting as mentions. A match is the whole
+# handle, such as @alice or the team @example-org/reviewers, so whooper-submit can list it.
+MENTION = re.compile(r"(?<![\w.@/])@[A-Za-z0-9][A-Za-z0-9-]*(?:/[A-Za-z0-9_-]+)?")
+# Each comment whooper-submit posts starts with this line and a blank line: an AI wrote the comment,
+# and the user read it and chose to post it.
+VETTED = "AI comment (vetted)"
+# The review skills open each draft with its Conventional Comments label, such as **nit:** or
+# **suggestion (non-blocking):**, and whooper-submit keeps the label a comment opens with. A comment
+# that opens with none, such as one the user rewrote, gets the label of its finding's kind.
+LABEL = re.compile(r"\*\*[A-Za-z]+(?: \([^)]*\))?:\*\*")
+LABELS = {"caller_visible_bug": "**issue:**", "ci_failure": "**issue:**", "nit": "**nit:**",
+          "question": "**question:**", "other": "**suggestion:**"}
 LINK = re.compile(r"(?:https?://|www\.)[^\s)>\]]*")
 # How prompts/review.md names each agent's tools, limits, and way of returning the findings.
 REVIEW_WORDING = {
@@ -284,15 +297,28 @@ def write_settings(values):
     merged = tomllib.loads(text)
     read_schedule(merged)
     check_jobs(merged)
-    # The new text goes to a temporary file beside the config, which then replaces it, so a failure
-    # leaves the old file whole. Nothing locks the file, so of two saves at the same moment the later
-    # one drops the other's change; add a lock if a running whooper-run starts saving settings too.
+    # Nothing locks the file, so of two saves at the same moment the later one drops the other's
+    # change; add a lock if a running whooper-run starts saving settings too.
+    write_file(path, text)
+
+
+def write_file(path, text, exclusive=False):
+    """Writes text to path through a temporary file beside it, which then replaces it, so a failure
+    leaves the old file whole and a program watching the folder, such as Prompting Time, never reads
+    half a file. A file that already exists keeps its mode. With exclusive, the write raises
+    FileExistsError when path exists, so of two writers only the first succeeds."""
     fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     try:
         with os.fdopen(fd, "w") as file:
             file.write(text)
-        shutil.copymode(path, temporary)
-        os.replace(temporary, path)
+        if exclusive:
+            # Unlike a rename, a link fails when the name is taken.
+            os.link(temporary, path)
+            os.unlink(temporary)
+        else:
+            if path.exists():
+                shutil.copymode(path, temporary)
+            os.replace(temporary, path)
     except BaseException:
         os.unlink(temporary)
         raise
@@ -797,17 +823,83 @@ def hold_back(verdicts, comments, started, orgs):
     return posts, held
 
 
-def review_request(head_sha, posts):
-    """The body of the one POST /pulls/<pr>/reviews call for posts. The event is always COMMENT,
-    never APPROVE or REQUEST_CHANGES."""
+def review_request(head_sha, event, body, comments):
+    """The body of the one POST /repos/<owner>/<repo>/pulls/<pr>/reviews call that posts a review at
+    head_sha: event is APPROVE or COMMENT, body is the review's message, and comments are (finding,
+    comment body) pairs, each posted on its finding's line."""
     return {
         "commit_id": head_sha,
-        "event": "COMMENT",
-        "body": f"{MARKER} review. Each comment reports a failure Whooper reproduced at this commit and not at the merge base.",
-        "comments": [
-            {"path": f["path"], "line": f["line"], "side": f["side"], "body": f"{MARKER}\n\n{f['draft']}"} for f in posts
-        ],
+        "event": event,
+        "body": body,
+        "comments": [{"path": f["path"], "line": f["line"], "side": f["side"], "body": text} for f, text in comments],
     }
+
+
+def read_drafts(run_dir):
+    """The user's choices for a review run, from <run dir>/drafts.json, which bin/whooper-draft
+    writes: the review's event, APPROVE or COMMENT, and message, and per finding ID whether its
+    comment is included and, when the user edited it, the comment's text. Without the file the run
+    includes nothing, so nothing posts until the user chooses, and the review only comments and has
+    no message."""
+    path = run_dir / "drafts.json"
+    saved = json.loads(path.read_text()) if path.exists() else {}
+    return {"event": "COMMENT", "message": "", "findings": {}, **saved}
+
+
+# Each change bin/whooper-draft makes, with the number of arguments it takes.
+DRAFT_CHANGES = {"include": 1, "leave-out": 1, "text": 2, "approve": 0, "comment": 0, "message": 1}
+DRAFT_USAGE = ("usage: whooper-draft <run-id> [include <finding-id> | leave-out <finding-id> | text <finding-id> <text>"
+               " | approve | comment | message <text>]")
+
+
+def change_drafts(run_dir, change, *args):
+    """Makes one change to a run's drafts and saves them: includes a finding's comment or leaves it
+    out, replaces its text, makes the review approve or only comment, or sets its message. Returns
+    the drafts. After the run's review is submitted a change would not reach GitHub, so it refuses."""
+    if DRAFT_CHANGES.get(change) != len(args):
+        raise SystemExit(DRAFT_USAGE)
+    if (run_dir / "submit.json").exists():
+        raise SystemExit(f"whooper-draft: {run_dir} was already submitted; see its submit.json")
+    if not (run_dir / "findings.json").exists():
+        raise SystemExit(f"whooper-draft: {run_dir} has no findings.json, so its review did not finish")
+    if change == "text" and not args[1].strip():
+        raise SystemExit("whooper-draft: the text is empty; to drop the comment, leave the finding out")
+    drafts = read_drafts(run_dir)
+    if change in ("include", "leave-out", "text"):
+        ids = [f["id"] for f in json.loads((run_dir / "findings.json").read_text())["findings"]]
+        if args[0] not in ids:
+            raise SystemExit(f"whooper-draft: the run has no finding {args[0]}; its findings are"
+                             f" {', '.join(ids) or 'none'}")
+        choice = drafts["findings"].setdefault(args[0], {"included": False})
+        if change == "text":
+            choice["text"] = args[1]
+        else:
+            choice["included"] = change == "include"
+    elif change == "message":
+        drafts["message"] = args[0]
+    else:
+        drafts["event"] = change.upper()
+    # Nothing locks drafts.json, so of two changes at the same moment the later one drops the other's;
+    # add a lock if Prompting Time and the agent come to change one run's drafts at once.
+    write_file(run_dir / "drafts.json", json.dumps(drafts, indent=2))
+    return drafts
+
+
+def vetted_comments(findings, drafts):
+    """The comments whooper-submit posts, as (finding, comment body) pairs in findings.json's order:
+    one for each finding the drafts include. A body is VETTED, a blank line, and the user's text or
+    else the finding's draft, opened with its label."""
+    comments = []
+    for f in findings:
+        choice = drafts["findings"].get(f["id"], {})
+        if not choice.get("included"):
+            continue
+        # Leading blanks would hide the label, and four spaces would make the first line code.
+        text = choice.get("text", f["draft"]).strip()
+        if not LABEL.match(text):
+            text = f"{LABELS[f['kind']]} {text}"
+        comments.append((f, f"{VETTED}\n\n{text}"))
+    return comments
 
 
 APPROVAL_TEXT = {"approve_once_ci_passes": "Approve once CI passes", "look_first": "Look first"}
@@ -1024,7 +1116,10 @@ def main(command, *args):
         append_digest(data, run, item, held)
         request_file = run / "post-request.json"
         if posts:
-            request_file.write_text(json.dumps(review_request(item["head_sha"], posts), indent=2))
+            # Whooper's own review only comments: it never approves or requests changes.
+            body = f"{MARKER} review. Each comment reports a failure Whooper reproduced at this commit and not at the merge base."
+            request = review_request(item["head_sha"], "COMMENT", body, [(p, f"{MARKER}\n\n{p['draft']}") for p in posts])
+            request_file.write_text(json.dumps(request, indent=2))
         (run / "post.json").write_text(json.dumps({
             "status": "printed" if posts else "nothing to post",
             "request": str(request_file) if posts else None,
@@ -1034,6 +1129,56 @@ def main(command, *args):
         for h in held:
             print(f"held: finding {h['id']} at {h['path']}:{h['line']}: {', '.join(h['checks_failed'])}")
         print(f"printed the request to {request_file}" if posts else "nothing to post")
+    elif command == "draft":
+        if len(args) < 2:
+            raise SystemExit(DRAFT_USAGE)
+        run, change = Path(args[0]) / "runs" / args[1], args[2:]
+        if not (run / "run.json").exists():
+            raise SystemExit(f"whooper-draft: no run {args[1]} in {run.parent}")
+        print(json.dumps(change_drafts(run, *change) if change else read_drafts(run), indent=2))
+    elif command == "submit":
+        data, run, head_now, flags = Path(args[0]), Path(args[1]).resolve(), args[2], args[3:]
+        # bin/whooper-submit writes submit.json saying posting before it posts, and adds GitHub's
+        # response after, so a run that has the file may have its review on GitHub.
+        if (run / "submit.json").exists():
+            if load(run / "submit.json")["status"] == "posting":
+                raise SystemExit(f"whooper-submit: another submit of {run} is posting or did not finish, so its review"
+                                 " may be on GitHub; check the PR, then delete submit.json to submit again")
+            raise SystemExit(f"whooper-submit: {run} was already submitted; see its submit.json")
+        if not (run / "findings.json").exists():
+            raise SystemExit(f"whooper-submit: {run} has no findings.json, so its review did not finish")
+        item = load(run / "run.json")
+        if head_now != item["head_sha"]:
+            # whooper-post's mark. While GitHub requests the user's review, the next poll lists the PR at
+            # its new head, which no record covers yet, so the round reviews it.
+            write_record(data / "prs", item, "stale", datetime.now(timezone.utc))
+            raise SystemExit(f"whooper-submit: nothing posted: the PR has new commits since the review (head"
+                             f" {item['head_sha'][:12]}, now {head_now[:12]}). Whooper reviews them in its next round"
+                             " while GitHub still requests your review; bin/whooper-round runs that round now.")
+        drafts = read_drafts(run)
+        comments = vetted_comments(load(run / "findings.json")["findings"], drafts)
+        if not comments and drafts["event"] == "COMMENT":
+            raise SystemExit("whooper-submit: nothing to submit: the drafts include no comment and do not approve;"
+                             " change them with bin/whooper-draft")
+        # A mention notifies someone under the user's name, so each one waits for the user's approval.
+        mentions = [f"{m} in the comment on {f['path']}:{f['line']} (finding {f['id']})"
+                    for f, body in comments for m in MENTION.findall(body)]
+        mentions += [f"{m} in the message" for m in MENTION.findall(drafts["message"])]
+        if mentions and "--allow-mentions" not in flags:
+            raise SystemExit("whooper-submit: nothing posted: the review @-mentions someone, and posting would notify them:\n"
+                             + "".join(f"  {m}\n" for m in mentions) + "Pass --allow-mentions to post it anyway.")
+        request = review_request(item["head_sha"], drafts["event"], drafts["message"], comments)
+        write_file(run / "submit-request.json", json.dumps(request, indent=2))
+        if "--print" in flags:
+            print(f"printed the request to {run / 'submit-request.json'}; nothing posted")
+            return
+        # bin/whooper-submit posts the request next. Only one submit can create submit.json, so of two
+        # at once only one posts.
+        claim = json.dumps({"status": "posting", "request": request}, indent=2)
+        try:
+            write_file(run / "submit.json", claim, exclusive=True)
+        except FileExistsError:
+            raise SystemExit(f"whooper-submit: {run} was already submitted; see its submit.json")
     elif command == "summary":
         sys.stdout.write(summary_text(Path(args[0]).resolve()))
     elif command == "skills":

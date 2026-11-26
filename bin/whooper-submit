@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Posts a review run's drafts, as the user chose them with bin/whooper-draft, to GitHub as one
+# review, with the user's own gh login:
+#
+#   whooper-submit <run-id> [--print] [--allow-mentions]
+#
+# Prompting Time's Submit button and Whooper's agent both run it, and Prompting Time asks the user
+# to confirm first: --print writes the exact request to <run dir>/submit-request.json and posts
+# nothing, so the confirmation can show what will post. The review is one
+# POST /repos/<owner>/<repo>/pulls/<pr>/reviews at the head the run reviewed, with the drafts'
+# event (APPROVE or COMMENT) and message, and one comment per included finding: "AI comment
+# (vetted)", a blank line, then the user's text or else the finding's draft, opened with its
+# Conventional Comments label, or with its finding kind's when it has none.
+#
+# It first re-reads the PR's head. When the PR has new commits since the review, nothing posts and
+# the PR record says stale, as whooper-post marks it, so the next round reviews the new commits
+# while GitHub still requests the user's review. Nothing posts either while an included comment or
+# the message @-mentions someone: it lists each mention, and with --allow-mentions it posts them. A
+# comment someone wrote on the same line since the review, and a link outside the configured orgs,
+# do not stop it. It refuses a review that includes no comment and does not approve.
+#
+# Before it posts, it writes <run dir>/submit.json saying posting, and after, GitHub's response,
+# so the file records the request and the response, and a second call refuses: a review never posts
+# twice. A submit stopped while it posts leaves the file saying posting, and the next call refuses
+# until the user has checked the PR on GitHub and deleted the file.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+eval "$("$root/lib/python" "$root/lib/whooper.py" env)"
+data="$WHOOPER_STATE"
+usage="usage: whooper-submit <run-id> [--print] [--allow-mentions]"
+
+die() {
+  echo "whooper-submit: $*" >&2
+  exit 1
+}
+
+run_id="" print="" allow_mentions=""
+while (($#)); do
+  case "$1" in
+    --print) print=--print ;;
+    --allow-mentions) allow_mentions=--allow-mentions ;;
+    *)
+      [[ -z "$run_id" ]] || die "$usage"
+      run_id="$1"
+      ;;
+  esac
+  shift
+done
+[[ -n "$run_id" ]] || die "$usage"
+run="$data/runs/$run_id"
+[[ -f "$run/run.json" ]] || die "no run $run_id in $data/runs"
+read -r repo pr < <(jq -r '[.repo, .pr] | @tsv' "$run/run.json")
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+head_now="$(gh api "repos/$repo/pulls/$pr" --jq .head.sha)"
+# lib/whooper.py runs the checks and writes the request to submit-request.json. Without --print it
+# then writes submit.json saying posting, which only one whooper-submit can create.
+"$root/lib/python" "$root/lib/whooper.py" submit "$data" "$run" "$head_now" ${print:+"$print"} \
+  ${allow_mentions:+"$allow_mentions"}
+[[ -z "$print" ]] || exit 0
+# The request comes from submit.json, which no other whooper-submit can change, so the file records
+# exactly what posted.
+jq .request "$run/submit.json" > "$work/request.json"
+if ! gh api --method POST "repos/$repo/pulls/$pr/reviews" --input "$work/request.json" \
+  > "$work/response.json" 2> "$work/error.log"; then
+  # An error answer, such as 422 for a line outside the diff, means GitHub took nothing, so the user
+  # may change the drafts and submit again. A connection lost after GitHub took the review fails the
+  # same way, and a second submit would then post the review twice, so the message says to check.
+  rm -f "$run/submit.json"
+  die "posting failed; unless GitHub answered with an error, check the PR before submitting again:
+$(cat "$work/error.log" "$work/response.json")"
+fi
+jq --slurpfile response "$work/response.json" '.status = "posted" | .response = $response[0]' "$run/submit.json" \
+  > "$run/submit.json.tmp"
+mv "$run/submit.json.tmp" "$run/submit.json"
+echo "posted the review: $(jq -r .html_url "$work/response.json")"

@@ -12,8 +12,8 @@ from time import monotonic, sleep
 from unittest import mock
 
 from whooper import (REVIEW_WORDING, bot_list, check_schema, claude_shell_calls, classify, conversation,
-                     devin_shell_calls, fill, main, next_round, pr_link, poll_items, read_asks, read_schedule,
-                     select_work, skill_hashes, slack_posts, summary_text, write_record)
+                     devin_shell_calls, fill, main, next_round, pr_link, poll_items, read_asks, read_drafts,
+                     read_schedule, select_work, skill_hashes, slack_posts, summary_text, write_record)
 
 LOGIN = "sam-example"
 # Every test runs on this made-up config, never on the user's own.
@@ -1078,6 +1078,273 @@ class PostTest(unittest.TestCase):
         self.post()
         with self.assertRaises(SystemExit):
             self.post()
+
+
+class SubmitTest(unittest.TestCase):
+    """bin/whooper-submit, and whooper.py draft, which bin/whooper-draft runs, on a review run of
+    example-org/example-repo#12 at head h1 in a throwaway state folder. gh is a fake: it reports the
+    PR's head from the file head, lists a teammate's comment on finding 1's line written after the
+    review started, records the body of each review it is asked to post in posted.jsonl, and fails
+    any other call, so no test can reach GitHub."""
+
+    # What GitHub answers a review it created with, in part.
+    RESPONSE = {"id": 7001, "html_url": "https://github.com/example-org/example-repo/pull/12#pullrequestreview-7001"}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        tmp = Path(self.tmp.name)
+        self.fakes = tmp / "bin"
+        self.fakes.mkdir()
+        (self.fakes / "head").write_text("h1\n")
+        (self.fakes / "comments.json").write_text(json.dumps([{**review_comment(), "user": {"login": "teammate"}}]))
+        gh = self.fakes / "gh"
+        gh.write_text("\n".join([
+            "#!/bin/sh",
+            'fakes="${0%/*}"',
+            'case "$*" in',
+            '  "api repos/example-org/example-repo/pulls/12 --jq .head.sha") cat "$fakes/head" ;;',
+            '  "api --paginate repos/example-org/example-repo/pulls/12/comments?per_page=100") cat "$fakes/comments.json" ;;',
+            '  "api --method POST repos/example-org/example-repo/pulls/12/reviews --input "*)',
+            '    for arg; do [ "$previous" = --input ] && input="$arg"; previous="$arg"; done',
+            # GitHub answers a comment on a line outside the diff with 422, and takes nothing.
+            '    if [ -e "$fakes/refuse" ]; then',
+            """      echo '{"message": "Unprocessable Entity", "errors": ["Line could not be resolved"], "status": "422"}'""",
+            "      echo 'gh: Unprocessable Entity (HTTP 422)' >&2",
+            "      exit 1",
+            "    fi",
+            '    jq -c . "$input" >> "$fakes/posted.jsonl"',
+            f"    echo '{json.dumps(self.RESPONSE)}' ;;",
+            '  *) echo "fake gh: unexpected call: gh $*" >&2; exit 1 ;;',
+            "esac",
+        ]) + "\n")
+        gh.chmod(0o755)
+        self.env = {**os.environ, "PATH": f"{self.fakes}:{os.environ['PATH']}", "XDG_STATE_HOME": str(tmp),
+                    "XDG_CACHE_HOME": str(tmp / "cache")}
+        self.state = tmp / "whooper"
+        self.run = self.state / "runs" / "20310727T010246Z-12"
+        self.run.mkdir(parents=True)
+        (self.run / "run.json").write_text(json.dumps({
+            "run_id": self.run.name, "repo": "example-org/example-repo", "pr": 12, "head_sha": "h1",
+            "kind": "first_review", "dry_run": True, "as_of": None}))
+        approval = {"verdict": "look_first", "reason": "The question needs the author's answer."}
+        (self.run / "findings.json").write_text(json.dumps({
+            "status": "reviewed", "skip_reason": "", "approval": approval, "findings": [
+                finding(draft="**issue (blocking):** Bad JSON now returns 500 instead of 422."),
+                finding(id="2", kind="question", line=40, title="Why retry twice?",
+                        draft="**question:** Why does the client retry a call that succeeded?"),
+                # The review skills open each draft with its label; this one lacks it.
+                finding(id="3", kind="nit", nit_kind="wording", path="services/orders/README.md", line=3, side="LEFT",
+                        title="Old flag name", draft="This line still names the old --fast flag."),
+            ]}))
+
+    def draft(self, *change):
+        """whooper.py draft on the run, as bin/whooper-draft runs it; returns the drafts it prints."""
+        out = io.StringIO()
+        with redirect_stdout(out):
+            main("draft", str(self.state), self.run.name, *change)
+        return json.loads(out.getvalue())
+
+    def submit(self, *flags):
+        return subprocess.run([str(ROOT / "bin" / "whooper-submit"), self.run.name, *flags], env=self.env,
+                              capture_output=True, text=True, timeout=60)
+
+    def posted(self):
+        """The body of each review the fake gh was asked to post."""
+        path = self.fakes / "posted.jsonl"
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def test_posts_the_included_drafts_as_one_review_at_the_reviewed_head(self):
+        for change in [("include", "1"), ("include", "2"), ("include", "3"), ("approve",),
+                       ("text", "2", "Why retry a call that succeeded? It duplicates the order."),
+                       ("message", "Pre-approving to unblock")]:
+            self.draft(*change)
+        result = self.submit()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # A comment keeps the label its text opens with, and a text without one, such as finding 2's edit
+        # or finding 3's draft, gets its finding kind's.
+        request = {"commit_id": "h1", "event": "APPROVE", "body": "Pre-approving to unblock", "comments": [
+            {"path": "services/orders/internal/api/orders.go", "line": 88, "side": "RIGHT",
+             "body": "AI comment (vetted)\n\n**issue (blocking):** Bad JSON now returns 500 instead of 422."},
+            {"path": "services/orders/internal/api/orders.go", "line": 40, "side": "RIGHT",
+             "body": "AI comment (vetted)\n\n**question:** Why retry a call that succeeded? It duplicates the order."},
+            {"path": "services/orders/README.md", "line": 3, "side": "LEFT",
+             "body": "AI comment (vetted)\n\n**nit:** This line still names the old --fast flag."},
+        ]}
+        self.assertEqual(self.posted(), [request])
+        self.assertEqual(json.loads((self.run / "submit.json").read_text()),
+                         {"status": "posted", "request": request, "response": self.RESPONSE})
+        self.assertIn(self.RESPONSE["html_url"], result.stdout)
+
+    def test_a_finding_left_out_stays_out(self):
+        for change in [("include", "1"), ("include", "2"), ("leave-out", "1")]:
+            self.draft(*change)
+        result = self.submit()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        [request] = self.posted()
+        self.assertEqual((request["event"], request["body"]), ("COMMENT", ""))
+        self.assertEqual([c["line"] for c in request["comments"]], [40])
+
+    def test_new_commits_post_nothing_and_leave_the_pr_to_the_next_round(self):
+        self.draft("include", "1")
+        (self.fakes / "head").write_text("h2\n")
+        for flags in [["--print"], []]:
+            with self.subTest(flags=flags):
+                result = self.submit(*flags)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("new commits", result.stderr)
+                self.assertIn("bin/whooper-round", result.stderr)
+        self.assertEqual(self.posted(), [])
+        self.assertFalse((self.run / "submit.json").exists())
+        self.assertFalse((self.run / "submit-request.json").exists())
+        # The mark whooper-post leaves: the reviewed head's record says stale.
+        record = self.state / "prs" / "example-org-example-repo-12" / "h1.first_review.json"
+        self.assertEqual(json.loads(record.read_text())["status"], "stale")
+
+    def test_an_at_mention_posts_only_with_allow_mentions(self):
+        self.draft("include", "1")
+        self.draft("text", "1", "**issue:** @alice, bad JSON now returns 500; alice@example.com has the trace.")
+        self.draft("message", "cc @example-org/orders-team")
+        for flags in [[], ["--print"]]:
+            with self.subTest(flags=flags):
+                refused = self.submit(*flags)
+                self.assertEqual(refused.returncode, 1)
+                for text in ["@alice in the comment on services/orders/internal/api/orders.go:88 (finding 1)",
+                             "@example-org/orders-team in the message", "--allow-mentions"]:
+                    self.assertIn(text, refused.stderr)
+                # An email address mentions nobody.
+                self.assertNotIn("@example.com", refused.stderr)
+        self.assertEqual(self.posted(), [])
+        self.assertFalse((self.run / "submit-request.json").exists())
+        allowed = self.submit("--allow-mentions")
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        [request] = self.posted()
+        self.assertEqual(request["body"], "cc @example-org/orders-team")
+        self.assertEqual(request["comments"][0]["body"],
+                         "AI comment (vetted)\n\n**issue:** @alice, bad JSON now returns 500; alice@example.com has the trace.")
+
+    def test_a_teammates_comment_on_the_line_and_an_outside_link_do_not_stop_it(self):
+        # The fake gh lists a teammate's comment on finding 1's line, written after the review started.
+        self.draft("include", "1")
+        self.draft("text", "1", "**issue:** Bad JSON now returns 500; https://example.com/rfc says 422.")
+        result = self.submit()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        [request] = self.posted()
+        self.assertEqual(request["comments"][0]["body"],
+                         "AI comment (vetted)\n\n**issue:** Bad JSON now returns 500; https://example.com/rfc says 422.")
+
+    def test_print_writes_the_request_that_would_post_and_posts_nothing(self):
+        self.draft("include", "2")
+        printed = self.submit("--print")
+        self.assertEqual(printed.returncode, 0, printed.stderr)
+        self.assertIn("submit-request.json", printed.stdout)
+        self.assertEqual(self.posted(), [])
+        self.assertFalse((self.run / "submit.json").exists())
+        request = json.loads((self.run / "submit-request.json").read_text())
+        self.assertEqual(self.submit().returncode, 0)
+        self.assertEqual(self.posted(), [request])
+
+    def test_a_review_posts_once(self):
+        self.draft("include", "1")
+        self.assertEqual(self.submit().returncode, 0)
+        for flags in [[], ["--print"]]:
+            with self.subTest(flags=flags):
+                again = self.submit(*flags)
+                self.assertEqual(again.returncode, 1)
+                self.assertIn("already submitted", again.stderr)
+        self.assertEqual(len(self.posted()), 1)
+        # A change now would not reach GitHub.
+        with self.assertRaises(SystemExit):
+            self.draft("include", "2")
+
+    def test_a_submit_that_did_not_finish_blocks_the_next(self):
+        # A submit stopped while gh posted leaves submit.json saying posting, and the review may be on GitHub.
+        self.draft("include", "1")
+        (self.run / "submit.json").write_text(json.dumps({"status": "posting", "request": {}}))
+        result = self.submit()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("did not finish", result.stderr)
+        self.assertEqual(self.posted(), [])
+
+    def test_of_two_submits_at_once_only_one_posts(self):
+        # Another submit claims the run after this one found no submit.json, while it reads the drafts.
+        self.draft("include", "1")
+        claim = {"status": "posting", "request": {}}
+
+        def claimed_meanwhile(run_dir):
+            (self.run / "submit.json").write_text(json.dumps(claim))
+            return read_drafts(run_dir)
+
+        with mock.patch("whooper.read_drafts", claimed_meanwhile), self.assertRaises(SystemExit) as caught:
+            main("submit", str(self.state), str(self.run), "h1")
+        self.assertIn("already submitted", str(caught.exception))
+        self.assertEqual(json.loads((self.run / "submit.json").read_text()), claim)
+        # The losing claim's temporary file is gone too.
+        self.assertEqual(sorted(p.name for p in self.run.iterdir()),
+                         ["drafts.json", "findings.json", "run.json", "submit-request.json", "submit.json"])
+
+    def test_a_review_github_refuses_can_be_submitted_again(self):
+        self.draft("include", "1")
+        (self.fakes / "refuse").touch()
+        refused = self.submit()
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("Line could not be resolved", refused.stderr)
+        self.assertFalse((self.run / "submit.json").exists())
+        (self.fakes / "refuse").unlink()
+        self.assertEqual(self.submit().returncode, 0)
+        self.assertEqual(len(self.posted()), 1)
+
+    def test_a_review_without_comments_posts_only_as_an_approval(self):
+        # Without drafts.json the review includes nothing and only comments; a message alone does not count.
+        for change in [None, ("message", "Looks fine.")]:
+            with self.subTest(change=change):
+                if change:
+                    self.draft(*change)
+                empty = self.submit()
+                self.assertEqual(empty.returncode, 1)
+                self.assertIn("nothing to submit", empty.stderr)
+        self.draft("approve")
+        result = self.submit()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.posted(), [{"commit_id": "h1", "event": "APPROVE", "body": "Looks fine.", "comments": []}])
+
+    def test_whooper_draft_records_each_choice_and_prints_the_drafts(self):
+        command = [str(ROOT / "bin" / "whooper-draft"), self.run.name]
+        # A run without drafts.json includes nothing and only comments.
+        shown = subprocess.run(command, env=self.env, capture_output=True, text=True, timeout=60)
+        self.assertEqual((shown.returncode, json.loads(shown.stdout)), (0, {"event": "COMMENT", "message": "", "findings": {}}))
+        self.assertFalse((self.run / "drafts.json").exists())
+        edited = subprocess.run(command + ["text", "2", "**question:** Why retry?"], env=self.env, capture_output=True,
+                                text=True, timeout=60)
+        self.assertEqual(json.loads(edited.stdout)["findings"], {"2": {"included": False, "text": "**question:** Why retry?"}})
+        for change in [("include", "2"), ("include", "3"), ("leave-out", "3"), ("approve",),
+                       ("message", "Pre-approving to unblock")]:
+            drafts = self.draft(*change)
+        self.assertEqual(drafts, {"event": "APPROVE", "message": "Pre-approving to unblock", "findings": {
+            "2": {"included": True, "text": "**question:** Why retry?"}, "3": {"included": False}}})
+        self.assertEqual(self.draft("comment"), {**drafts, "event": "COMMENT"})
+        # Each change went to a temporary file renamed into place, so only drafts.json is new.
+        self.assertEqual(json.loads((self.run / "drafts.json").read_text()), {**drafts, "event": "COMMENT"})
+        self.assertEqual(sorted(p.name for p in self.run.iterdir()), ["drafts.json", "findings.json", "run.json"])
+
+    def test_whooper_draft_refuses_a_change_it_cannot_record(self):
+        for name, change, why in [
+            ("a finding the run does not have", ["include", "9"], "no finding 9"),
+            ("an empty text", ["text", "1", " \n"], "empty"),
+            ("an unknown change", ["reject", "1"], "usage"),
+            ("a change missing its text", ["text", "1"], "usage"),
+        ]:
+            with self.subTest(name), self.assertRaises(SystemExit) as caught:
+                self.draft(*change)
+            self.assertIn(why, str(caught.exception))
+        self.assertFalse((self.run / "drafts.json").exists())
+        with self.assertRaises(SystemExit) as caught:
+            main("draft", str(self.state))
+        self.assertIn("usage", str(caught.exception))
+        missing = subprocess.run([str(ROOT / "bin" / "whooper-draft"), "20310101T000000Z-1"], env=self.env,
+                                 capture_output=True, text=True, timeout=60)
+        self.assertEqual(missing.returncode, 1)
+        self.assertIn("no run 20310101T000000Z-1", missing.stderr)
 
 
 class SlackGuardTest(unittest.TestCase):

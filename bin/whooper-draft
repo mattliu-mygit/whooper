@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Records the user's choices for a review run in <state>/runs/<run-id>/drafts.json, which
+# bin/whooper-submit posts from, and prints the drafts as JSON, where <state> is
+# $XDG_STATE_HOME/whooper (default ~/.local/state/whooper). Prompting Time, Whooper's agent, and a
+# terminal all change drafts through this command:
+#
+#   whooper-draft <run-id>                            prints the drafts
+#   whooper-draft <run-id> include <finding-id>       puts the finding's comment in the review
+#   whooper-draft <run-id> leave-out <finding-id>     takes it out
+#   whooper-draft <run-id> text <finding-id> <text>   replaces the comment's text, label included,
+#                                                     such as "**nit:** ..."
+#   whooper-draft <run-id> approve | comment          makes the review approve, or only comment
+#   whooper-draft <run-id> message <text>             sets the review's message
+#
+# The drafts hold the review's event (APPROVE or COMMENT) and message, and per finding ID whether
+# its comment is included and, once edited, its text; a comment not edited posts the finding's
+# draft. A run without drafts.json includes nothing, so nothing posts until the user chooses, and
+# only comments, with no message. Each change goes through a temporary file and a rename, so a
+# program watching the state directory never reads half the file. After the run is submitted,
+# changes are refused.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+eval "$("$root/lib/python" "$root/lib/whooper.py" env)"
+exec "$root/lib/python" "$root/lib/whooper.py" draft "$WHOOPER_STATE" "$@"

@@ -3,8 +3,9 @@
 Whooper finds the pull requests one GitHub user is expected to review or re-check, and reviews
 them with coding-agent runs; the config picks the agent, and `agents/` has a folder per agent. It reads the user's review requests on GitHub and review asks in one
 Slack channel, reviews each PR in a sandboxed run, sorts the findings by a strict rule, writes the
-GitHub review it would post, and sends a summary to a private Slack channel. Live posting to GitHub
-is not turned on yet. `bin/whooper-run` repeats all of this on the schedule the config sets.
+GitHub review it would post, and sends a summary to a private Slack channel. It posts nothing to
+GitHub on its own: `bin/whooper-submit` posts one review built from the findings the user picked.
+`bin/whooper-run` repeats all of this on the schedule the config sets.
 
 ## Set it up
 
@@ -90,7 +91,7 @@ before that time.
 
 whooper-post re-reads the PR first. It posts nothing when the head moved, and it moves to the
 digest any finding whose line got a new review comment since the run started, or whose draft
-@-mentions someone or links outside the configured orgs. Live posting is not built yet.
+@-mentions someone or links outside the configured orgs. Its live posting is not built yet.
 whooper-summary delivers through the agent `[jobs] summary` names. On Claude, a Haiku run sends
 it, and its only Slack call, `slack_schedule_message`, is pinned by `hooks/slack-guard.sh` to the
 composed text, channel, and time. Devin cannot reach Slack, so it writes `summary.md` in the run
@@ -108,6 +109,37 @@ saves part of them. It checks the values against the schema, and the config as i
 with the checks Whooper runs when it starts, and only then rewrites the lines of those keys,
 keeping the file's comments. On a failure it prints why and leaves the file as it was. A change
 applies from the next round.
+
+## Submit a review
+
+Each review run keeps the user's choices for its review in `drafts.json`: which findings' comments
+go in, each one's text when the user edited it, whether the review approves or only comments, and
+its message. Prompting Time, Whooper's agent, and a terminal all change them with
+`bin/whooper-draft`, which prints the drafts as JSON after each change:
+
+```sh
+bin/whooper-draft <run-id>                                  # prints the drafts
+bin/whooper-draft <run-id> include 2                        # or leave-out 2
+bin/whooper-draft <run-id> text 2 '**question:** Why ...?'  # replaces finding 2's draft, label included
+bin/whooper-draft <run-id> approve                          # or comment, the default
+bin/whooper-draft <run-id> message 'Pre-approving to unblock'
+```
+
+A run without `drafts.json` includes nothing, so nothing posts until the user chooses.
+`bin/whooper-submit <run-id>` posts the review with the user's own gh login, as one GitHub review
+at the head the run reviewed. Each comment is `AI comment (vetted)`, a blank line, and the text,
+which keeps the Conventional Comments label it opens with, such as `**nit:**`; a text without one
+gets its finding kind's. Prompting Time's Submit button and Whooper's agent both run it after
+Prompting Time's confirmation, which shows the request that `whooper-submit <run-id> --print`
+writes to `submit-request.json` without posting.
+
+whooper-submit re-reads the PR first. When the PR has new commits, it posts nothing and marks the
+reviewed head's record stale, as whooper-post does, so the next round reviews the new commits while
+GitHub still requests the user's review; `bin/whooper-round` runs that round at once. It also posts
+nothing while an included comment or the message @-mentions someone, and lists each mention;
+`--allow-mentions` posts them. A comment someone wrote on the same line since the review, and a link
+outside the configured orgs, do not stop it. It refuses a review that includes no comment and does
+not approve, and a run it already submitted, so a review never posts twice.
 
 ## What counts as work
 
@@ -174,7 +206,8 @@ skipped run gets no verdicts.
 Each run also returns `approval`: `approve_once_ci_passes` when the run found nothing that needs the
 author and checked enough to trust the change, otherwise `look_first`, with a reason that says what
 the run did and did not check. The run cannot see CI, so no verdict covers it. The approval goes
-into the PR record and the summary. It is the run's judgment, and Whooper never approves on GitHub.
+into the PR record and the summary. It is the run's judgment: Whooper approves on GitHub only when
+the user chooses to, through whooper-submit.
 
 ## Approvals
 
@@ -185,7 +218,8 @@ stopped with everything it started, and the cursor stays put, so the next poll r
 slackdump only reads. Review runs have no GitHub
 login and every Slack write denied, and whooper-review refuses to run without `--dry-run`. The summary run
 may call only `slack_schedule_message`, and `hooks/slack-guard.sh` blocks any other Slack call,
-any other channel, a thread, a changed text or time, and a second summary.
+any other channel, a thread, a changed text or time, and a second summary. Only whooper-submit writes
+to GitHub, with the user's own login: the one review the user chose in a run's `drafts.json`.
 
 ## Stop it
 
@@ -195,11 +229,14 @@ whooper-run's process alone waits for that round to end. Interrupt any other scr
 or stop a review with `kill $(cat ~/.local/state/whooper/locks/*/pid)`. An interrupted review runs
 the teardown script, removes its worktrees and lock, and counts as a failure in its record. The
 Slack cursor moves only after a poll writes its output, so an interrupted poll is simply repeated.
+A whooper-submit interrupted while gh posts leaves the run's `submit.json` saying `posting`, and
+whooper-submit refuses that run until you check the PR on GitHub and delete the file.
 
 ## Files under the state directory
 
 whooper-run and whooper-round write each of their files through a temporary file and a rename, so a
-program watching the directory never reads half of one.
+program watching the directory never reads half of one, and whooper-draft and whooper-submit write a
+run's `drafts.json`, `submit-request.json`, and `submit.json` the same way.
 
 - `poll/github.json`: whooper-fetch's latest output, one entry per PR as `queries/pr.graphql`
   returns it.
@@ -210,8 +247,8 @@ program watching the directory never reads half of one.
 - `prs/<owner>-<repo>-<pr>/<head>.<kind>.json`: a record of work on one head:
   `{"status": "running" | "done" | "failed" | "stale", "failures": <n>, "started_at": "<ISO 8601 time>"}`.
   whooper-review writes running when it starts and failed, with one more failure, when it stops
-  without findings. whooper-classify writes done with the run's `approval`, and whooper-post writes
-  stale when the head moved.
+  without findings. whooper-classify writes done with the run's `approval`, and whooper-post and
+  whooper-submit write stale when the head moved.
   whooper-select drops an item in a repo the config has no `[repos."<owner>/<repo>"]` table for,
   an item whose record is done or running or has failed 3 times, and a re-check of a PR that
   already has 3 re-check records for other heads started today (local time).
@@ -240,5 +277,9 @@ program watching the directory never reads half of one.
   `devin-config.json` and `stdout.log`) and `stderr.log` are the run, `findings.json` its result
   (`findings.invalid.json` when it did not fit the schema), `log.md` its evidence for each finding and the candidates it dropped,
   `verdicts.json` whooper-classify's output, and `post.json` and `post-request.json` whooper-post's.
+  `drafts.json` holds the user's choices for the review: `event` (`APPROVE` or `COMMENT`),
+  `message`, and `findings`, which maps a finding ID to `included` and, once edited, `text`.
+  `submit-request.json` is the request whooper-submit built last, and `submit.json` the review it
+  posted: the request and GitHub's `response`, with `status` `posted`, or `posting` while gh posts.
   The worktrees `head/` and `base/` exist only while the run does.
 - `digest.jsonl`: one line per finding that waits for the user, with its run.
