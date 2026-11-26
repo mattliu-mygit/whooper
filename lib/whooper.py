@@ -955,37 +955,48 @@ def vetted_comments(findings, drafts):
 
 def run_concerns(result):
     """What in a review run's findings.json argues against approving the PR, as lines for
-    whooper-submit to list: a verdict other than approve_once_ci_passes, with its reason, and each
-    finding that is not a nit. A run with none starts its drafts as an approval (read_drafts), and
-    whooper-submit approves it unless ci_concerns finds something."""
+    whooper-submit to list: a review the run skipped, with the run's reason; a verdict other than
+    approve_once_ci_passes, with its reason; and each finding that is not a nit. A run with none
+    starts its drafts as an approval (read_drafts), and whooper-submit approves it unless ci_concerns
+    finds something."""
     approval, concerns = result["approval"], []
+    # A run that skipped the PR, as prompts/review.md has it skip a large PR from an untagged ask,
+    # read too little to vouch for it, whatever its verdict says.
+    if result["status"] == "skipped":
+        concerns.append(f"the review was skipped: {result['skip_reason']}")
     if approval["verdict"] != "approve_once_ci_passes":
         concerns.append(f"the run's verdict is {approval['verdict']}: {approval['reason']}")
     return concerns + [f"finding {f['id']} is a {f['kind']}: {f['title']} ({f['path']}:{f['line']})"
                        for f in result["findings"] if f["kind"] != "nit"]
 
 
-def ci_concerns(checks, head):
+def ci_results(checks):
+    """Each CI check in checks, the statusCheckRollup of gh pr view --json, as {"name", "result"}: a
+    check run's conclusion once it completed and its status until then, such as IN_PROGRESS, or a
+    commit status's state. They are sorted by name and result, so GitHub listing the same checks in
+    another order gives the same list, and the fingerprint whooper-submit prints stays the same."""
+    results = []
+    for c in checks:
+        if c["__typename"] == "CheckRun":
+            name = f"{c['workflowName']} / {c['name']}" if c["workflowName"] else c["name"]
+            result = c["conclusion"] if c["status"] == "COMPLETED" else c["status"]
+        else:
+            name, result = c["context"], c["state"]
+        results.append({"name": name, "result": result})
+    return sorted(results, key=lambda r: (r["name"], r["result"]))
+
+
+def ci_concerns(results, head):
     """Each CI check on head that has not passed, as lines for whooper-submit to list: failed,
-    cancelled, still running, or waiting. checks are the statusCheckRollup of gh pr view --json:
-    check runs, whose conclusion counts once they completed, and commit statuses. A head no check has
-    reported on is a concern too, since CI may not have started on a push yet.
+    cancelled, still running, or waiting. results are ci_results' for the checks on head. A head no
+    check has reported on is a concern too, since CI may not have started on a push yet.
 
     statusCheckRollup can list a check more than once, when it ran again on the same head, so a check
     that failed and then passed is still a concern. Keep only each check's latest run, as gh pr
     checks does, if that stops approvals the user wanted."""
-    if not checks:
+    if not results:
         return [f"no CI check has reported on {head[:12]}"]
-    concerns = []
-    for c in checks:
-        if c["__typename"] == "CheckRun":
-            name = f"{c['workflowName']} / {c['name']}" if c["workflowName"] else c["name"]
-            state = c["conclusion"] if c["status"] == "COMPLETED" else c["status"]
-        else:
-            name, state = c["context"], c["state"]
-        if state not in PASSING:
-            concerns.append(f"CI check {name}: {state}")
-    return concerns
+    return [f"CI check {r['name']}: {r['result']}" for r in results if r["result"] not in PASSING]
 
 
 def refuse(code, message):
@@ -1262,10 +1273,11 @@ def main(command, *args):
         message = drafts["message"]
         if drafts["event"] == "APPROVE" and not message.strip():
             message = PRE_APPROVAL if comments else ""
+        ci = ci_results(pr["statusCheckRollup"])
         # An approval lets the PR merge under the user's name, so whatever in the run or in CI argues
         # against it waits for the user's own look.
         if drafts["event"] == "APPROVE" and "--approve-anyway" not in flags:
-            if concerns := run_concerns(result) + ci_concerns(pr["statusCheckRollup"], head_now):
+            if concerns := run_concerns(result) + ci_concerns(ci, head_now):
                 refuse(NOT_SAFE_EXIT, "whooper-submit: nothing posted: the review approves, and the run is not safe to"
                        " approve:\n" + "".join(f"  {c}\n" for c in concerns)
                        + "Pass --approve-anyway to approve it anyway, or make the review only comment with"
@@ -1278,17 +1290,30 @@ def main(command, *args):
             refuse(MENTIONS_EXIT, "whooper-submit: nothing posted: the review @-mentions someone, and posting would"
                    " notify them:\n" + "".join(f"  {m}\n" for m in mentions) + "Pass --allow-mentions to post it anyway.")
         request = review_request(item["head_sha"], drafts["event"], message, comments)
-        text = json.dumps(request, indent=2)
-        write_file(run / "submit-request.json", text)
-        # The fingerprint names this exact request, so the submit Prompting Time runs after its
-        # confirmation, with --expect, posts nothing the user did not see.
+        # Prompting Time's confirmation shows this, and the fingerprint names it, so the submit it runs
+        # after the confirmation, with --expect, posts nothing the user did not see: the exact request,
+        # and for an approval, which rests on CI too, the CI results. A comment does not depend on CI,
+        # so a check that finishes while the user reads a comment's confirmation changes nothing. Any
+        # change of a check's result counts, even QUEUED to IN_PROGRESS; count only finished results
+        # if approving while CI runs comes to ask the user again too often.
+        shown = {"request": request, "ci": ci if drafts["event"] == "APPROVE" else None}
+        text = json.dumps(shown, indent=2)
         fingerprint = hashlib.sha256(text.encode()).hexdigest()
+        request_file = run / "submit-request.json"
         expect = next((flag.removeprefix("--expect=") for flag in flags if flag.startswith("--expect=")), None)
         if expect is not None and expect != fingerprint:
-            refuse(CHANGED_EXIT, f"whooper-submit: nothing posted: the drafts changed since --print showed the review,"
+            # The file --print wrote for the confirmation tells whether the drafts changed since or only
+            # CI did, unless a later --print replaced it.
+            before = request_file.read_bytes() if request_file.exists() else b""
+            if hashlib.sha256(before).hexdigest() != expect:
+                changed = "the drafts or CI"
+            else:
+                changed = "the drafts" if json.loads(before)["request"] != request else "CI"
+            refuse(CHANGED_EXIT, f"whooper-submit: nothing posted: {changed} changed since --print showed the review,"
                    f" so its fingerprint is now {fingerprint}, not {expect}. Run with --print to show it again.")
+        write_file(request_file, text)
         if "--print" in flags:
-            print(f"printed the request to {run / 'submit-request.json'}; nothing posted")
+            print(f"printed the request to {request_file}; nothing posted")
             print(f"fingerprint: {fingerprint}")
             return
         # bin/whooper-submit posts the request next. Only one submit can create submit.json, so of two
