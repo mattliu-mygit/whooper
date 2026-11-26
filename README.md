@@ -127,14 +127,11 @@ bin/whooper-draft <run-id> approve                          # or comment
 bin/whooper-draft <run-id> message 'Thanks, this reads well.'
 ```
 
-A run is safe to approve when it reviewed the PR, its verdict is `approve_once_ci_passes`, every
-finding it has is a nit, and every CI check on the reviewed head has passed when the review is
-submitted; as on GitHub, a skipped or neutral check counts as passed, but a head no check has
-reported on yet is not safe. A run that skipped the PR, as the review of a large PR from an
+A run is safe to approve when it reviewed the PR, its verdict is `approve_once_ci_passes`, and
+every finding it has is a nit. A run that skipped the PR, as the review of a large PR from an
 untagged ask does, read too little to vouch for it, so it is not safe whatever its verdict says.
-Until the user changes anything, a run that is safe as far as its own `findings.json` tells starts
-as an approval with every nit included, and any other run as a comment with nothing included, so
-the user decides. CI does not count there: only whooper-submit reads it.
+Until the user changes anything, a safe run starts as an approval with every nit included, and any
+other run as a comment with nothing included, so the user decides.
 
 `bin/whooper-submit <run-id>` posts the review with the user's own gh login, as one GitHub review
 at the head the run reviewed. Each comment is `AI comment (vetted)`, a blank line, and the text,
@@ -143,27 +140,21 @@ gets its finding kind's. An approval without a message says `Pre-approving to un
 includes comments and nothing when it includes none; a message the user set posts as written.
 
 Prompting Time's Submit button and Whooper's agent both run whooper-submit after Prompting Time's
-confirmation, which shows what `whooper-submit <run-id> --print` writes to `submit-request.json`
-without posting: `request`, the exact request, and `ci`. For an approval, `ci` lists each CI check
-on the head in name order, as `{"name": "CI / test", "result": "SUCCESS"}`, where the result is a
-check run's conclusion once it completed and its status until then, such as `IN_PROGRESS`, or a
-commit status's state. A review that only comments does not depend on CI, so its `ci` is null.
-`--print` also prints the fingerprint, the SHA-256 of that file, as its last line,
-`fingerprint: <hex>`, and the submit after the confirmation passes it back as `--expect <hex>`.
-The fingerprint covers the request and an approval's check names and results, and nothing else,
-such as a check's times or links, and Prompting Time can recompute it from the file it shows. When
-the drafts changed after the confirmation, or for an approval a check's result did, such as a
-pending check that has failed, the submit posts nothing and exits 13, so Prompting Time asks again.
+confirmation, which shows the exact request that `whooper-submit <run-id> --print` writes to
+`submit-request.json` without posting. `--print` also prints the request's fingerprint, the
+SHA-256 of that file, as its last line, `fingerprint: <hex>`, and the submit after the
+confirmation passes it back as `--expect <hex>`, so drafts changed after the confirmation post
+nothing the user did not see.
 
-whooper-submit re-reads the PR and the CI checks on its head first. Each refusal posts nothing and
-exits with its own code, so Prompting Time can tell them apart:
+whooper-submit re-reads the PR's head first. Each refusal posts nothing and exits with its own
+code, so Prompting Time can tell them apart:
 
 | Exit | Why | What then |
 | --- | --- | --- |
 | 10 | The PR has new commits since the review. | The reviewed head's record says stale and the PR goes on the recheck list, as whooper-post does, so the next round reviews the new commits whatever brought the PR in; `bin/whooper-round` runs that round at once. |
-| 11 | The review approves, and the run is not safe to approve. | It lists why: a review the run skipped and why, the verdict and its reason, the findings that are not nits, and the checks that failed, were cancelled, are still running, or have not reported. `--approve-anyway` approves after the user has looked. |
+| 11 | The review approves, and the run is not safe to approve. | It lists why: a review the run skipped and why, the verdict and its reason, and the findings that are not nits. `--approve-anyway` approves after the user has looked. |
 | 12 | An included comment or the message @-mentions someone. | It lists each mention, and `--allow-mentions` posts them. |
-| 13 | The fingerprint is not the one `--expect` gives: the drafts changed since `--print` showed the review, or for an approval CI did. | It says whether the drafts or CI changed, unless a later `--print` replaced the file the confirmation showed. `--print` shows the review and CI again for another confirmation. |
+| 13 | The request is not the one whose fingerprint `--expect` gives, because the drafts changed since `--print` showed it. | `--print` shows the new request for another confirmation. |
 
 Any other failure exits 1, or with gh's or jq's own code, none of which is 10 to 13. A comment
 someone wrote on the same line since the review, and a link outside the configured orgs, do not
@@ -323,9 +314,8 @@ whooper-submit write the recheck list's files the same way too.
   `verdicts.json` whooper-classify's output, and `post.json` and `post-request.json` whooper-post's.
   `drafts.json` holds the user's choices for the review: `event` (`APPROVE` or `COMMENT`),
   `message`, and `findings`, which maps a finding ID to `included` and, once edited, `text`.
-  `submit-request.json` is what whooper-submit last showed with `--print` or set out to post,
-  `request` and `ci`, which is null unless the review approves; its SHA-256 is the fingerprint
-  `--print` prints. `submit.json` is the review it posted: the request and GitHub's `response`,
-  with `status` `posted`, or `posting` while gh posts.
+  `submit-request.json` is the exact request whooper-submit last showed with `--print` or set out
+  to post, and its SHA-256 is the fingerprint `--print` prints. `submit.json` is the review it
+  posted: the request and GitHub's `response`, with `status` `posted`, or `posting` while gh posts.
   The worktrees `head/` and `base/` exist only while the run does.
 - `digest.jsonl`: one line per finding that waits for the user, with its run.

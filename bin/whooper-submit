@@ -5,17 +5,10 @@
 #   whooper-submit <run-id> [--print] [--allow-mentions] [--approve-anyway] [--expect <fingerprint>]
 #
 # Prompting Time's Submit button and Whooper's agent both run it, and Prompting Time asks the user
-# to confirm first. --print posts nothing and writes what the confirmation shows to
-# <run dir>/submit-request.json, as {"request": <the exact request>, "ci": <CI results>}. For an
-# approval, ci lists each CI check on the head in name order, as {"name": "CI / test", "result":
-# "SUCCESS"}, where the result is a check run's conclusion once it completed and its status until
-# then, such as IN_PROGRESS, or a commit status's state. A review that only comments does not
-# depend on CI, so its ci is null. On its last line, --print prints the fingerprint, the SHA-256 of
-# that file, as "fingerprint: <hex>", so it covers the request and an approval's check names and
-# results, and nothing else, such as a check's times or links. The submit after the confirmation
-# passes it back with --expect and posts only while the fingerprint is the same, so neither drafts
-# changed after the confirmation nor, for an approval, a check whose result changed since can post
-# unseen.
+# to confirm first: --print writes the exact request to <run dir>/submit-request.json, posts
+# nothing, and prints the request's fingerprint, the SHA-256 of that file, on its last line as
+# "fingerprint: <hex>". The submit after the confirmation passes it back with --expect and then
+# posts only that request, so drafts changed after the confirmation cannot post unseen.
 #
 # The review is one POST /repos/<owner>/<repo>/pulls/<pr>/reviews at the head the run reviewed,
 # with the drafts' event (APPROVE or COMMENT) and message, and one comment per included finding:
@@ -24,22 +17,20 @@
 # whose message is empty says "Pre-approving to unblock" when it includes comments, and nothing
 # when it includes none.
 #
-# It first re-reads the PR's head and the CI checks on it. Each refusal Prompting Time handles its
-# own way posts nothing and exits with its own code:
+# It first re-reads the PR's head. Each refusal Prompting Time handles its own way posts nothing and
+# exits with its own code:
 #
 #   10  The PR has new commits since the review. The reviewed head's record says stale and the PR
 #       goes on the recheck list, as whooper-post does, so the next round reviews the new commits
 #       whatever brought the PR in; bin/whooper-round runs that round now.
 #   11  The review approves, and the run is not safe to approve. It lists why: a review the run
 #       skipped, with its reason, since it read too little to vouch for the PR whatever its verdict
-#       says; a verdict other than approve_once_ci_passes, with its reason; each finding that is not
-#       a nit; and each CI check on the head that failed, was cancelled, or is still running, or
-#       that no check has reported. --approve-anyway approves anyway, once the user has looked.
+#       says; a verdict other than approve_once_ci_passes, with its reason; and each finding that is
+#       not a nit. --approve-anyway approves anyway, once the user has looked.
 #   12  An included comment or the message @-mentions someone. It lists each mention, and
 #       --allow-mentions posts them.
-#   13  The fingerprint is not the one --expect gives, because the drafts changed since --print
-#       showed the review or, for an approval, CI did, such as a pending check that has failed. It
-#       says which, unless a later --print replaced the file the confirmation showed.
+#   13  The request is not the one whose fingerprint --expect gives, because the drafts changed
+#       since --print showed it.
 #
 # Any other failure exits 1, or with gh's or jq's own code, none of which is 10 to 13. A comment
 # someone wrote on the same line since the review, and a link outside the configured orgs, do not
@@ -86,12 +77,10 @@ read -r repo pr < <(jq -r '[.repo, .pr] | @tsv' "$run/run.json")
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
-# One read gives the head and the CI checks on it, so the checks are the ones on the head compared.
-gh pr view "$pr" --repo "$repo" --json headRefOid,statusCheckRollup > "$work/pr.json"
-# lib/whooper.py runs the checks and writes the request, with an approval's CI results, to
-# submit-request.json. Without --print it then writes submit.json saying posting, which only one
-# whooper-submit can create.
-"$root/lib/python" "$root/lib/whooper.py" submit "$data" "$run" "$work/pr.json" ${print:+"$print"} \
+head_now="$(gh api "repos/$repo/pulls/$pr" --jq .head.sha)"
+# lib/whooper.py runs the checks and writes the request to submit-request.json. Without --print it
+# then writes submit.json saying posting, which only one whooper-submit can create.
+"$root/lib/python" "$root/lib/whooper.py" submit "$data" "$run" "$head_now" ${print:+"$print"} \
   ${allow_mentions:+"$allow_mentions"} ${approve_anyway:+"$approve_anyway"} ${expect:+"$expect"}
 [[ -z "$print" ]] || exit 0
 # The request comes from submit.json, which no other whooper-submit can change, so the file records

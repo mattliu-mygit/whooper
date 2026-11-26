@@ -24,7 +24,7 @@ from the user's config file (config_path), never from this code. The bin/ script
   whooper.py classify <data dir> <run dir>                                         -> verdicts, digest, record
   whooper.py post <data dir> <run dir> <head now> <review comments.json>          -> post.json, digest, record
   whooper.py draft <data dir> <run-id> [<change>]                                  -> the run's drafts JSON
-  whooper.py submit <data dir> <run dir> <gh pr view JSON> [--print] [--allow-mentions] [--approve-anyway]
+  whooper.py submit <data dir> <run dir> <head now> [--print] [--allow-mentions] [--approve-anyway]
                     [--expect=<fingerprint>]                                       -> submit-request.json, submit.json
   whooper.py summary <run dir>                                                     -> the summary channel's text
   whooper.py skills <skills dir>                                                   -> {skill: content hash}
@@ -68,9 +68,6 @@ VETTED = "AI comment (vetted)"
 # The message of an approval the user left without one, when it includes comments: the author need
 # not wait for the user, and the comments still ask for a look.
 PRE_APPROVAL = "Pre-approving to unblock"
-# What a CI check may end as and still count as passed, as on GitHub, where a skipped or neutral
-# check does not block a merge either.
-PASSING = ("SUCCESS", "SKIPPED", "NEUTRAL")
 # whooper-submit's exit codes for the refusals Prompting Time handles each its own way: the PR has
 # new commits since the review, the review approves a run that is not safe to approve, it
 # @-mentions someone, and its request is not the one --print showed. Any other failure exits 1, or
@@ -888,8 +885,7 @@ def read_drafts(run_dir):
 
     Until the user changes anything, a run that run_concerns finds nothing against starts as an
     approval with every finding, each a nit, included, and any other run as a comment with nothing
-    included, so the user decides. CI does not count here: whooper-submit reads it before it
-    approves. Either way the message starts empty."""
+    included, so the user decides. Either way the message starts empty."""
     path = run_dir / "drafts.json"
     if path.exists():
         return json.loads(path.read_text())
@@ -956,9 +952,9 @@ def vetted_comments(findings, drafts):
 def run_concerns(result):
     """What in a review run's findings.json argues against approving the PR, as lines for
     whooper-submit to list: a review the run skipped, with the run's reason; a verdict other than
-    approve_once_ci_passes, with its reason; and each finding that is not a nit. A run with none
-    starts its drafts as an approval (read_drafts), and whooper-submit approves it unless ci_concerns
-    finds something."""
+    approve_once_ci_passes, with its reason; and each finding that is not a nit. A run with none is
+    safe to approve: its drafts start as an approval (read_drafts), and whooper-submit approves it
+    without --approve-anyway."""
     approval, concerns = result["approval"], []
     # A run that skipped the PR, as prompts/review.md has it skip a large PR from an untagged ask,
     # read too little to vouch for it, whatever its verdict says.
@@ -968,35 +964,6 @@ def run_concerns(result):
         concerns.append(f"the run's verdict is {approval['verdict']}: {approval['reason']}")
     return concerns + [f"finding {f['id']} is a {f['kind']}: {f['title']} ({f['path']}:{f['line']})"
                        for f in result["findings"] if f["kind"] != "nit"]
-
-
-def ci_results(checks):
-    """Each CI check in checks, the statusCheckRollup of gh pr view --json, as {"name", "result"}: a
-    check run's conclusion once it completed and its status until then, such as IN_PROGRESS, or a
-    commit status's state. They are sorted by name and result, so GitHub listing the same checks in
-    another order gives the same list, and the fingerprint whooper-submit prints stays the same."""
-    results = []
-    for c in checks:
-        if c["__typename"] == "CheckRun":
-            name = f"{c['workflowName']} / {c['name']}" if c["workflowName"] else c["name"]
-            result = c["conclusion"] if c["status"] == "COMPLETED" else c["status"]
-        else:
-            name, result = c["context"], c["state"]
-        results.append({"name": name, "result": result})
-    return sorted(results, key=lambda r: (r["name"], r["result"]))
-
-
-def ci_concerns(results, head):
-    """Each CI check on head that has not passed, as lines for whooper-submit to list: failed,
-    cancelled, still running, or waiting. results are ci_results' for the checks on head. A head no
-    check has reported on is a concern too, since CI may not have started on a push yet.
-
-    statusCheckRollup can list a check more than once, when it ran again on the same head, so a check
-    that failed and then passed is still a concern. Keep only each check's latest run, as gh pr
-    checks does, if that stops approvals the user wanted."""
-    if not results:
-        return [f"no CI check has reported on {head[:12]}"]
-    return [f"CI check {r['name']}: {r['result']}" for r in results if r["result"] not in PASSING]
 
 
 def refuse(code, message):
@@ -1249,7 +1216,7 @@ def main(command, *args):
             raise SystemExit(f"whooper-draft: {run} has no findings.json, so its review did not finish")
         print(json.dumps(change_drafts(run, *change) if change else read_drafts(run), indent=2))
     elif command == "submit":
-        data, run, pr, flags = Path(args[0]), Path(args[1]).resolve(), load(args[2]), args[3:]
+        data, run, head_now, flags = Path(args[0]), Path(args[1]).resolve(), args[2], args[3:]
         # bin/whooper-submit writes submit.json saying posting before it posts, and adds GitHub's
         # response after, so a run that has the file may have its review on GitHub.
         if (run / "submit.json").exists():
@@ -1259,7 +1226,7 @@ def main(command, *args):
             raise SystemExit(f"whooper-submit: {run} was already submitted; see its submit.json")
         if not (run / "findings.json").exists():
             raise SystemExit(f"whooper-submit: {run} has no findings.json, so its review did not finish")
-        item, result, head_now = load(run / "run.json"), load(run / "findings.json"), pr["headRefOid"]
+        item, result = load(run / "run.json"), load(run / "findings.json")
         if head_now != item["head_sha"]:
             mark_new_commits(data, item, head_now, datetime.now(timezone.utc))
             refuse(NEW_COMMITS_EXIT, f"whooper-submit: nothing posted: the PR has new commits since the review (head"
@@ -1273,11 +1240,10 @@ def main(command, *args):
         message = drafts["message"]
         if drafts["event"] == "APPROVE" and not message.strip():
             message = PRE_APPROVAL if comments else ""
-        ci = ci_results(pr["statusCheckRollup"])
-        # An approval lets the PR merge under the user's name, so whatever in the run or in CI argues
-        # against it waits for the user's own look.
+        # An approval lets the PR merge under the user's name, so whatever in the run argues against
+        # it waits for the user's own look.
         if drafts["event"] == "APPROVE" and "--approve-anyway" not in flags:
-            if concerns := run_concerns(result) + ci_concerns(ci, head_now):
+            if concerns := run_concerns(result):
                 refuse(NOT_SAFE_EXIT, "whooper-submit: nothing posted: the review approves, and the run is not safe to"
                        " approve:\n" + "".join(f"  {c}\n" for c in concerns)
                        + "Pass --approve-anyway to approve it anyway, or make the review only comment with"
@@ -1290,27 +1256,16 @@ def main(command, *args):
             refuse(MENTIONS_EXIT, "whooper-submit: nothing posted: the review @-mentions someone, and posting would"
                    " notify them:\n" + "".join(f"  {m}\n" for m in mentions) + "Pass --allow-mentions to post it anyway.")
         request = review_request(item["head_sha"], drafts["event"], message, comments)
-        # Prompting Time's confirmation shows this, and the fingerprint names it, so the submit it runs
-        # after the confirmation, with --expect, posts nothing the user did not see: the exact request,
-        # and for an approval, which rests on CI too, the CI results. A comment does not depend on CI,
-        # so a check that finishes while the user reads a comment's confirmation changes nothing. Any
-        # change of a check's result counts, even QUEUED to IN_PROGRESS; count only finished results
-        # if approving while CI runs comes to ask the user again too often.
-        shown = {"request": request, "ci": ci if drafts["event"] == "APPROVE" else None}
-        text = json.dumps(shown, indent=2)
+        text = json.dumps(request, indent=2)
+        # The fingerprint names this exact request, so the submit Prompting Time runs after its
+        # confirmation, with --expect, posts nothing the user did not see.
         fingerprint = hashlib.sha256(text.encode()).hexdigest()
         request_file = run / "submit-request.json"
         expect = next((flag.removeprefix("--expect=") for flag in flags if flag.startswith("--expect=")), None)
         if expect is not None and expect != fingerprint:
-            # The file --print wrote for the confirmation tells whether the drafts changed since or only
-            # CI did, unless a later --print replaced it.
-            before = request_file.read_bytes() if request_file.exists() else b""
-            if hashlib.sha256(before).hexdigest() != expect:
-                changed = "the drafts or CI"
-            else:
-                changed = "the drafts" if json.loads(before)["request"] != request else "CI"
-            refuse(CHANGED_EXIT, f"whooper-submit: nothing posted: {changed} changed since --print showed the review,"
+            refuse(CHANGED_EXIT, f"whooper-submit: nothing posted: the drafts changed since --print showed the review,"
                    f" so its fingerprint is now {fingerprint}, not {expect}. Run with --print to show it again.")
+        # Only now, so a submit refused above leaves the file as the confirmation showed it.
         write_file(request_file, text)
         if "--print" in flags:
             print(f"printed the request to {request_file}; nothing posted")

@@ -1149,15 +1149,6 @@ class SubmitTest(unittest.TestCase):
                         draft="**nit:** `count` is never read.")
     REASONS = {"approve_once_ci_passes": "Ran the orders tests; nothing needs the author.",
                "look_first": "The question needs the author's answer."}
-    # The CI checks on a head where every check passed, as gh pr view --json statusCheckRollup lists
-    # them: GitHub Actions jobs, a check run of an app with no workflow, and a commit status. As on
-    # GitHub, a skipped or neutral check counts as passed.
-    PASSED = [
-        {"__typename": "CheckRun", "name": "test", "workflowName": "CI", "status": "COMPLETED", "conclusion": "SUCCESS"},
-        {"__typename": "CheckRun", "name": "docs", "workflowName": "CI", "status": "COMPLETED", "conclusion": "SKIPPED"},
-        {"__typename": "CheckRun", "name": "coverage", "workflowName": "", "status": "COMPLETED", "conclusion": "NEUTRAL"},
-        {"__typename": "StatusContext", "context": "ci/lint", "state": "SUCCESS"},
-    ]
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1166,13 +1157,13 @@ class SubmitTest(unittest.TestCase):
         self.fakes = tmp / "bin"
         self.fakes.mkdir()
         (self.fakes / "head").write_text("h1\n")
-        self.write_checks(self.PASSED)
         (self.fakes / "comments.json").write_text(json.dumps([{**review_comment(), "user": {"login": "teammate"}}]))
         gh = self.fakes / "gh"
         gh.write_text("\n".join([
             "#!/bin/sh",
             'fakes="${0%/*}"',
             'case "$*" in',
+            '  "api repos/example-org/example-repo/pulls/12 --jq .head.sha") cat "$fakes/head" ;;',
             '  "pr view 12 --repo example-org/example-repo --json headRefOid,statusCheckRollup")',
             '    jq -n --arg head "$(cat "$fakes/head")" --slurpfile checks "$fakes/checks.json"'
             " '{headRefOid: $head, statusCheckRollup: $checks[0]}' ;;",
@@ -1213,10 +1204,6 @@ class SubmitTest(unittest.TestCase):
         status = "skipped" if skip_reason else "reviewed"
         (self.run / "findings.json").write_text(json.dumps(
             {"status": status, "skip_reason": skip_reason, "approval": approval, "findings": findings}))
-
-    def write_checks(self, checks):
-        """Has the fake gh report checks as the CI checks on the PR's head."""
-        (self.fakes / "checks.json").write_text(json.dumps(checks))
 
     def draft(self, *change):
         """whooper.py draft on the run, as bin/whooper-draft runs it; returns the drafts it prints."""
@@ -1358,11 +1345,11 @@ class SubmitTest(unittest.TestCase):
         self.assertIn("submit-request.json", printed.stdout)
         self.assertEqual(self.posted(), [])
         self.assertFalse((self.run / "submit.json").exists())
-        # Its last line is the fingerprint: the SHA-256 of the file it wrote, which holds the request.
+        # Its last line is the request's fingerprint: the SHA-256 of the file it wrote.
         text = (self.run / "submit-request.json").read_bytes()
         self.assertEqual(printed.stdout.splitlines()[-1], f"fingerprint: {hashlib.sha256(text).hexdigest()}")
         self.assertEqual(self.submit().returncode, 0)
-        self.assertEqual(self.posted(), [json.loads(text)["request"]])
+        self.assertEqual(self.posted(), [json.loads(text)])
 
     def test_expect_posts_only_the_request_print_showed(self):
         missing = self.submit("--expect")
@@ -1378,48 +1365,15 @@ class SubmitTest(unittest.TestCase):
             self.assertIn(text, changed.stderr)
         self.assertEqual(self.posted(), [])
         self.assertFalse((self.run / "submit.json").exists())
-        # Shown again, the new request replaces the file the confirmation showed, so a submit with the
-        # old fingerprint can no longer tell what changed.
+        # The file still holds the request the confirmation showed.
+        self.assertEqual(hashlib.sha256((self.run / "submit-request.json").read_bytes()).hexdigest(), confirmed)
+        # Shown and confirmed again, the new request posts.
         again = self.shown()
         self.assertNotEqual(again, confirmed)
-        stale = self.submit("--expect", confirmed)
-        self.assertEqual(stale.returncode, 13, stale.stderr)
-        self.assertIn("the drafts or CI changed", stale.stderr)
-        # Confirmed again, the new request posts.
         result = self.submit("--expect", again)
         self.assertEqual(result.returncode, 0, result.stderr)
         [request] = self.posted()
         self.assertEqual(request["comments"][0]["body"], "AI comment (vetted)\n\n**question:** Why retry at all?")
-
-    def test_expect_posts_an_approval_only_while_ci_reads_as_print_showed(self):
-        # The user approves while a check still runs, as "Pre-approving to unblock" does.
-        running = {"__typename": "CheckRun", "name": "e2e", "workflowName": "CI", "status": "IN_PROGRESS", "conclusion": ""}
-        failed = {**running, "status": "COMPLETED", "conclusion": "FAILURE"}
-        self.write_findings("approve_once_ci_passes", [self.NIT])
-        self.write_checks(self.PASSED + [running])
-        confirmed = self.shown("--approve-anyway")
-        # Beside the request, the confirmation shows each check's result, in name order.
-        self.assertEqual(json.loads((self.run / "submit-request.json").read_text())["ci"], [
-            {"name": "CI / docs", "result": "SKIPPED"}, {"name": "CI / e2e", "result": "IN_PROGRESS"},
-            {"name": "CI / test", "result": "SUCCESS"}, {"name": "ci/lint", "result": "SUCCESS"},
-            {"name": "coverage", "result": "NEUTRAL"}])
-        # The check fails while the user reads the confirmation.
-        self.write_checks(self.PASSED + [failed])
-        changed = self.submit("--approve-anyway", "--expect", confirmed)
-        self.assertEqual(changed.returncode, 13, changed.stderr)
-        for text in ["CI changed", "--print"]:
-            self.assertIn(text, changed.stderr)
-        self.assertNotIn("drafts", changed.stderr)
-        self.assertEqual(self.posted(), [])
-        self.assertFalse((self.run / "submit.json").exists())
-        # Shown and confirmed again, the approval posts while CI reads the same, in whatever order
-        # GitHub lists the checks.
-        again = self.shown("--approve-anyway")
-        self.assertNotEqual(again, confirmed)
-        self.write_checks([failed] + self.PASSED[::-1])
-        result = self.submit("--approve-anyway", "--expect", again)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual([request["event"] for request in self.posted()], ["APPROVE"])
 
     def test_a_review_posts_once(self):
         self.draft("include", "1")
@@ -1452,10 +1406,8 @@ class SubmitTest(unittest.TestCase):
             (self.run / "submit.json").write_text(json.dumps(claim))
             return read_drafts(run_dir)
 
-        pr = Path(self.tmp.name) / "pr.json"
-        pr.write_text(json.dumps({"headRefOid": "h1", "statusCheckRollup": self.PASSED}))
         with mock.patch("whooper.read_drafts", claimed_meanwhile), self.assertRaises(SystemExit) as caught:
-            main("submit", str(self.state), str(self.run), str(pr))
+            main("submit", str(self.state), str(self.run), "h1")
         self.assertIn("already submitted", str(caught.exception))
         self.assertEqual(json.loads((self.run / "submit.json").read_text()), claim)
         # The losing claim's temporary file is gone too.
@@ -1504,6 +1456,26 @@ class SubmitTest(unittest.TestCase):
              "body": "AI comment (vetted)\n\n**nit:** `count` is never read."},
         ]}])
 
+    def test_a_safe_run_approves_whatever_ci_reports(self):
+        # The PR's author sees a failed check and fixes it, so CI does not bear on the approval: a safe
+        # run approves while a check fails or before any has reported, and the request the
+        # confirmation shows, which is the one that posts, says nothing about CI.
+        failed = {"__typename": "CheckRun", "name": "test", "workflowName": "CI", "status": "COMPLETED",
+                  "conclusion": "FAILURE"}
+        request = {"commit_id": "h1", "event": "APPROVE", "body": "Pre-approving to unblock", "comments": [
+            {"path": "services/orders/README.md", "line": 3, "side": "LEFT",
+             "body": "AI comment (vetted)\n\n**nit:** This line still names the old --fast flag."}]}
+        for name, checks in [("a check failed", [failed]), ("no check has reported", [])]:
+            with self.subTest(name):
+                self.setUp()
+                self.write_findings("approve_once_ci_passes", [self.NIT])
+                (self.fakes / "checks.json").write_text(json.dumps(checks))
+                confirmed = self.shown()
+                self.assertEqual(json.loads((self.run / "submit-request.json").read_text()), request)
+                result = self.submit("--expect", confirmed)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.posted(), [request])
+
     def test_any_other_run_starts_as_a_comment_with_nothing_included(self):
         for name, verdict, findings in [
             ("the verdict is look_first", "look_first", [self.NIT]),
@@ -1514,32 +1486,18 @@ class SubmitTest(unittest.TestCase):
                 self.assertEqual(self.draft(), {"event": "COMMENT", "message": "", "findings": {}})
 
     def test_approving_a_run_that_is_not_safe_waits_for_the_users_decision(self):
-        failed = [
-            {"__typename": "CheckRun", "name": "test", "workflowName": "CI", "status": "COMPLETED", "conclusion": "FAILURE"},
-            {"__typename": "CheckRun", "name": "build", "workflowName": "CI", "status": "COMPLETED", "conclusion": "CANCELLED"},
-        ]
-        running = [
-            {"__typename": "CheckRun", "name": "e2e", "workflowName": "CI", "status": "IN_PROGRESS", "conclusion": ""},
-            {"__typename": "StatusContext", "context": "ci/preview", "state": "PENDING"},
-        ]
         cases = [
-            # (name, verdict, findings, CI checks on the head, the reasons whooper-submit lists)
-            ("the verdict is look_first", "look_first", [self.NIT], self.PASSED,
+            # (name, verdict, findings, the reasons whooper-submit lists)
+            ("the verdict is look_first", "look_first", [self.NIT],
              ["the run's verdict is look_first: The question needs the author's answer."]),
-            ("findings that are not nits", "approve_once_ci_passes", [self.BUG, self.NIT, self.QUESTION], self.PASSED,
+            ("findings that are not nits", "approve_once_ci_passes", [self.BUG, self.NIT, self.QUESTION],
              ["finding 1 is a caller_visible_bug: Bad JSON now returns 500 (services/orders/internal/api/orders.go:88)",
               "finding 2 is a question: Why retry twice? (services/orders/internal/api/orders.go:40)"]),
-            ("a check failed or was cancelled", "approve_once_ci_passes", [self.NIT], self.PASSED[1:] + failed,
-             ["CI check CI / build: CANCELLED", "CI check CI / test: FAILURE"]),
-            ("checks are still running", "approve_once_ci_passes", [self.NIT], self.PASSED + running,
-             ["CI check CI / e2e: IN_PROGRESS", "CI check ci/preview: PENDING"]),
-            ("no check has reported yet", "approve_once_ci_passes", [self.NIT], [], ["no CI check has reported on h1"]),
         ]
-        for name, verdict, findings, checks, reasons in cases:
+        for name, verdict, findings, reasons in cases:
             with self.subTest(name):
                 self.setUp()
                 self.write_findings(verdict, findings)
-                self.write_checks(checks)
                 self.draft("approve")
                 for flags in [[], ["--print"]]:
                     refused = self.submit(*flags)
@@ -1555,21 +1513,15 @@ class SubmitTest(unittest.TestCase):
                 self.assertEqual([request["event"] for request in self.posted()], ["APPROVE"])
 
     def test_a_review_that_only_comments_needs_no_decision(self):
-        # The run is not safe to approve on any count: no CI check has reported either.
-        self.write_checks([])
+        # The run is not safe to approve: its verdict is look_first, and two of its findings are not nits.
         self.draft("include", "1")
-        confirmed = self.shown()
-        # CI does not bear on a comment, so the confirmation shows none, and checks that report while
-        # the user reads it change nothing.
-        self.assertIsNone(json.loads((self.run / "submit-request.json").read_text())["ci"])
-        self.write_checks(self.PASSED)
-        result = self.submit("--expect", confirmed)
+        result = self.submit()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual([request["event"] for request in self.posted()], ["COMMENT"])
 
     def test_a_skipped_review_is_not_safe_to_approve_whatever_its_verdict(self):
         # The review skipped a large PR from an untagged ask, so it read too little to vouch for the PR,
-        # though its verdict says approve, it has no finding, and CI passed.
+        # though its verdict says approve and it has no finding.
         why = "The PR changes 40 files across four services."
         self.write_findings("approve_once_ci_passes", [], skip_reason=why)
         self.assertEqual(self.draft(), {"event": "COMMENT", "message": "", "findings": {}})
@@ -1604,7 +1556,7 @@ class SubmitTest(unittest.TestCase):
                 for change in changes:
                     self.draft(*change)
                 self.shown()
-                self.assertEqual(json.loads((self.run / "submit-request.json").read_text())["request"]["body"], message)
+                self.assertEqual(json.loads((self.run / "submit-request.json").read_text())["body"], message)
 
     def test_whooper_draft_records_each_choice_and_prints_the_drafts(self):
         command = [str(ROOT / "bin" / "whooper-draft"), self.run.name]
