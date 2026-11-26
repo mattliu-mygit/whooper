@@ -227,9 +227,10 @@ npm run build   # page/dist, which the repo does not track
 The fake host answers from invented reviews in `page/src/fixtures.ts` the way Whooper's commands
 would, and reaches no Whooper, GitHub, or model; `/dev/?review=<run id>` opens one of its reviews.
 Until `@prompting-time/ui`'s first npm release, the page installs it from a Prompting Time checkout
-beside this one, `../../repos/prompting-time-ui/packages/ui` from `page/`, which `npm ci` copies in;
-it then switches to a pinned npm version. Versions are exact and resolved as of `.npmrc`'s `before`
-date, at least a week before they were pinned, and no install script runs.
+beside this one, `../../repos/prompting-time-actions/packages/ui` from `page/`, which `npm ci`
+copies in; it then switches to a pinned npm version. The checkout must be on branch `solid-actions`,
+whose `Diff` draws one file of a parsed patch. Versions are exact and resolved as of `.npmrc`'s
+`before` date, at least a week before they were pinned, and no install script runs.
 
 ### Releases
 

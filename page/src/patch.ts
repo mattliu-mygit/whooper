@@ -1,4 +1,4 @@
-import { parsePatchFiles, type FileDiffMetadata } from "@pierre/diffs";
+import { parsePatchFiles, type FileDiffMetadata } from "@prompting-time/ui";
 import type { Finding } from "./protocol";
 
 /** One file of diff.patch, as the file list and the diff show it. */

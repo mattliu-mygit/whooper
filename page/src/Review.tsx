@@ -1,8 +1,7 @@
 import { createMemo, createSignal, For, Show, untrack } from "solid-js";
-import { Button, IconButton, type DiffLineAnnotation } from "@prompting-time/ui";
+import { Button, Diff, IconButton, type DiffLineAnnotation } from "@prompting-time/ui";
 import { DraftThread } from "./DraftThread";
 import { ArrowLeftIcon } from "./icons";
-import { PatchDiff } from "./PatchDiff";
 import { readPatch, showsLine, type PatchFile } from "./patch";
 import type { Finding, Review } from "./protocol";
 import type { PageStore } from "./store";
@@ -155,7 +154,7 @@ function FileCard(props: { store: PageStore; file: PatchFile; findings: Finding[
           <For each={offLine()}>{(f) => <DraftThread store={props.store} findingId={f.id} />}</For>
         </div>
       </Show>
-      <PatchDiff
+      <Diff
         file={props.file.diff}
         layout={props.layout}
         annotations={annotations()}
