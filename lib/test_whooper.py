@@ -1926,12 +1926,40 @@ class RunTest(unittest.TestCase):
         reason = f"the review run exited 1 without findings; see {run}/stderr.log and the transcript in {run}"
         self.assertEqual(result.returncode, 1)
         self.assertIn(f"whooper-review: {reason}\n", result.stderr)
+        # The cleanup keeps die's reason rather than writing its own fixed one.
         self.assertEqual((run / "failure.txt").read_text(), f"{reason}\n")
         ask = self.command("whooper-ask", run.name, "Why did this review fail?", env=env)
         self.assertEqual((ask.returncode, ask.stdout), (0, "It stopped.\n"), ask.stderr)
         prompt = (run / "asks" / "1.prompt.md").read_text()
         listed = [line for line in prompt.splitlines() if line.startswith(f"- {run}/")]
         self.assertTrue(listed[0].startswith(f"- {run / 'failure.txt'}: "), listed)
+
+    def test_an_interrupted_review_saves_that_it_was_interrupted(self):
+        env, item, _ = self.pull_request()
+        agent_pid = Path(self.tmp.name) / "agent.pid"
+        # The review run notes its process ID and waits.
+        self.fake_claude(review=f"echo $$ > '{agent_pid}'; exec sleep 30")
+        review = subprocess.Popen([str(ROOT / "bin" / "whooper-review"), str(item), "--dry-run"], env=env,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        self.addCleanup(self.stop, review)
+        self.wait_for(lambda: self.read(agent_pid), "the review run to start")
+        # README.md stops a review with a TERM to whooper-review alone.
+        review.terminate()
+        review.wait(timeout=30)
+        [run] = (self.state / "runs").iterdir()
+        self.assertEqual((review.returncode, self.read(run / "failure.txt")), (130, "the review was interrupted\n"))
+
+    def test_a_review_stopped_by_a_failed_command_saves_a_fixed_reason(self):
+        env, item, _ = self.pull_request()
+        # origin has no such branch, so the fetch fails once the run directory exists.
+        item.write_text(json.dumps({**json.loads(item.read_text()), "base_ref": "no-such-branch"}))
+        result = self.command("whooper-review", str(item), "--dry-run", env=env)
+        [run] = (self.state / "runs").iterdir()
+        self.assertEqual(result.returncode, 128)
+        # git's own message is in whooper-review's error output, where failure.txt points.
+        self.assertIn("couldn't find remote ref no-such-branch", result.stderr)
+        self.assertEqual(self.read(run / "failure.txt"),
+                         "the review stopped at an unexpected error; see whooper-review's error output\n")
 
     def test_an_ask_about_a_review_still_running_is_refused_until_its_whooper_review_is_gone(self):
         env, item, _ = self.pull_request()
@@ -2360,6 +2388,21 @@ class AskTest(unittest.TestCase):
                 result = self.ask(*args)
                 self.assertEqual(result.returncode, 1)
                 self.assertIn(why, result.stderr)
+        self.assertFalse((self.run / "asks").exists())
+
+    def test_refuses_a_finding_when_findings_json_is_empty_or_holds_no_findings(self):
+        # A review whooper-review stopped before its schema check leaves findings.json as the run wrote it.
+        for name, content, why in [
+            ("empty", "", "its findings.json holds no findings Whooper can read"),
+            ("no list of findings", "{}", "its findings.json holds no findings Whooper can read"),
+            ("an empty list of findings", json.dumps({"findings": []}), "its findings are none"),
+        ]:
+            with self.subTest(name):
+                (self.run / "findings.json").write_text(content)
+                result = self.ask(self.run.name, self.QUESTION, "--finding", "1")
+                self.assertEqual((result.returncode, result.stdout), (1, ""))
+                self.assertIn(f"whooper-ask: the run has no finding 1; {why}\n", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
         self.assertFalse((self.run / "asks").exists())
 
     def test_a_review_that_did_not_finish_can_be_asked_why(self):

@@ -1070,8 +1070,14 @@ def ask_facts(run_dir, question, finding_id=None):
     asks = sorted((p for p in (run_dir / "asks").glob("*.json") if p.stem.isdigit()), key=lambda p: int(p.stem))
     lines += [f"- {p}: an earlier question about this review, with its answer" for p in asks]
     if finding_id is not None:
-        findings = ({f["id"]: f for f in json.loads((run_dir / "findings.json").read_text())["findings"]}
-                    if finished else {})
+        # A review whooper-review stopped before its schema check, such as at the time limit or for an
+        # empty file, leaves findings.json as the run wrote it.
+        try:
+            findings = ({f["id"]: f for f in json.loads((run_dir / "findings.json").read_text())["findings"]}
+                        if finished else {})
+        except (ValueError, KeyError, TypeError):
+            raise SystemExit(f"whooper-ask: the run has no finding {finding_id}; its findings.json holds no"
+                             " findings Whooper can read")
         if finding_id not in findings:
             raise SystemExit(f"whooper-ask: the run has no finding {finding_id}; its findings are"
                              f" {', '.join(findings) or 'none'}")

@@ -20,9 +20,11 @@
 # While it runs, this script holds the PR's lock, <state>/locks/<owner>-<repo>-<pr>/, with its
 # process ID in pid and the run ID in run_id. On exit, finished or not, the repo's teardown script
 # runs, the worktrees and PR lock go away, and a run that did not finish counts as a failure in its
-# <state>/prs record. When this script stops a review once its run directory exists, such as at the
-# time limit, the reason it prints stays there as failure.txt. Runs take --dry-run until a live run
-# has a way to add :eyes: to the ask it takes.
+# <state>/prs record. Once the run directory exists, a review that does not finish leaves why there
+# as failure.txt: the reason this script prints when it stops the review, such as at the time limit,
+# or else "the review was interrupted" after a signal such as Ctrl-C, or a line about an unexpected
+# error after a command that failed. Runs take --dry-run until a live run has a way to add :eyes: to
+# the ask it takes.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -95,9 +97,17 @@ echo "$run_id" > "$lock/run_id"
 # The unfiltered GitHub data stays here, outside the run directory the model reads.
 work="$(mktemp -d)"
 finished=false
+# What failure.txt says when the review stops without die's reason: a command failed under set -e,
+# unless the trap below records that a signal stopped the review.
+stop_reason="the review stopped at an unexpected error; see whooper-review's error output"
 agent_group="" watchdog_pid=""
 cleanup() {
   local status=$?
+  # This comes first, so a second Ctrl-C during a slow teardown, which would end the cleanup, cannot
+  # lose the reason.
+  if [[ "$finished" != true && -n "$failure" && ! -e "$failure" ]]; then
+    echo "$stop_reason" > "$failure" || true
+  fi
   # The run and everything it started share one process group, so this also stops a server a
   # probe left running.
   if [[ -n "$agent_group" ]]; then
@@ -124,7 +134,7 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
-trap 'exit 130' INT TERM HUP
+trap 'stop_reason="the review was interrupted"; exit 130' INT TERM HUP
 
 mkdir -p "$run/tmp"
 failure="$run/failure.txt"

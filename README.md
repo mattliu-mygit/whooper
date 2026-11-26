@@ -236,7 +236,10 @@ the config with that agent's tool names and saved as `prompt.md` in the run dire
 `[review] timeout_minutes` is stopped, and when whooper-review exits it stops the run and every
 process the run started. When whooper-review stops a review for a reason it names, such as the time
 limit, a failed setup script, or findings that do not fit the schema, it saves that reason in the
-run directory as `failure.txt`.
+run directory as `failure.txt`. A review stopped any other way gets a fixed reason there:
+`the review was interrupted` after Ctrl-C or a `kill`, and, after a command that failed,
+`the review stopped at an unexpected error; see whooper-review's error output`, where the
+command's own message went.
 
 `agents/claude/review` runs `claude -p`, which returns the findings as structured output, and
 reports the run's cost in dollars, capped by `[agents.claude] budget_usd` when the config sets one. `agents/devin/review`
@@ -292,7 +295,8 @@ Stop whooper-run with Ctrl-C, or with `kill -- -$(cat ~/.local/state/whooper/run
 shell started it in the background; either way the round it is running stops too. A `kill` of
 whooper-run's process alone waits for that round to end. Interrupt any other script with Ctrl-C,
 or stop a review with `kill $(cat ~/.local/state/whooper/locks/*/pid)`. An interrupted review runs
-the teardown script, removes its worktrees and lock, and counts as a failure in its record. The
+the teardown script, removes its worktrees and lock, saves `the review was interrupted` as its
+`failure.txt`, and counts as a failure in its record. The
 Slack cursor moves only after a poll writes its output, so an interrupted poll is simply repeated.
 A whooper-submit interrupted while gh posts leaves the run's `submit.json` saying `posting`, and
 whooper-submit refuses that run until you check the PR on GitHub and delete the file.
