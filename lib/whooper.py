@@ -24,8 +24,8 @@ from the user's config file (config_path), never from this code. The bin/ script
   whooper.py conversation <conversation.graphql result> [<as-of time>]             -> a run's github.json
   whooper.py record <data dir> <work-item.json> running|failed                     -> writes the PR record
   whooper.py cause <run dir> <step> [<step's error output>]                         -> failure.json, the cause
-  whooper.py overview <run dir>                                                    -> drops an overview that fails
-                                                                                      check_overview from findings.json
+  whooper.py overview <run dir>                                                    -> overview.invalid.json, for an
+                                                                                      overview.json read_overview drops
   whooper.py retry <data dir> <run-id> <head now>                                  -> queues another review
   whooper.py wait <data dir> <work-item.json> <failure.json>                      -> a waiting run, the recheck list
   whooper.py skip <data dir> <run-id> [--undo]                                    -> marks the run skipped, or not
@@ -672,14 +672,18 @@ def diff_files(patch):
     return files
 
 
+# The JSON Schema the overview.json a review run writes must fit, the first rule check_overview checks.
+OVERVIEW_SCHEMA = ROOT / "schemas" / "overview.json"
+
+
 def check_overview(overview, patch):
     """Raises ValueError at the first rule of prompts/review.md's overview that the overview a review
-    run wrote breaks, checked against patch, the run's diff.patch: it fits FINDINGS_SCHEMA's overview,
-    which allows at most 5 places and one flow; each place's lines and each layer range lie inside one
-    hunk of a file the patch changes (diff_files); and each file the patch shows lines of is in exactly
-    one layer. A file whose diff shows no lines, such as a binary file, has no lines a range could name,
-    so it is in no layer."""
-    check_schema(overview, json.loads(FINDINGS_SCHEMA.read_text())["properties"]["overview"], "overview")
+    run wrote breaks, checked against patch, the run's diff.patch: it fits OVERVIEW_SCHEMA, which allows
+    at most 5 places and one flow; each place's lines and each layer range lie inside one hunk of a file
+    the patch changes (diff_files); and each file the patch shows lines of is in exactly one layer. A
+    file whose diff shows no lines, such as a binary file, has no lines a range could name, so it is in
+    no layer."""
+    check_schema(overview, json.loads(OVERVIEW_SCHEMA.read_text()), "overview")
     hunks = {path: spans for path, _, spans in diff_files(patch)}
     ranges = [(f"overview.places[{i}]", place) for i, place in enumerate(overview["places"])]
     ranges += [(f"overview.layers[{i}].ranges[{j}]", r) for i, layer in enumerate(overview["layers"])
@@ -695,6 +699,29 @@ def check_overview(overview, patch):
                   if any(r["path"] == path for r in layer["ranges"])]
         if spans and len(layers) != 1:
             raise ValueError(f"{path} is in {' and '.join(layers) or 'no layer'}")
+
+
+def read_overview(run_dir, patch):
+    """Reads the overview the review run in run_dir wrote in overview.json, and returns it with why
+    Whooper drops it, or with None when the overview keeps every rule check_overview checks against
+    patch, the run's diff. A file that is not JSON gives its text, and one that cannot be read, such as
+    one that is not UTF-8, gives None. Without the file, both are None."""
+    try:
+        text = (run_dir / "overview.json").read_text()
+    except FileNotFoundError:
+        return None, None
+    # read_text raises a ValueError for text that is not UTF-8.
+    except (OSError, ValueError) as e:
+        return None, f"overview.json cannot be read: {e}"
+    try:
+        overview = json.loads(text)
+    except ValueError as e:
+        return text, f"overview.json is not JSON: {e}"
+    try:
+        check_overview(overview, patch)
+    except ValueError as e:
+        return overview, str(e)
+    return overview, None
 
 
 def clone_log(repo, *args):
@@ -751,11 +778,11 @@ def show_review(data, run_id):
     read_review reads them, the PR's title and author in github.json, the drafts whooper-draft prints,
     which only a review whose findings fit has, diff.patch, or for a run from before reviews kept it,
     the diff rebuilt_diff rebuilds, failure.txt, and whooper-ask's answers. The overview the run wrote
-    in findings.json, which whooper-review checked (check_overview), comes on its own, not in the
-    findings. From the repo's clone, without fetching (clone_log): the commits between the head the
-    review read and the PR's newest head Whooper knows (pr_head), and the files that changed together
-    with the PR's in the CO_CHANGE_DAYS days before the review started, in the history the PR's merge
-    base ends (co_change). Refuses a run ID that names no run directory."""
+    in overview.json comes once the review ended, and only when read_overview keeps it against that
+    diff, as whooper-review did. From the repo's clone, without fetching (clone_log): the commits
+    between the head the review read and the PR's newest head Whooper knows (pr_head), and the files
+    that changed together with the PR's in the CO_CHANGE_DAYS days before the review started, in the
+    history the PR's merge base ends (co_change). Refuses a run ID that names no run directory."""
     run, parsed = data / "runs" / run_id, parse_run_id(run_id)
     # A run ID names a directory right under runs, so a path such as ../x reads nothing outside it.
     if parsed is None or not run.is_dir():
@@ -775,6 +802,10 @@ def show_review(data, run_id):
     diff = text("diff.patch")
     if diff is None:
         diff = rebuilt_diff(item)
+    # whooper-review drops an overview.json that breaks a rule as soon as the run ends, but a run that
+    # still runs may still change the file, and a review stopped before then, as at an interrupt, can
+    # leave one it never checked.
+    overview, dropped = read_overview(run, diff or "") if outcome != "running" else (None, None)
     repo = item["repo"] if item else None
     head = item.get("head_sha") if item and isinstance(item.get("head_sha"), str) else None
     newest = pr_head(data, polled_heads(data), repo, pr) if repo else None
@@ -796,7 +827,7 @@ def show_review(data, run_id):
         "title": title,
         "author": author,
         "outcome": outcome,
-        "findings": {key: value for key, value in result.items() if key != "overview"} if result else None,
+        "findings": result,
         "safe_to_approve": safe,
         "drafts": read_drafts(run) if result else None,
         "diff": diff,
@@ -807,7 +838,7 @@ def show_review(data, run_id):
         "head_sha": head,
         "skipped_by_user": skipped,
         "removed_by_user": removed,
-        "overview": result.get("overview") if result else None,
+        "overview": None if dropped else overview,
         "commits_since_review": since,
         "co_change": co_change([set(commit["files"]) for commit in history or []], paths),
     }
@@ -1876,15 +1907,18 @@ def append_digest(data, run_dir, item, verdicts):
 # The files of a review run's record that an ask run's prompt lists, in this order, with what each
 # holds. A file the run directory lacks is left out: only a review whooper-review stopped leaves
 # failure.txt, a Claude review leaves transcript.jsonl and a Devin review transcript.json,
-# drafts.json, submit.json, and summary.md come only from the user's choices or a Devin summary, and
-# waiting.json only from a review whooper-round did not start.
+# drafts.json, submit.json, and summary.md come only from the user's choices or a Devin summary,
+# overview.json only from a run that wrote an overview, which overview.invalid.json holds instead when
+# whooper-review dropped it, and waiting.json only from a review whooper-round did not start.
 # failure.txt is here rather than in ASK_FAILURE_RECORD because a Devin review writes findings.json
 # itself, and can pass its time limit after writing it.
 ASK_RECORD = {
     "failure.txt": "the reason whooper-review gave for stopping the review before it finished",
     "log.md": "the review's log: what the change does, the evidence for each finding, and the candidates it dropped",
-    "findings.json": "the review's findings, each with its draft comment, its approval verdict with the reason, and"
-                     " its overview of the change, if it kept one",
+    "findings.json": "the review's findings, each with its draft comment, and its approval verdict with the reason",
+    "overview.json": "the review's overview of the change: what it does, where to read closely, and what the review"
+                     " checked and did not",
+    "overview.invalid.json": "the overview the review wrote that Whooper dropped, and why",
     "diff.patch": "the pull request's change, git diff <merge base> HEAD",
     "github.json": "the PR's title, body, reviews, and comments, as the review read them",
     "transcript.jsonl": "the review's whole conversation, with every command it ran and that command's output",
@@ -2047,6 +2081,7 @@ def main(command, *args):
             repo, agent = rest
             notes = config["repos"][repo].get("notes")
             values["repo_notes"] = (config["dir"] / notes).read_text().strip() if notes else "None."
+            values["overview_schema"] = str(OVERVIEW_SCHEMA)
             values.update(REVIEW_WORDING[agent])
         elif name == "ask":
             agent, run, question, *finding = rest
@@ -2116,18 +2151,14 @@ def main(command, *args):
             text = ""
         write_file(Path(run) / "failure.json", json.dumps(failure_cause(step, text)))
     elif command == "overview":
-        # A findings.json that holds no JSON object is left for whooper-review's schema check.
+        # whooper-review runs this as soon as the run ends, and the review then goes on as it would without
+        # an overview.json, whatever this finds.
         run = Path(args[0])
-        findings = read_object(run / "findings.json")
-        if findings is None or "overview" not in findings:
-            return
-        try:
-            check_overview(findings["overview"], (run / "diff.patch").read_text(errors="replace"))
-        except ValueError as e:
-            dropped = findings.pop("overview")
-            write_file(run / "findings.json", json.dumps(findings, indent=2))
-            write_file(run / "overview.invalid.json", json.dumps({"reason": str(e), "overview": dropped}, indent=2))
-            print(f"whooper-review: dropped the run's overview: {e}", file=sys.stderr)
+        overview, dropped = read_overview(run, (run / "diff.patch").read_text(errors="replace"))
+        if dropped:
+            write_file(run / "overview.invalid.json", json.dumps({"reason": dropped, "overview": overview}, indent=2))
+            (run / "overview.json").unlink()
+            print(f"whooper-review: dropped the run's overview: {dropped}", file=sys.stderr)
     elif command == "retry":
         data, run_id, head_now = args
         print(retry(Path(data), run_id, head_now, datetime.now(timezone.utc)))

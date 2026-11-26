@@ -134,9 +134,10 @@ bin/whooper-show <run-id> --json   # one review in full, for its review screen
 
 whooper-show prints the run's `run.json`, the PR's title and author, its outcome, `findings.json`,
 the drafts whooper-draft prints for it, `diff.patch`, `failure.txt`, each of whooper-ask's answers in
-number order, and the review whooper-submit posted. The overview the run wrote in `findings.json`
-([How a review run works](#how-a-review-run-works)) comes as `overview` beside the findings rather
-than in them, and is null for a run without one. It reads files only: the run directory, the review
+number order, and the review whooper-submit posted. `overview` is the overview the run wrote in
+`overview.json` ([How a review run works](#how-a-review-run-works)), null while the review runs and
+when the file is missing, cannot be read, or breaks a rule whooper-review checks it against, as for a
+review stopped before whooper-review checked it. It reads files only: the run directory, the review
 locks, the files that name the PR's newest head, which whooper-status reads too, and the repo's
 clone. It refuses a run ID that names no run directory. Reviews kept no `diff.patch` before
 whooper-review saved one, and for such a run whooper-show has git rebuild the diff from the repo's
@@ -317,14 +318,14 @@ when the fetch failed or the skills could not be hashed, recorded no agent, so t
 `[jobs] review` names answers about it; an empty or unreadable `run.json` counts as none. Its
 prompt, `prompts/ask.md` filled in, names the question, the finding, and the path of each file of
 the review's record the run directory has: first `failure.txt`, the reason whooper-review gave when
-it stopped the review, then `log.md`, `findings.json`, `diff.patch`, the transcript, `github.json`,
-`run.json`, `prompt.md`, `verdicts.json`, `post.json`, `drafts.json`, `submit.json`, `summary.md`,
-and earlier asks. For a review that did not finish, whose `findings.json` is missing or holds no
-findings Whooper can read, such as an empty file, it also names the review agent's `stderr.log` and
-`stdout.log`, which may say why, and `findings.invalid.json`, the findings that did not fit the
-schema. The PR's code is gone by then, since whooper-review removes the worktrees, so the run
-answers from the record, where `diff.patch` holds the PR's change. [Approvals](#approvals) says what
-the run may do.
+it stopped the review, then `log.md`, `findings.json`, `overview.json`, `overview.invalid.json`,
+`diff.patch`, the transcript, `github.json`, `run.json`, `prompt.md`, `verdicts.json`, `post.json`,
+`drafts.json`, `submit.json`, `summary.md`, and earlier asks. For a review that did not finish,
+whose `findings.json` is missing or holds no findings Whooper can read, such as an empty file, it
+also names the review agent's `stderr.log` and `stdout.log`, which may say why, and
+`findings.invalid.json`, the findings that did not fit the schema. The PR's code is gone by then,
+since whooper-review removes the worktrees, so the run answers from the record, where `diff.patch`
+holds the PR's change. [Approvals](#approvals) says what the run may do.
 
 whooper-ask refuses a review that is still running, and says so: one whose whooper-review holds the
 PR's lock with the run's ID in it. A lock whose process is gone, as after a `kill -9`, does not
@@ -452,16 +453,18 @@ setup script, if the config names one, which may add variables to the run's envi
 a paragraph for the prompt. Then the agent that `[jobs] review` names runs from the head worktree
 through its launcher, `agents/<agent>/review`. The run follows `prompts/review.md`, filled in from
 the config with that agent's tool names and saved as `prompt.md` in the run directory, and leaves
-`findings.json`, which must fit `schemas/findings.json`. Its `overview` says what the PR does and
-where to look first, for the review screen: a summary, why the verdict, each change a caller sees
-before and after, at most 5 places to read closely with how the run knows, the change in reading
-order as layers, at most one flow of calls, and what the run checked and did not. As soon as the run
-ends, whooper-review checks the overview against `diff.patch`: it fits the schema, each place's lines
-and each layer range lie inside one hunk of a file the diff changes, counted in the head, or for a
-deleted file at the merge base, and each file the diff shows lines of is in exactly one layer; a
-file whose diff shows no lines, such as a binary file, is in none. An overview that breaks a rule is
-dropped from `findings.json`, with why on whooper-review's error output and in
-`overview.invalid.json`, and the review goes on without it. A run that passes
+`findings.json`, which must fit `schemas/findings.json`. The run also writes `overview.json` in the
+run directory, which says what the PR does and where to look first, for the review screen: a
+summary, why the verdict, each change a caller sees before and after, at most 5 places to read
+closely with how the run knows, the change in reading order as layers, at most one flow of calls,
+and what the run checked and did not. As soon as the run ends, whooper-review checks it against
+`diff.patch`: it fits `schemas/overview.json`, each place's lines and each layer range lie inside one
+hunk of a file the diff changes, counted in the head, or for a deleted file at the merge base, and
+each file the diff shows lines of is in exactly one layer; a file whose diff shows no lines, such as
+a binary file, is in none. An `overview.json` that cannot be read, is not JSON, or breaks a rule
+moves to `overview.invalid.json`, with why there and on whooper-review's error output. The overview
+never changes how a review ends: without one, or with one whooper-review drops, the review goes on
+as it would anyway. A run that passes
 `[review] timeout_minutes` is stopped, and when whooper-review exits it stops the run and every
 process the run started. When whooper-review stops a review for a reason it names, such as the time
 limit, a failed setup script, or findings that do not fit the schema, it saves that reason in the
@@ -474,14 +477,16 @@ stopped at and what that step printed on stderr ([See reviews](#see-reviews) lis
 repo the config lists but the cache has no clone of fails the review once its run directory exists,
 so the failure shows in whooper-status.
 
-`agents/claude/review` runs `claude -p`, which returns the findings as structured output, and
-reports the run's cost in dollars, capped by `[agents.claude] budget_usd` when the config sets one. `agents/devin/review`
-runs `devin -p` in `dangerous` permission mode, so no tool call waits for an approval; the run
-writes `findings.json` itself, and the cost line is in ACUs, Devin's billing unit. Its config for
-the run, saved as `devin-config.json`, is your `~/.config/devin/config.json` plus Whooper's hook and
-deny rules for every Slack tool, which hold in that mode. When the run ends, the launcher deletes its
-Devin session with `devin rm`, so runs don't fill Devin Desktop's session list; `transcript.json`
-keeps the conversation. `agents/devin/poll` does the same for each poll.
+`agents/claude/review` runs `claude -p`, which returns the findings as structured output and writes
+`log.md` and `overview.json` in the run directory, which `--add-dir` opens to its file edits, and
+reports the run's cost in dollars, capped by `[agents.claude] budget_usd` when the config sets one.
+`agents/devin/review` runs `devin -p` in `dangerous` permission mode, so no tool call waits for an
+approval; the run writes `findings.json` and `overview.json` itself, and the cost line is in ACUs,
+Devin's billing unit. Its config for the run, saved as `devin-config.json`, is your
+`~/.config/devin/config.json` plus Whooper's hook and deny rules for every Slack tool, which hold in
+that mode. When the run ends, the launcher deletes its Devin session with `devin rm`, so runs don't
+fill Devin Desktop's session list; `transcript.json` keeps the conversation. `agents/devin/poll`
+does the same for each poll.
 
 The run gets `GH_TOKEN=disabled`, so `gh` and git's `gh` credential helper fail. Otherwise it loads
 what a normal session in the head worktree loads: user settings, and the PR's own settings, hooks,
@@ -603,10 +608,10 @@ the recheck list while the commands above write to it.
   `git diff <merge base> HEAD`, as a plain patch. `prompt.md` is the prompt the run got.
   The transcript (`transcript.jsonl` for Claude, the ATIF export `transcript.json` for Devin, with
   `devin-config.json` and `stdout.log`) and `stderr.log` are the run, `findings.json` its result
-  (`findings.invalid.json` when it did not fit the schema, and `overview.invalid.json` the overview
-  whooper-review dropped from it, with why), `failure.txt` the reason whooper-review
-  gave when it stopped the run and `failure.json` its cause, `log.md` its evidence for each finding
-  and the candidates it dropped,
+  (`findings.invalid.json` when it did not fit the schema), `overview.json` its overview of the PR
+  (`overview.invalid.json`, with why, when whooper-review dropped it), `failure.txt` the reason
+  whooper-review gave when it stopped the run and `failure.json` its cause, `log.md` its evidence
+  for each finding and the candidates it dropped,
   `verdicts.json` whooper-classify's output, and `post.json` and `post-request.json` whooper-post's.
   `drafts.json` holds the user's choices for the review: `event` (`APPROVE` or `COMMENT`),
   `message`, and `findings`, which maps a finding ID to `included` and, once edited, `text`.

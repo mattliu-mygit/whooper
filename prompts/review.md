@@ -97,9 +97,11 @@ what you could not check.
 
 ## The overview
 
-Also return `overview`, which {{user_name}} reads before the diff to understand the PR and to know
-where to look. Write it after your probes, so it can cite them. Whooper checks it against the diff
-and drops an overview that breaks a rule here; the findings still count.
+Before you return, also write `overview.json` in the run directory: the overview of the PR that
+{{user_name}} reads before the diff to understand it and to know where to look. Write it after your
+probes, so it can cite them, as JSON that fits the JSON Schema in `{{overview_schema}}`. It is a file
+of its own, not part of your findings. Whooper checks it against the diff and drops an overview that
+breaks a rule here, and the review goes on without it.
 
 - `summary`: two or three sentences on what the PR does, for someone who calls the changed code, and
   why, from the PR's body or the ask.

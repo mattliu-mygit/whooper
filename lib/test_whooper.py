@@ -1171,6 +1171,10 @@ class CheckSchemaTest(unittest.TestCase):
     def test_a_result_that_fits_passes(self):
         check_schema(self.result(), self.SCHEMA)
 
+    def test_the_findings_hold_no_overview(self):
+        # The overview is a file of its own, overview.json, which cannot fail the review (OverviewTest).
+        self.assertNotIn("overview", self.SCHEMA["properties"])
+
     def test_each_break_is_caught(self):
         no_approval = self.result()
         del no_approval["approval"]
@@ -1250,8 +1254,8 @@ def overview(**overrides):
 
 
 class OverviewTest(unittest.TestCase):
-    """check_overview, the checks whooper-review runs on the overview a review run wrote in findings.json,
-    and whooper.py overview, which drops an overview that fails them."""
+    """check_overview, the checks whooper-review runs on the overview.json a review run wrote, and
+    whooper.py overview, which moves an overview.json that fails them aside."""
 
     FINDINGS = {"status": "reviewed", "skip_reason": "", "findings": [finding()],
                 "approval": {"verdict": "look_first", "reason": "Ran the api tests; no database path."}}
@@ -1321,26 +1325,49 @@ class OverviewTest(unittest.TestCase):
             ("docs/read me.md", "docs/read me.md", [(3, 3)]),
         ])
 
-    def test_the_overview_command_drops_an_overview_that_breaks_a_rule_and_keeps_the_findings(self):
+    def test_the_overview_command_keeps_an_overview_that_keeps_every_rule_and_moves_any_other_aside(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp)
             (run / "diff.patch").write_text(OVERVIEW_PATCH)
-            # An overview that keeps every rule stays, and findings.json without one or without JSON is left
-            # as it is, for whooper-review's schema check.
-            for text in [json.dumps({**self.FINDINGS, "overview": overview()}), json.dumps(self.FINDINGS), "not JSON"]:
-                (run / "findings.json").write_text(text)
-                main("overview", str(run))
-                self.assertEqual((run / "findings.json").read_text(), text)
-            self.assertFalse((run / "overview.invalid.json").exists())
-            broken = overview(places=[{**overview()["places"][0], "start_line": 30, "end_line": 31}])
-            (run / "findings.json").write_text(json.dumps({**self.FINDINGS, "overview": broken}))
+            findings = json.dumps(self.FINDINGS)
+            (run / "findings.json").write_text(findings)
+            # Without overview.json it changes nothing, and it keeps one that keeps every rule. Either way it says
+            # nothing.
             err = io.StringIO()
             with redirect_stderr(err):
                 main("overview", str(run))
-            reason = "overview.places[0], lines 30 to 31 of api/runs.go, is not inside one hunk of the diff"
-            self.assertEqual(err.getvalue(), f"whooper-review: dropped the run's overview: {reason}\n")
-            self.assertEqual(json.loads((run / "findings.json").read_text()), self.FINDINGS)
-            self.assertEqual(json.loads((run / "overview.invalid.json").read_text()), {"reason": reason, "overview": broken})
+            self.assertEqual(sorted(path.name for path in run.iterdir()), ["diff.patch", "findings.json"])
+            kept = json.dumps(overview())
+            (run / "overview.json").write_text(kept)
+            with redirect_stderr(err):
+                main("overview", str(run))
+            self.assertEqual(err.getvalue(), "")
+            self.assertEqual((run / "overview.json").read_text(), kept)
+            self.assertFalse((run / "overview.invalid.json").exists())
+            # An overview.json that breaks a rule, is not JSON, as when the run stopped while writing it, or cannot
+            # be read moves to overview.invalid.json, with why and what it held, and why goes to the error output.
+            # findings.json stays as it was.
+            broken = overview(places=[{**overview()["places"][0], "start_line": 30, "end_line": 31}])
+            for content, reason, held in [
+                (json.dumps(broken).encode(),
+                 "overview.places[0], lines 30 to 31 of api/runs.go, is not inside one hunk of the diff", broken),
+                (b'{"summary": "Pages GET',
+                 "overview.json is not JSON: Unterminated string starting at: line 1 column 13 (char 12)",
+                 '{"summary": "Pages GET'),
+                (b"\xff\xfe{}",
+                 "overview.json cannot be read: 'utf-8' codec can't decode byte 0xff in position 0: invalid start byte",
+                 None),
+            ]:
+                with self.subTest(reason):
+                    (run / "overview.json").write_bytes(content)
+                    err = io.StringIO()
+                    with redirect_stderr(err):
+                        main("overview", str(run))
+                    self.assertEqual(err.getvalue(), f"whooper-review: dropped the run's overview: {reason}\n")
+                    self.assertFalse((run / "overview.json").exists())
+                    self.assertEqual(json.loads((run / "overview.invalid.json").read_text()),
+                                     {"reason": reason, "overview": held})
+                    self.assertEqual((run / "findings.json").read_text(), findings)
 
 
 class CoChangeTest(unittest.TestCase):
@@ -2541,14 +2568,18 @@ class RunTest(unittest.TestCase):
     def test_a_review_keeps_the_diff_it_read_after_its_worktrees_go(self):
         env, item, merge_base = self.pull_request()
         run_diff = Path(self.tmp.name) / "run.diff"
-        # The run starts in the head worktree, reads the change as prompts/review.md tells it to, and
-        # finds nothing.
+        # The run starts in the head worktree, reads the change as prompts/review.md tells it to, writes its
+        # overview, and finds nothing.
         (self.fakes / "result.json").write_text(json.dumps({
             "type": "result", "subtype": "success", "total_cost_usd": 0, "duration_ms": 0, "num_turns": 1,
             "structured_output": {"status": "reviewed", "skip_reason": "", "findings": [],
-                                  "approval": {"verdict": "approve_once_ci_passes", "reason": "Read the diff."},
-                                  "overview": self.overview_of_the_pr()}}))
-        self.script(self.fakes / "claude", f"git diff {merge_base} HEAD > '{run_diff}'\ncat \"${{0%/*}}/result.json\"")
+                                  "approval": {"verdict": "approve_once_ci_passes", "reason": "Read the diff."}}}))
+        (self.fakes / "overview.json").write_text(json.dumps(self.overview_of_the_pr()))
+        self.script(self.fakes / "claude", "\n".join([
+            f"git diff {merge_base} HEAD > '{run_diff}'",
+            'cp "${0%/*}/overview.json" "$WHOOPER_RUN/"',
+            'cat "${0%/*}/result.json"',
+        ]))
         result = self.command("whooper-review", str(item), "--dry-run", env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
         run = Path(result.stdout.strip())
@@ -2643,65 +2674,149 @@ class RunTest(unittest.TestCase):
         shutil.rmtree(clone)
         self.assertEqual(diff(), None)
 
-    def test_a_review_keeps_the_overview_its_run_wrote_and_drops_one_that_breaks_a_rule(self):
+    def test_a_review_keeps_the_overview_json_its_run_wrote_and_moves_one_that_breaks_a_rule_aside(self):
         env, item, _ = self.pull_request()
         tmp = Path(self.tmp.name)
         findings = {"status": "reviewed", "skip_reason": "", "findings": [],
                     "approval": {"verdict": "approve_once_ci_passes", "reason": "Read the diff."}}
 
-        def review(overview):
-            """Reviews PR 12 with a Claude run that saves the prompt and the schema it got and returns findings
-            with overview, and returns whooper-review's result and the run's directory. A run ID names its
+        def review(overview=None):
+            """Reviews PR 12 with a Claude run that saves the prompt, the schema, and the directory it may write
+            in that it got, writes overview, bytes, as overview.json in the run directory unless it is None, and
+            returns findings, and returns whooper-review's result and the run's directory. A run ID names its
             start to the second, so each review starts in a second of its own."""
             sleep(1 - datetime.now().microsecond / 1e6)
             (self.fakes / "result.json").write_text(json.dumps({
                 "type": "result", "subtype": "success", "total_cost_usd": 0, "duration_ms": 0, "num_turns": 1,
-                "structured_output": {**findings, "overview": overview}}))
+                "structured_output": findings}))
+            (self.fakes / "overview.json").unlink(missing_ok=True)
+            if overview is not None:
+                (self.fakes / "overview.json").write_bytes(overview)
             self.script(self.fakes / "claude", "\n".join([
+                'fakes="${0%/*}"',
                 f"""printf '%s' "$2" > '{tmp}/prompt.md'""",
                 "while [ $# -gt 0 ]; do",
                 f"""  [ "$1" = --json-schema ] && printf '%s' "$2" > '{tmp}/schema.json'""",
+                f"""  [ "$1" = --add-dir ] && printf '%s' "$2" > '{tmp}/add-dir'""",
                 "  shift",
                 "done",
-                'cat "${0%/*}/result.json"',
+                'if [ -f "$fakes/overview.json" ]; then cp "$fakes/overview.json" "$WHOOPER_RUN/"; fi',
+                'cat "$fakes/result.json"',
             ]))
             result = self.command("whooper-review", str(item), "--dry-run", env=env)
             self.assertEqual(result.returncode, 0, result.stderr)
             return result, Path(result.stdout.strip())
 
         def shown(run):
+            """What whooper-show gives of the review's outcome, findings, and approval, and its overview."""
             result = self.command("whooper-show", run.name, "--json", env=env)
             self.assertEqual(result.returncode, 0, result.stderr)
-            return {key: json.loads(result.stdout)[key] for key in ["outcome", "findings", "overview"]}
+            return {key: json.loads(result.stdout)[key]
+                    for key in ["outcome", "findings", "safe_to_approve", "drafts", "failure", "cause", "overview"]}
 
-        # The prompt asks for the overview, and the schema the run returns its result in takes it.
-        kept = self.overview_of_the_pr()
-        result, run = review(kept)
-        self.assertIn("\n## The overview\n", (tmp / "prompt.md").read_text())
-        check_schema({**findings, "overview": kept}, json.loads((tmp / "schema.json").read_text()))
+        # The review of a run that writes no overview.json.
+        result, run = review()
+        without = shown(run)
+        self.assertEqual(without, {"outcome": "reviewed", "findings": findings, "safe_to_approve": True,
+                                   "drafts": {"event": "APPROVE", "message": "", "findings": {}}, "failure": None,
+                                   "cause": None, "overview": None})
         self.assertNotIn("overview", result.stderr)
-        self.assertEqual(json.loads((run / "findings.json").read_text()), {**findings, "overview": kept})
         self.assertFalse((run / "overview.invalid.json").exists())
-        # whooper-show gives the overview once, beside the findings.
-        self.assertEqual(shown(run), {"outcome": "reviewed", "findings": findings, "overview": kept})
-        # An overview with lines outside the diff's hunks, one that does not fit the schema, or one that is no
-        # overview at all is dropped, with why, and the review keeps its findings.
+        # The prompt asks for overview.json in the run directory, which the launcher lets the run write in, as
+        # JSON that fits schemas/overview.json, and the schema of the findings the run returns has no overview.
+        prompt = (tmp / "prompt.md").read_text()
+        self.assertIn("\n## The overview\n", prompt)
+        self.assertIn(f"`{ROOT / 'schemas' / 'overview.json'}`", prompt)
+        self.assertIn(f"\n- Run directory: {run}. Write log.md and overview.json there.\n", prompt)
+        self.assertEqual((tmp / "add-dir").read_text(), str(run))
+        self.assertNotIn("overview", json.loads((tmp / "schema.json").read_text())["properties"])
+        # An overview.json that keeps every rule stays, and whooper-show gives it.
+        kept = self.overview_of_the_pr()
+        result, run = review(json.dumps(kept).encode())
+        self.assertNotIn("overview", result.stderr)
+        self.assertEqual(json.loads((run / "overview.json").read_text()), kept)
+        self.assertFalse((run / "overview.invalid.json").exists())
+        self.assertEqual(shown(run), {**without, "overview": kept})
+        # One with lines outside the diff's hunks, one that does not fit the schema, one that is no overview at
+        # all, one cut short, as when the run stopped while writing it, and one that is not UTF-8 moves to
+        # overview.invalid.json, with why and what it held, and the review is as it is without one.
         place = {**kept["places"][0], "start_line": 3, "end_line": 3}
         layers = [{**kept["layers"][0], "read_hint": "deep"}, kept["layers"][1]]
-        for broken, reason in [
-            (self.overview_of_the_pr(places=[place]),
+        for held, content, reason in [
+            (self.overview_of_the_pr(places=[place]), None,
              "overview.places[0], lines 3 to 3 of app.txt, is not inside one hunk of the diff"),
-            (self.overview_of_the_pr(layers=layers),
+            (self.overview_of_the_pr(layers=layers), None,
              "overview.layers[0].read_hint is 'deep', not one of ['read', 'skim', 'skip']"),
-            ("Adds a line.", "overview is not of type object"),
+            ("Adds a line.", None, "overview is not of type object"),
+            ('{"summary": "Adds a second line', b'{"summary": "Adds a second line',
+             "overview.json is not JSON: Unterminated string starting at: line 1 column 13 (char 12)"),
+            (None, b'{"summary": "caf\xe9"}',
+             "overview.json cannot be read: 'utf-8' codec can't decode byte 0xe9 in position 16: invalid"
+             " continuation byte"),
         ]:
             with self.subTest(reason):
-                result, run = review(broken)
+                result, run = review(content or json.dumps(held).encode())
                 self.assertIn(f"whooper-review: dropped the run's overview: {reason}\n", result.stderr)
-                self.assertEqual(json.loads((run / "findings.json").read_text()), findings)
+                self.assertFalse((run / "overview.json").exists())
                 self.assertEqual(json.loads((run / "overview.invalid.json").read_text()),
-                                 {"reason": reason, "overview": broken})
-                self.assertEqual(shown(run), {"outcome": "reviewed", "findings": findings, "overview": None})
+                                 {"reason": reason, "overview": held})
+                self.assertEqual(shown(run), without)
+
+    def test_a_review_goes_on_when_the_overview_check_itself_fails(self):
+        env, item, _ = self.pull_request()
+        findings = {"status": "reviewed", "skip_reason": "", "findings": [],
+                    "approval": {"verdict": "approve_once_ci_passes", "reason": "Read the diff."}}
+        (self.fakes / "result.json").write_text(json.dumps({
+            "type": "result", "subtype": "success", "total_cost_usd": 0, "duration_ms": 0, "num_turns": 1,
+            "structured_output": findings}))
+        # A directory named overview.json, which the check cannot read and then cannot remove, makes the check
+        # itself fail.
+        self.script(self.fakes / "claude", 'mkdir "$WHOOPER_RUN/overview.json"\ncat "${0%/*}/result.json"')
+        result = self.command("whooper-review", str(item), "--dry-run", env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        shown = self.command("whooper-show", Path(result.stdout.strip()).name, "--json", env=env)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertEqual({key: json.loads(shown.stdout)[key] for key in ["outcome", "findings", "failure", "overview"]},
+                         {"outcome": "reviewed", "findings": findings, "failure": None, "overview": None})
+
+    def test_each_agents_run_writes_overview_json_in_the_run_directory_and_show_gives_it(self):
+        env, item, _ = self.pull_request()
+        config = Path(env["WHOOPER_CONFIG"])
+        findings = {"status": "reviewed", "skip_reason": "", "findings": [],
+                    "approval": {"verdict": "approve_once_ci_passes", "reason": "Read the diff."}}
+        kept = self.overview_of_the_pr()
+        (self.fakes / "findings.json").write_text(json.dumps(findings))
+        (self.fakes / "overview.json").write_text(json.dumps(kept))
+        (self.fakes / "result.json").write_text(json.dumps({
+            "type": "result", "subtype": "success", "total_cost_usd": 0, "duration_ms": 0, "num_turns": 1,
+            "structured_output": findings}))
+        # Each fake writes overview.json in the run directory, as its agent's run does with its file-writing
+        # tool: Claude's run, which --add-dir lets write there, returns the findings as structured output, and
+        # Devin's, in dangerous mode, writes findings.json there too, and its export where --export says. A
+        # second call, devin rm, deletes the Devin run's session.
+        self.script(self.fakes / "claude", "\n".join([
+            'cp "${0%/*}/overview.json" "$WHOOPER_RUN/"',
+            'cat "${0%/*}/result.json"',
+        ]))
+        self.script(self.fakes / "devin", "\n".join([
+            'if [ "$1" = rm ]; then exit 0; fi',
+            'while [ $# -gt 1 ]; do [ "$1" = --export ] && export="$2"; shift; done',
+            'cp "${0%/*}/findings.json" "${0%/*}/overview.json" "$WHOOPER_RUN/"',
+            """echo '{"session_id": "session-7", "steps": []}' > "$export\"""",
+        ]))
+        for agent in ["claude", "devin"]:
+            with self.subTest(agent):
+                # A run ID names its start to the second, so each review starts in a second of its own.
+                sleep(1 - datetime.now().microsecond / 1e6)
+                config.write_text(re.sub(r'(?m)^review = "\w+"$', f'review = "{agent}"', config.read_text()))
+                result = self.command("whooper-review", str(item), "--dry-run", env=env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                run = Path(result.stdout.strip())
+                self.assertEqual(json.loads((run / "run.json").read_text())["agent"], agent)
+                shown = self.command("whooper-show", run.name, "--json", env=env)
+                self.assertEqual(shown.returncode, 0, shown.stderr)
+                self.assertEqual({key: json.loads(shown.stdout)[key] for key in ["outcome", "findings", "overview"]},
+                                 {"outcome": "reviewed", "findings": findings, "overview": kept})
 
     def test_show_gives_the_commits_since_the_review_and_the_files_that_change_with_the_prs_from_the_clone(self):
         env = {**self.git_env(), "TZ": "America/Los_Angeles"}
@@ -3372,15 +3487,16 @@ class AskTest(unittest.TestCase):
                               capture_output=True, text=True, timeout=60)
 
     def test_the_prompt_names_the_question_the_finding_and_each_record_file(self):
-        (self.run / "drafts.json").write_text("{}")
+        for name in ["drafts.json", "overview.json", "overview.invalid.json"]:
+            (self.run / name).write_text("{}")
         (self.run / "asks").mkdir()
         (self.run / "asks" / "1.json").write_text("{}")
         (self.run / "asks" / "1.prompt.md").write_text("an earlier ask's prompt")
         # Braces in a question stay as written instead of reading as placeholders.
         question = f"{self.QUESTION} Is {{{{this}}}} one?"
         prompt = self.prompt("claude", str(self.run), question, "2")
-        for name in ["log.md", "findings.json", "diff.patch", "github.json", "transcript.jsonl", "run.json",
-                     "prompt.md", "drafts.json", "asks/1.json"]:
+        for name in ["log.md", "findings.json", "overview.json", "overview.invalid.json", "diff.patch", "github.json",
+                     "transcript.jsonl", "run.json", "prompt.md", "drafts.json", "asks/1.json"]:
             self.assertIn(f"{self.run / name}: ", prompt)
         # Files the run does not have, and files that hold nothing to answer from.
         for name in ["transcript.json", "submit.json", "summary.md", "stderr.log", "asks/1.prompt.md"]:
@@ -4192,6 +4308,34 @@ class ReviewsTest(unittest.TestCase):
             "title": self.TITLE, "author": "alice", "outcome": "running", "diff": self.DIFF, "failure": None,
             "cause": None, "head_sha": "h1", "skipped_by_user": False, "removed_by_user": False,
         })
+
+    def test_show_gives_overview_json_once_the_review_ended_and_only_when_it_keeps_every_rule(self):
+        # An overview of DIFF, which changes line 3 of README.md.
+        kept = {"summary": "Renames the --fast flag to --quick in the README.",
+                "verdict_reason": "Only a word changes.", "before_after": [], "places": [], "flow": None,
+                "checked": ["Read the diff."], "not_checked": [],
+                "layers": [{"id": "l1", "title": "README", "intent": "The flag's new name.", "read_hint": "read",
+                            "ranges": [{"path": "README.md", "start_line": 3, "end_line": 3}]}]}
+        run = self.make_run(timedelta(hours=1))
+        self.finish(run)
+        self.write(run, "overview.json", kept, 19)
+        self.assertEqual(self.shown(run)["overview"], kept)
+        # whooper-review moves an overview.json that breaks a rule aside as soon as the run ends, but a review it
+        # stopped before then, as at an interrupt, can leave one, which is no overview either. One that keeps
+        # every rule still comes, though the review failed.
+        interrupted = self.stopped(timedelta(hours=2), 13, "unknown")
+        for content, shown in [({**kept, "layers": []}, None), ('{"summary": "Renames', None), (kept, kept)]:
+            with self.subTest(content=content):
+                self.write(interrupted, "overview.json", content, 1)
+                self.assertEqual({key: self.shown(interrupted)[key] for key in ["outcome", "overview"]},
+                                 {"outcome": "failed", "overview": shown})
+        # While the review runs, the run may still change the file.
+        running = self.make_run(timedelta(minutes=5), pr=14)
+        self.fetched(running)
+        self.write(running, "overview.json", kept, 4)
+        self.hold(running, os.getpid())
+        self.assertEqual({key: self.shown(running)[key] for key in ["outcome", "overview"]},
+                         {"outcome": "running", "overview": None})
 
     def test_show_prints_the_drafts_and_the_review_whooper_submit_posted(self):
         run = self.make_run(timedelta(hours=1))

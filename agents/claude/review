@@ -9,7 +9,8 @@
 #
 # Writes findings.json (the run's structured output, checked against schemas/findings.json),
 # transcript.jsonl, and stderr.log to $WHOOPER_RUN, prints the cost line, and exits with the CLI's
-# exit code.
+# exit code. The run writes log.md and overview.json there itself: --add-dir lets its file edits
+# reach the run directory, beyond the head worktree it starts in, without an approval.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"

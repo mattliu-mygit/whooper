@@ -10,9 +10,9 @@
 #   - deny rules for every tool of the two Slack servers Devin can load, so the run can post
 #     nothing. Deny rules hold in --permission-mode dangerous, which approves every other call.
 #
-# The run writes findings.json itself. This writes transcript.json (the run's ATIF export),
-# stdout.log, and stderr.log to $WHOOPER_RUN, prints the cost line in ACUs, Devin's billing unit,
-# deletes the run's Devin session, and exits with the CLI's exit code.
+# The run writes findings.json, overview.json, and log.md to $WHOOPER_RUN itself. This writes
+# transcript.json (the run's ATIF export), stdout.log, and stderr.log there, prints the cost line in
+# ACUs, Devin's billing unit, deletes the run's Devin session, and exits with the CLI's exit code.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"

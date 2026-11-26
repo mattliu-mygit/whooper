@@ -152,7 +152,7 @@ export interface LineRange {
   end_line: number;
 }
 
-/** The overview a review wrote in findings.json (schemas/findings.json), which whooper-review checked
+/** The overview a review wrote in overview.json (schemas/overview.json), which whooper-review checked
  * against diff.patch. */
 export interface Overview {
   summary: string;
