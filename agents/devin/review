@@ -19,9 +19,13 @@ root="$(cd "$(dirname "$0")/../.." && pwd)"
 run="$WHOOPER_RUN"
 user_config="$HOME/.config/devin/config.json"
 [[ -f "$user_config" ]] || user_config=/dev/null
+# Devin runs a hook's command through bash -c, and its config has no args to start a hook by its
+# path, as agents/claude/review gives Claude Code, so the command is the path quoted with jq's @sh.
+# Unquoted, bash would split the path at a space, as in the Application Support folder Prompting
+# Time installs Whooper in, so the hook would never start.
 jq -n --slurpfile user "$user_config" --arg hook "$root/hooks/tool-use-id.sh" '
   ($user[0] // {})
-  | .hooks.PostToolUse += [{matcher: "exec", hooks: [{type: "command", command: $hook}]}]
+  | .hooks.PostToolUse += [{matcher: "exec", hooks: [{type: "command", command: ($hook | @sh)}]}]
   | .permissions.deny += ["mcp__slack-remote__*", "mcp__slack__*"]' > "$run/devin-config.json"
 
 started="$(date +%s)"

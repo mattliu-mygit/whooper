@@ -20,7 +20,7 @@ post_at="$(($(date +%s) + 180))"
 arguments="$(jq -n --arg channel "$WHOOPER_SUMMARY_CHANNEL" --rawfile message "$summary" \
   --argjson post_at "$post_at" '{channel_id: $channel, message: $message, post_at: $post_at}')"
 slack="mcp__claude_ai_Slack__slack"
-# As in bin/whooper-poll, the Slack connector loads only with user settings, so the run keeps the
+# The claude.ai Slack connector loads only with user settings, so the run keeps the
 # user's hooks; only ToolSearch and the one Slack write are allowed. With args, even empty, Claude
 # Code starts slack-guard by its path; without, it runs the path through sh -c, which splits it at a
 # space, as in the Application Support folder Prompting Time installs Whooper in, so the hook never

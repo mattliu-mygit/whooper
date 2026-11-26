@@ -2285,13 +2285,14 @@ class SlackGuardTest(unittest.TestCase):
                 self.assertEqual(self.run_hook(bash, "schedule_message", self.schedule), 2)
 
 
-class ClaudeHooksTest(unittest.TestCase):
-    """The hooks agents/claude/summary and agents/claude/review set in the settings they give claude,
-    from a Whooper whose root path has a space, as the Application Support folder Prompting Time
-    installs it in has, and a single quote and a $, which sh would read as quoting and a variable. The
-    root links to the real agents, lib, and schemas, and its hooks are fakes that save their input. A
-    fake claude saves the settings, and each test runs their hooks as Claude Code 2.1.314 runs a
-    command hook."""
+class LauncherHooksTest(unittest.TestCase):
+    """The hooks the launchers set in the settings or config they give their CLI: agents/claude/summary and
+    agents/claude/review in claude's settings, and agents/devin/review in devin's config. Each launcher runs
+    from a Whooper whose root path has a space, as the Application Support folder Prompting Time installs it
+    in has, and a single quote and a $, which a shell would read as quoting and a variable. The root links
+    to the real agents, lib, and schemas, and its hooks are fakes that save their input. A fake claude and a
+    fake devin save the settings and the config, and each test runs their hooks as the CLI runs a command
+    hook."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -2303,32 +2304,46 @@ class ClaudeHooksTest(unittest.TestCase):
             (self.root / name).symlink_to(ROOT / name)
         for name in ["slack-guard.sh", "tool-use-id.sh"]:
             fake(self.root / "hooks" / name, 'cat > "$0.input"')
+        # Each fake saves what its launcher gave it, claude its --settings and devin its --config file, as
+        # <fakes>/<CLI>.json.
         self.fakes = tmp / "bin"
         fake(self.fakes / "claude", "\n".join([
             "while [ $# -gt 0 ]; do",
-            '  if [ "$1" = --settings ]; then printf %s "$2" > "${0%/*}/settings.json"; fi',
+            '  if [ "$1" = --settings ]; then printf %s "$2" > "${0%/*}/claude.json"; fi',
+            "  shift",
+            "done",
+        ]))
+        fake(self.fakes / "devin", "\n".join([
+            "while [ $# -gt 0 ]; do",
+            '  if [ "$1" = --config ]; then cp "$2" "${0%/*}/devin.json"; fi',
             "  shift",
             "done",
         ]))
         self.env = {**os.environ, "PATH": f"{self.fakes}:{os.environ['PATH']}", "XDG_STATE_HOME": str(tmp / "state"),
                     "XDG_CACHE_HOME": str(tmp / "cache")}
 
-    def settings(self, launcher, *args, **env):
-        """Runs agents/claude/<launcher> in the root with args and env, and returns the settings it gave claude,
-        whatever the launcher does once claude exits."""
-        result = subprocess.run([str(self.root / "agents" / "claude" / launcher), *args], env={**self.env, **env},
+    def launch(self, cli, launcher, *args, **env):
+        """Runs agents/<cli>/<launcher> in the root with args and env, and returns the settings or config it gave
+        the CLI, whatever the launcher does once the CLI exits."""
+        result = subprocess.run([str(self.root / "agents" / cli / launcher), *args], env={**self.env, **env},
                                 capture_output=True, text=True, timeout=60)
-        settings = self.fakes / "settings.json"
-        self.assertTrue(settings.exists(), result.stderr)
-        return json.loads(settings.read_text())
+        given = self.fakes / f"{cli}.json"
+        self.assertTrue(given.exists(), result.stderr)
+        return json.loads(given.read_text())
 
-    def ran(self, hook, payload, name):
-        """Runs a command hook from the settings as Claude Code 2.1.314 does, with payload and a newline on
-        stdin, and returns the input the fake hooks/<name> saved, or None when it did not run. With args,
-        Claude Code starts command by its path with them; without, it runs command through /bin/sh -c."""
+    def ran(self, cli, hook, payload, name):
+        """Runs a command hook from the settings or config as the CLI does, with payload and a newline on stdin,
+        and returns the input the fake hooks/<name> saved, or None when it did not run. Claude Code 2.1.314
+        starts a hook with args by its path, with them, and runs one without through /bin/sh -c. Devin CLI
+        3000.11.234 runs every hook through bash -c, with the first bash on PATH."""
         saved = self.root / "hooks" / f"{name}.input"
         saved.unlink(missing_ok=True)
-        command = [hook["command"], *hook["args"]] if "args" in hook else ["/bin/sh", "-c", hook["command"]]
+        if cli == "devin":
+            command = ["bash", "-c", hook["command"]]
+        elif "args" in hook:
+            command = [hook["command"], *hook["args"]]
+        else:
+            command = ["/bin/sh", "-c", hook["command"]]
         subprocess.run(command, input=f"{payload}\n", capture_output=True, text=True, timeout=60)
         return saved.read_text() if saved.exists() else None
 
@@ -2336,29 +2351,42 @@ class ClaudeHooksTest(unittest.TestCase):
         summary, run = Path(self.tmp.name) / "summary.txt", Path(self.tmp.name) / "run"
         summary.write_text("Whooper reviewed https://github.com/example-org/example-repo/pull/12 at cb54aa8.")
         run.mkdir()
-        [group] = self.settings("summary", str(summary), str(run))["hooks"]["PreToolUse"]
+        [group] = self.launch("claude", "summary", str(summary), str(run))["hooks"]["PreToolUse"]
         [hook] = group["hooks"]
         payload = json.dumps({"hook_event_name": "PreToolUse",
                               "tool_name": "mcp__claude_ai_Slack__slack_schedule_message",
                               "tool_input": {"channel_id": "C0000000002", "message": summary.read_text(),
                                              "post_at": 1761700180}})
-        self.assertEqual(self.ran(hook, payload, "slack-guard.sh"), f"{payload}\n")
+        self.assertEqual(self.ran("claude", hook, payload, "slack-guard.sh"), f"{payload}\n")
         # Without it, Claude Code lets the call through when slack-guard cannot start, crashes, or times out.
         self.assertEqual(hook.get("onFailure"), "block")
 
-    def test_a_review_runs_tool_use_id_after_each_bash_call(self):
+    def test_a_claude_review_runs_tool_use_id_after_each_bash_call(self):
         prompt, run = Path(self.tmp.name) / "prompt.md", Path(self.tmp.name) / "run"
         prompt.write_text("Review this PR.")
         run.mkdir()
-        hooks = self.settings("review", str(prompt), WHOOPER_RUN=str(run),
-                              WHOOPER_CLAUDE_REVIEW_MODEL="review-model")["hooks"]
+        hooks = self.launch("claude", "review", str(prompt), WHOOPER_RUN=str(run),
+                            WHOOPER_CLAUDE_REVIEW_MODEL="review-model")["hooks"]
         for event in ["PostToolUse", "PostToolUseFailure"]:
             with self.subTest(event):
                 [group] = hooks[event]
                 [hook] = group["hooks"]
                 payload = json.dumps({"hook_event_name": event, "tool_name": "Bash", "tool_use_id": "toolu_01",
                                       "tool_input": {"command": "go test ./internal/api"}})
-                self.assertEqual(self.ran(hook, payload, "tool-use-id.sh"), f"{payload}\n")
+                self.assertEqual(self.ran("claude", hook, payload, "tool-use-id.sh"), f"{payload}\n")
+
+    def test_a_devin_review_runs_tool_use_id_after_each_exec_call(self):
+        prompt, run = Path(self.tmp.name) / "prompt.md", Path(self.tmp.name) / "run"
+        prompt.write_text("Review this PR.")
+        run.mkdir()
+        # The home has no Devin config, so the launcher adds its hook to an empty config, not the user's.
+        config = self.launch("devin", "review", str(prompt), HOME=str(Path(self.tmp.name) / "home"),
+                             WHOOPER_RUN=str(run), WHOOPER_DEVIN_REVIEW_MODEL="review-model")
+        [group] = config["hooks"]["PostToolUse"]
+        [hook] = group["hooks"]
+        payload = json.dumps({"hook_event_name": "PostToolUse", "tool_name": "exec", "tool_use_id": "call_1",
+                              "tool_input": {"command": "go test ./internal/api"}})
+        self.assertEqual(self.ran("devin", hook, payload, "tool-use-id.sh"), f"{payload}\n")
 
 
 class RunTest(unittest.TestCase):
