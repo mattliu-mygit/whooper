@@ -9,7 +9,10 @@
 //   open-review {run_id}                The host answers with review, read from the run's directory:
 //                                       run.json's repo and PR, github.json's title and author,
 //                                       findings.json, diff.patch, and the drafts
-//                                       `bin/whooper-draft <run_id>` prints.
+//                                       `bin/whooper-draft <run_id>` prints, and from
+//                                       `bin/whooper-show <run_id> --json`, the overview, the commits
+//                                       since the review, and the files that change with the PR's,
+//                                       which the host may leave out.
 //   change-draft {run_id, change}       The host runs `bin/whooper-draft <run_id> <op> [<finding>] [<text>]`
 //                                       and answers with drafts, the JSON it prints.
 //   submit {run_id}                     The host runs `bin/whooper-submit <run_id> --print`, shows the
@@ -141,6 +144,64 @@ export interface Drafts {
   findings: Record<string, { included: boolean; text?: string }>;
 }
 
+/** Lines inside one hunk of a file of diff.patch, counted in the head, or for a deleted file at the
+ * merge base. */
+export interface LineRange {
+  path: string;
+  start_line: number;
+  end_line: number;
+}
+
+/** The overview a review wrote in findings.json (schemas/findings.json), which whooper-review checked
+ * against diff.patch. */
+export interface Overview {
+  summary: string;
+  verdict_reason: string;
+  before_after: { label: string; before: string; after: string }[];
+  /** At most 5, most important first. */
+  places: (LineRange & {
+    id: string;
+    title: string;
+    reason: string;
+    evidence: { kind: "ran" | "read" | "searched"; detail: string };
+  })[];
+  /** The change in reading order: each file diff.patch shows lines of is in exactly one layer. */
+  layers: { id: string; title: string; intent: string; read_hint: "read" | "skim" | "skip"; ranges: LineRange[] }[];
+  flow: {
+    title: string;
+    input: string;
+    calls: {
+      from: string;
+      to: string;
+      label: string;
+      status: "same" | "added" | "removed" | "changed";
+      old_label: string | null;
+      path: string | null;
+      line: number | null;
+    }[];
+  } | null;
+  checked: string[];
+  not_checked: string[];
+}
+
+/** A commit of the PR after the one the review read, from the repo's clone. */
+export interface CommitSinceReview {
+  sha: string;
+  title: string;
+  author: string;
+  at: string;
+  files: string[];
+}
+
+/** A file outside the PR that changed together with partner, one of the PR's files: in `commits` of
+ * partner's commits in the 90 days before the review, `ratio` of them. */
+export interface CoChange {
+  path: string;
+  partner: string;
+  ratio: number;
+  commits: number;
+}
+
 export interface Review {
   run_id: string;
   /** <owner>/<repo> */
@@ -153,6 +214,12 @@ export interface Review {
   drafts: Drafts;
   /** diff.patch: the PR's change, git diff <merge base> HEAD. */
   patch: string;
+  /** From whooper-show; the host may leave these out. The overview is null when the review wrote none
+   * that passed its checks, and the commits since are null when Whooper cannot tell. */
+  overview?: Overview | null;
+  commits_since_review?: CommitSinceReview[] | null;
+  /** At most 5, highest ratio first. */
+  co_change?: CoChange[];
 }
 
 /** One whooper-draft change: include <id>, leave-out <id>, text <id> <text>, approve, comment, or message <text>. */
