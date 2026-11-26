@@ -127,9 +127,13 @@ bin/whooper-show <run-id> --json   # one review in full, for its review screen
 whooper-show prints the run's `run.json`, the PR's title and author, its outcome, `findings.json`,
 the drafts whooper-draft prints for it, `diff.patch`, `failure.txt`, each of whooper-ask's answers in
 number order, and the review whooper-submit posted. It reads files only, the run directory and the
-review locks, and refuses a run ID that names no run directory. Prompting Time runs it as the
-manifest's `show-review` action, which puts `--json` before the run ID; either order works. The
-headers of both commands list each field.
+review locks, and refuses a run ID that names no run directory. Reviews kept no `diff.patch` before
+whooper-review saved one, and for such a run whooper-show has git rebuild the diff from the repo's
+clone in the cache: `git diff` between the merge base and the head `run.json` records, with the flags
+whooper-review's diff uses and the head's `.gitattributes`. git fetches nothing and writes nothing
+there, so the diff is null when the clone lacks either commit or one of their files. Prompting Time
+runs it as the manifest's `show-review` action, which puts `--json` before the run ID; either order
+works. The headers of both commands list each field.
 
 A review's outcome is `running` while a live whooper-review holds the PR's lock for the run, the
 rule whooper-ask follows; `reviewed` once the review left findings that fit `schemas/findings.json`

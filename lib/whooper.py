@@ -353,12 +353,42 @@ def read_reviews(data, now):
     return reviews
 
 
+# The flags of the git diff that writes a review's diff.patch in bin/whooper-review, which keep it a
+# plain patch whatever the user's git config says: no external diff tool, textconv filter, or color,
+# a/ and b/ before the paths, and a submodule's commit lines rather than its log. rebuilt_diff passes
+# the same ones, so keep the two lists the same.
+PLAIN_DIFF = ("--no-ext-diff", "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", "--submodule=short")
+
+
+def repo_clone(repo):
+    """The partial clone of repo that reviews check out from, WHOOPER_REPO_CLONE:
+    whooper/repos/<owner>-<name> under $XDG_CACHE_HOME (default ~/.cache)."""
+    return xdg_dir("XDG_CACHE_HOME", ".cache") / "repos" / repo.replace("/", "-")
+
+
+def rebuilt_diff(item):
+    """The diff a review read, for a run from before whooper-review kept it as diff.patch: git diff
+    between the merge base and the head that item, the run's run.json, records, in the repo's clone,
+    with whooper-review's PLAIN_DIFF flags, or None without run.json and when the clone lacks either
+    commit or one of their files. The clone has no checkout, so git reads .gitattributes from the head
+    commit, which whooper-review's diff read from the head worktree: a file marked -diff shows as
+    binary. --no-lazy-fetch keeps git from fetching a file the partial clone lacks, so this only reads
+    the clone."""
+    if item is None:
+        return None
+    base, head = item["merge_base"], item["head_sha"]
+    git = subprocess.run(["git", "--git-dir", str(repo_clone(item["repo"]) / ".git"), "--no-lazy-fetch",
+                          f"--attr-source={head}", "diff", *PLAIN_DIFF, base, head], capture_output=True)
+    # As in diff.patch, a file in an encoding other than UTF-8 leaves bytes that read as U+FFFD.
+    return git.stdout.decode(errors="replace") if git.returncode == 0 else None
+
+
 def show_review(data, run_id):
     """One review run for Prompting Time's review screen, as whooper-show --json prints it:
     run.json, the outcome, the findings, and the posted review as read_review reads them, the PR's
     title and author in github.json, the drafts whooper-draft prints, which only a review whose
-    findings fit has, diff.patch, failure.txt, and whooper-ask's answers. Refuses a run ID that names
-    no run directory."""
+    findings fit has, diff.patch, or for a run from before reviews kept it, the diff rebuilt_diff
+    rebuilds, failure.txt, and whooper-ask's answers. Refuses a run ID that names no run directory."""
     run = data / "runs" / run_id
     # A run ID names a directory right under runs, so a path such as ../x reads nothing outside it.
     if parse_run_id(run_id) is None or not run.is_dir():
@@ -374,6 +404,7 @@ def show_review(data, run_id):
         except FileNotFoundError:
             return None
 
+    diff = text("diff.patch")
     return {
         "version": 1,
         "run_id": run_id,
@@ -383,7 +414,7 @@ def show_review(data, run_id):
         "outcome": outcome,
         "findings": result,
         "drafts": read_drafts(run) if result else None,
-        "diff": text("diff.patch"),
+        "diff": diff if diff is not None else rebuilt_diff(item),
         "failure": text("failure.txt"),
         "asks": [json.loads(path.read_text()) for path in ask_files(run)],
         "submitted": submit,
@@ -1430,7 +1461,7 @@ def main(command, *args):
             raise SystemExit(f"whooper: {repo} has no [repos.\"{repo}\"] table in {config_path()}")
         # Scripts named in the config are relative to its directory.
         values = {
-            "WHOOPER_REPO_CLONE": xdg_dir("XDG_CACHE_HOME", ".cache") / "repos" / repo.replace("/", "-"),
+            "WHOOPER_REPO_CLONE": repo_clone(repo),
             "WHOOPER_REPO_SETUP": config["dir"] / settings["setup"] if "setup" in settings else "",
             "WHOOPER_REPO_TEARDOWN": config["dir"] / settings["teardown"] if "teardown" in settings else "",
         }

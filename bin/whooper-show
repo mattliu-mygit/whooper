@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Prints one review run as one JSON object, for Prompting Time's review screen and its history of
 # past reviews, read from the run's directory, <state>/runs/<run-id>/, with no network calls, where
-# <state> is $XDG_STATE_HOME/whooper (default ~/.local/state/whooper):
+# <state> is $XDG_STATE_HOME/whooper (default ~/.local/state/whooper), and for an older run's diff,
+# from the repo's clone in the cache:
 #
 #   whooper-show <run-id> --json
 #
@@ -16,7 +17,13 @@
 #   findings   findings.json, or null while the review runs and when the file is missing or does not
 #              fit schemas/findings.json
 #   drafts     what bin/whooper-draft <run-id> prints, or null for a review whose findings are null
-#   diff       diff.patch, the PR's change the review read, or null
+#   diff       diff.patch, the PR's change the review read. Reviews kept no diff.patch before
+#              whooper-review saved one, and for such a run git rebuilds the same diff from the repo's
+#              clone, <cache>/repos/<owner>-<repo>, where <cache> is $XDG_CACHE_HOME/whooper (default
+#              ~/.cache/whooper): git diff between the merge base and the head run.json records, with
+#              whooper-review's flags and the head's .gitattributes. It fetches nothing and writes
+#              nothing there, so diff is null when the clone lacks either commit or one of their
+#              files, and without run.json.
 #   failure    failure.txt, the reason whooper-review gave when it stopped the review, or null
 #   asks       whooper-ask's answers, each asks/<n>.json, in number order
 #   submitted  submit.json once whooper-submit posted the review: the request and GitHub's response;

@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -2006,14 +2007,11 @@ class RunTest(unittest.TestCase):
         self.assertEqual({key: json.loads(shown.stdout)[key] for key in ["outcome", "diff"]},
                          {"outcome": "reviewed", "diff": diff})
 
-    def test_the_kept_diff_is_a_plain_patch_whatever_the_git_config_says(self):
-        env, item, merge_base = self.pull_request()
+    def change_every_diff(self, env):
+        """Writes the git config of env's home, in which each setting changes what git diff prints: an
+        external diff tool, a textconv filter for app.txt, color, paths without a/ and b/, and a
+        submodule's log instead of its commit lines."""
         tmp = Path(self.tmp.name)
-        # git's own patch of the PR, made before the config below exists.
-        plain = subprocess.run(["git", "diff", merge_base, "pr-12"], cwd=tmp / "origin", env=env, check=True,
-                               capture_output=True, text=True).stdout
-        # Each setting changes what git diff prints: an external diff tool, a textconv filter for
-        # app.txt, color, paths without a/ and b/, and a submodule's log instead of its commit lines.
         self.script(tmp / "external", 'echo "external diff of $1"')
         self.script(tmp / "shout", 'tr a-z A-Z < "$1"')
         (tmp / "attributes").write_text("app.txt diff=shout\n")
@@ -2023,10 +2021,70 @@ class RunTest(unittest.TestCase):
             "[diff]", f"external = {tmp / 'external'}", "noprefix = true", "submodule = log",
             '[diff "shout"]', f"textconv = {tmp / 'shout'}",
         ]) + "\n")
+
+    def test_the_kept_diff_is_a_plain_patch_whatever_the_git_config_says(self):
+        env, item, merge_base = self.pull_request()
+        # git's own patch of the PR, made before the config exists.
+        plain = subprocess.run(["git", "diff", merge_base, "pr-12"], cwd=Path(self.tmp.name) / "origin", env=env,
+                               check=True, capture_output=True, text=True).stdout
+        self.change_every_diff(env)
         # The review itself fails, since claude is the fake that exits 1, after it saved the diff.
         self.command("whooper-review", str(item), "--dry-run", env=env)
         [run] = (self.state / "runs").iterdir()
         self.assertEqual((run / "diff.patch").read_text(), plain)
+
+    def test_show_rebuilds_the_diff_of_a_review_from_before_reviews_kept_it(self):
+        env, item, _ = self.pull_request()
+        self.command("whooper-review", str(item), "--dry-run", env=env)
+        [run] = (self.state / "runs").iterdir()
+        kept = (run / "diff.patch").read_text()
+        # Reviews kept no diff.patch before whooper-review saved one.
+        (run / "diff.patch").unlink()
+        self.change_every_diff(env)
+        clone = Path(self.tmp.name) / "cache" / "whooper" / "repos" / "sample-org-plain-repo"
+        before = files(clone)
+        shown = self.command("whooper-show", run.name, "--json", env=env)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        # The same patch the review read, generated.txt shown as binary by the head's .gitattributes.
+        self.assertEqual(json.loads(shown.stdout)["diff"], kept)
+        self.assertIn("Binary files a/generated.txt and b/generated.txt differ", kept)
+        self.assertEqual(files(clone), before)
+
+    def test_show_gives_no_diff_when_the_clone_lacks_a_reviewed_commit_or_file(self):
+        env, item, _ = self.pull_request()
+        self.command("whooper-review", str(item), "--dry-run", env=env)
+        [run] = (self.state / "runs").iterdir()
+        (run / "diff.patch").unlink()
+        tmp = Path(self.tmp.name)
+        clone = tmp / "cache" / "whooper" / "repos" / "sample-org-plain-repo"
+
+        def git(*args, cwd=tmp / "origin"):
+            return subprocess.run(["git", *args], cwd=cwd, env=env, check=True, capture_output=True,
+                                  text=True).stdout.strip()
+
+        def diff():
+            shown = self.command("whooper-show", run.name, "--json", env=env)
+            self.assertEqual(shown.returncode, 0, shown.stderr)
+            return json.loads(shown.stdout)["diff"]
+
+        # The clone made again as README.md makes it, a partial clone, which fetches a file only when
+        # something needs it: it has both commits but neither one's files. origin would hand them over,
+        # so a fetch would succeed.
+        git("config", "uploadpack.allowFilter", "true")
+        git("config", "uploadpack.allowAnySHA1InWant", "true")
+        shutil.rmtree(clone)
+        git("clone", "--quiet", "--filter=blob:none", "--no-checkout", f"file://{tmp / 'origin'}", str(clone))
+        before = files(clone)
+        self.assertEqual(diff(), None)
+        self.assertEqual(files(clone), before)
+        # A head the clone never fetched.
+        git("commit", "--quiet", "--allow-empty", "-m", "after the clone")
+        record = json.loads((run / "run.json").read_text())
+        (run / "run.json").write_text(json.dumps({**record, "head_sha": git("rev-parse", "HEAD")}))
+        self.assertEqual(diff(), None)
+        # No clone at all.
+        shutil.rmtree(clone)
+        self.assertEqual(diff(), None)
 
     def test_a_failed_review_keeps_its_reason_and_an_ask_lists_it_first(self):
         env, item, _ = self.pull_request()
@@ -2412,6 +2470,11 @@ class ClaudeLauncherTest(unittest.TestCase):
         self.assertNotIn("--max-budget-usd", self.arguments())
         args = self.arguments(WHOOPER_CLAUDE_BUDGET_USD="15")
         self.assertEqual(args[args.index("--max-budget-usd") + 1], "15")
+
+
+def files(folder):
+    """Each path under folder with its size and modification time, which change when anything writes there."""
+    return {str(path.relative_to(folder)): (path.stat().st_size, path.stat().st_mtime_ns) for path in folder.rglob("*")}
 
 
 def fake(path, body):
