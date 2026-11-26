@@ -5,12 +5,15 @@
 #   whooper-ask <run-id> <question> [--finding <finding-id>]
 #
 # The run's directory is <state>/runs/<run-id>/, where <state> is $XDG_STATE_HOME/whooper (default
-# ~/.local/state/whooper). The new run loads the review's skills ([review] skills) and may read the
-# review's record there: log.md, findings.json, diff.patch, the transcript, github.json, and the other
-# record files the run has, earlier asks included. Its prompt is prompts/ask.md filled in, then those
-# files' paths, the finding --finding names, and the question. A review that did not finish has no
-# findings.json, and for it the prompt also names its agent's stderr.log and stdout.log, which may say
-# why.
+# ~/.local/state/whooper). A review that is still running gets no ask: while a live whooper-review
+# holds the PR's lock for the run, this refuses and says so. The new run loads the review's skills
+# ([review] skills) and may read the review's record there: first failure.txt, the reason
+# whooper-review gave when it stopped the review, then log.md, findings.json, diff.patch, the
+# transcript, github.json, and the other record files the run has, earlier asks included. Its prompt
+# is prompts/ask.md filled in, then those files' paths, the finding --finding names, and the
+# question. A review that did not finish has no findings.json, and for it the prompt also names its
+# agent's stderr.log and stdout.log, which may say why, and findings.invalid.json, the findings that
+# did not fit the schema.
 # It can write nothing but its answer, has no GitHub login, and has every Slack write denied, as in
 # reviews (README.md, "Ask about a review"). A run that passes [ask] timeout_minutes is stopped with
 # everything it started.
@@ -53,6 +56,14 @@ done
 [[ -n "$run_id" && -n "$question" ]] || die "$usage"
 run="$WHOOPER_STATE/runs/$run_id"
 [[ -f "$run/run.json" ]] || die "no run $run_id in $WHOOPER_STATE/runs"
+# A review that is still running has not written its whole record. Its whooper-review holds the PR's
+# lock, which names the run; by whooper-review's own rule, a lock whose process is gone is stale. The
+# run's tmp folder cannot tell, since a kill -9 of whooper-review leaves it behind.
+lock="$WHOOPER_STATE/locks/$(jq -r '"\(.repo | sub("/"; "-"))-\(.pr)"' "$run/run.json")"
+holder="$(cat "$lock/pid" 2>/dev/null || true)"
+if [[ -n "$holder" && "$(cat "$lock/run_id" 2>/dev/null)" == "$run_id" ]] && kill -0 "$holder" 2>/dev/null; then
+  die "the review is still running, in process $holder; ask again once it ends"
+fi
 # A run from before run.json recorded its agent was a claude run, as whooper-classify assumes.
 agent="$(jq -r '.agent // "claude"' "$run/run.json")"
 [[ -x "$root/agents/$agent/ask" ]] || die "$run ran on $agent, which has no agents/$agent/ask"

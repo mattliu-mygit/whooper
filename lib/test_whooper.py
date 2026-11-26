@@ -1654,7 +1654,7 @@ class SlackGuardTest(unittest.TestCase):
 
 
 class RunTest(unittest.TestCase):
-    """bin/whooper-run, whooper-round, whooper-review, whooper-status, whooper-pause, and
+    """bin/whooper-run, whooper-round, whooper-review, whooper-ask, whooper-status, whooper-pause, and
     whooper-resume on a copy of the test config and a throwaway state folder, with gh, slackdump, and
     the agent CLIs replaced by commands that fail unless a test says otherwise, so even a broken check
     cannot reach GitHub, Slack, or a model. Each command runs in a process group of its own, which the
@@ -1759,6 +1759,60 @@ class RunTest(unittest.TestCase):
         self.script(self.fakes / "claude",
                     """echo '{"type": "result", "subtype": "success", "structured_output": {"asks": [], "not_asks": []}}'""")
 
+    def pull_request(self):
+        """Makes PR 12 of sample-org/plain-repo in a local origin, the cache's clone of it, and its work
+        item, and returns the environment for git and the review, the work item's path, and the PR's
+        merge base. The environment's home has no skills, and git reads only home/.gitconfig, which
+        does not exist until a test writes it, so neither the user's git config nor the system's
+        reaches a test."""
+        tmp = Path(self.tmp.name)
+        home, origin = tmp / "home", tmp / "origin"
+        (home / ".claude" / "skills").mkdir(parents=True)
+        env = {**self.env, "HOME": str(home), "GIT_CONFIG_GLOBAL": str(home / ".gitconfig"), "GIT_CONFIG_NOSYSTEM": "1",
+               "GIT_AUTHOR_NAME": "Sam", "GIT_AUTHOR_EMAIL": "sam@example.com",
+               "GIT_COMMITTER_NAME": "Sam", "GIT_COMMITTER_EMAIL": "sam@example.com"}
+
+        def git(*args):
+            return subprocess.run(["git", *args], cwd=origin, env=env, check=True, capture_output=True,
+                                  text=True).stdout.strip()
+
+        # PR 12 branches off main, which moves on after it, and adds the submodule vendor/lib. The
+        # repo's .gitattributes marks generated.txt -diff, which git reads from the worktree it runs in.
+        origin.mkdir()
+        git("init", "--quiet", "--initial-branch=main")
+        for name, content in [("app.txt", "one\n"), ("generated.txt", "g1\n"),
+                              (".gitattributes", "generated.txt -diff\n")]:
+            (origin / name).write_text(content)
+        git("add", ".")
+        git("commit", "--quiet", "-m", "base")
+        merge_base = git("rev-parse", "HEAD")
+        git("checkout", "--quiet", "-b", "pr-12")
+        (origin / "app.txt").write_text("one\ntwo\n")
+        (origin / "generated.txt").write_text("g2\n")
+        git("add", "app.txt", "generated.txt")
+        git("update-index", "--add", "--cacheinfo", f"160000,{'1' * 40},vendor/lib")
+        git("commit", "--quiet", "-m", "the PR")
+        head = git("rev-parse", "HEAD")
+        git("checkout", "--quiet", "main")
+        (origin / "app.txt").write_text("one\nlater on main\n")
+        git("commit", "--quiet", "-am", "later on main")
+        git("clone", "--quiet", "--no-checkout", str(origin),
+            str(tmp / "cache" / "whooper" / "repos" / "sample-org-plain-repo"))
+        item = tmp / "item.json"
+        item.write_text(json.dumps({"kind": "first_review", "repo": "sample-org/plain-repo", "pr": 12, "head_sha": head,
+                                    "base_ref": "main", "source": "github_request", "slack": None, "reason": "r"}))
+        return env, item, merge_base
+
+    def fake_claude(self, review):
+        """Has claude run review, a line of sh, in a review run, which alone passes --json-schema, and
+        answer an ask run with "It stopped."."""
+        self.script(self.fakes / "claude", "\n".join([
+            'case "$*" in',
+            f"  *--json-schema*) {review} ;;",
+            """  *) echo '{"type": "result", "subtype": "success", "result": "It stopped."}' ;;""",
+            "esac",
+        ]))
+
     def test_refuses_to_start_while_another_whooper_run_holds_the_lock(self):
         # A script named whooper-run stands in for a copy that is already polling.
         holder = self.holder("whooper-run")
@@ -1823,40 +1877,8 @@ class RunTest(unittest.TestCase):
         self.assertFalse((self.state / "round.lock").exists())
 
     def test_a_review_keeps_the_diff_it_read_after_its_worktrees_go(self):
-        tmp = Path(self.tmp.name)
-        # A home without the user's git config or skills, for the fixture's git commands and the review.
-        home, origin, run_diff = tmp / "home", tmp / "origin", tmp / "run.diff"
-        (home / ".claude" / "skills").mkdir(parents=True)
-        env = {**self.env, "HOME": str(home), "GIT_AUTHOR_NAME": "Sam", "GIT_AUTHOR_EMAIL": "sam@example.com",
-               "GIT_COMMITTER_NAME": "Sam", "GIT_COMMITTER_EMAIL": "sam@example.com"}
-
-        def git(*args, cwd=origin):
-            return subprocess.run(["git", *args], cwd=cwd, env=env, check=True, capture_output=True,
-                                  text=True).stdout.strip()
-
-        # PR 12 branches off main, which moves on after it. The repo's .gitattributes marks
-        # generated.txt -diff, which git reads from the worktree it runs in.
-        origin.mkdir()
-        git("init", "--quiet", "--initial-branch=main")
-        for name, content in [("app.txt", "one\n"), ("generated.txt", "g1\n"),
-                              (".gitattributes", "generated.txt -diff\n")]:
-            (origin / name).write_text(content)
-        git("add", ".")
-        git("commit", "--quiet", "-m", "base")
-        merge_base = git("rev-parse", "HEAD")
-        git("checkout", "--quiet", "-b", "pr-12")
-        (origin / "app.txt").write_text("one\ntwo\n")
-        (origin / "generated.txt").write_text("g2\n")
-        git("commit", "--quiet", "-am", "the PR")
-        head = git("rev-parse", "HEAD")
-        git("checkout", "--quiet", "main")
-        (origin / "app.txt").write_text("one\nlater on main\n")
-        git("commit", "--quiet", "-am", "later on main")
-        git("clone", "--quiet", "--no-checkout", str(origin),
-            str(tmp / "cache" / "whooper" / "repos" / "sample-org-plain-repo"))
-        item = tmp / "item.json"
-        item.write_text(json.dumps({"kind": "first_review", "repo": "sample-org/plain-repo", "pr": 12, "head_sha": head,
-                                    "base_ref": "main", "source": "github_request", "slack": None, "reason": "r"}))
+        env, item, merge_base = self.pull_request()
+        run_diff = Path(self.tmp.name) / "run.diff"
         # The run starts in the head worktree, reads the change as prompts/review.md tells it to, and
         # finds nothing.
         (self.fakes / "result.json").write_text(json.dumps({
@@ -1873,6 +1895,83 @@ class RunTest(unittest.TestCase):
         self.assertIn("\n+two\n", diff)
         self.assertIn("Binary files a/generated.txt and b/generated.txt differ", diff)
         self.assertFalse((run / "head").exists() or (run / "base").exists())
+
+    def test_the_kept_diff_is_a_plain_patch_whatever_the_git_config_says(self):
+        env, item, merge_base = self.pull_request()
+        tmp = Path(self.tmp.name)
+        # git's own patch of the PR, made before the config below exists.
+        plain = subprocess.run(["git", "diff", merge_base, "pr-12"], cwd=tmp / "origin", env=env, check=True,
+                               capture_output=True, text=True).stdout
+        # Each setting changes what git diff prints: an external diff tool, a textconv filter for
+        # app.txt, color, paths without a/ and b/, and a submodule's log instead of its commit lines.
+        self.script(tmp / "external", 'echo "external diff of $1"')
+        self.script(tmp / "shout", 'tr a-z A-Z < "$1"')
+        (tmp / "attributes").write_text("app.txt diff=shout\n")
+        Path(env["GIT_CONFIG_GLOBAL"]).write_text("\n".join([
+            "[core]", f"attributesFile = {tmp / 'attributes'}",
+            "[color]", "ui = always",
+            "[diff]", f"external = {tmp / 'external'}", "noprefix = true", "submodule = log",
+            '[diff "shout"]', f"textconv = {tmp / 'shout'}",
+        ]) + "\n")
+        # The review itself fails, since claude is the fake that exits 1, after it saved the diff.
+        self.command("whooper-review", str(item), "--dry-run", env=env)
+        [run] = (self.state / "runs").iterdir()
+        self.assertEqual((run / "diff.patch").read_text(), plain)
+
+    def test_a_failed_review_keeps_its_reason_and_an_ask_lists_it_first(self):
+        env, item, _ = self.pull_request()
+        self.fake_claude(review="exit 1")
+        result = self.command("whooper-review", str(item), "--dry-run", env=env)
+        [run] = (self.state / "runs").iterdir()
+        reason = f"the review run exited 1 without findings; see {run}/stderr.log and the transcript in {run}"
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"whooper-review: {reason}\n", result.stderr)
+        self.assertEqual((run / "failure.txt").read_text(), f"{reason}\n")
+        ask = self.command("whooper-ask", run.name, "Why did this review fail?", env=env)
+        self.assertEqual((ask.returncode, ask.stdout), (0, "It stopped.\n"), ask.stderr)
+        prompt = (run / "asks" / "1.prompt.md").read_text()
+        listed = [line for line in prompt.splitlines() if line.startswith(f"- {run}/")]
+        self.assertTrue(listed[0].startswith(f"- {run / 'failure.txt'}: "), listed)
+
+    def test_an_ask_about_a_review_still_running_is_refused_until_its_whooper_review_is_gone(self):
+        env, item, _ = self.pull_request()
+        agent_pid = Path(self.tmp.name) / "agent.pid"
+        # The review run notes its process ID and waits.
+        self.fake_claude(review=f"echo $$ > '{agent_pid}'; exec sleep 30")
+        review = subprocess.Popen([str(ROOT / "bin" / "whooper-review"), str(item), "--dry-run"], env=env,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        self.addCleanup(self.stop, review)
+        self.wait_for(lambda: self.read(agent_pid), "the review run to start")
+        # The run has a session of its own, which outlives a kill -9 of whooper-review.
+        agent = os.getpgid(int(agent_pid.read_text()))
+
+        def stop_agent():
+            with suppress(ProcessLookupError):
+                os.killpg(agent, signal.SIGKILL)
+
+        self.addCleanup(stop_agent)
+        [run] = (self.state / "runs").iterdir()
+        refused = self.command("whooper-ask", run.name, "Why did this review fail?", env=env)
+        self.assertEqual((refused.returncode, refused.stdout), (1, ""))
+        self.assertIn("the review is still running", refused.stderr)
+        self.assertFalse((run / "asks").exists())
+        # An earlier review of the same PR has ended, so the lock this one holds does not stop an ask
+        # about it.
+        earlier = run.parent / "20310727T010246Z-12"
+        earlier.mkdir()
+        (earlier / "run.json").write_text(json.dumps({"repo": "sample-org/plain-repo", "pr": 12, "run_id": earlier.name,
+                                                      "agent": "claude"}))
+        meanwhile = self.command("whooper-ask", earlier.name, "What did it find?", env=env)
+        self.assertEqual(meanwhile.returncode, 0, meanwhile.stderr)
+        # A kill -9 leaves the lock and the run's tmp folder behind. The lock's process is gone, so the
+        # lock is stale and no longer stops an ask.
+        os.kill(review.pid, signal.SIGKILL)
+        review.wait()
+        stop_agent()
+        lock = self.state / "locks" / "sample-org-plain-repo-12"
+        self.assertEqual(((lock / "pid").read_text(), (run / "tmp").is_dir()), (f"{review.pid}\n", True))
+        answered = self.command("whooper-ask", run.name, "Why did this review fail?", env=env)
+        self.assertEqual((answered.returncode, answered.stdout), (0, "It stopped.\n"), answered.stderr)
 
     def test_status_reports_the_loop_pause_next_round_and_rounds_from_the_state_folder(self):
         nothing = {"version": 1, "loop": {"running": False, "pid": None}, "paused": False, "next_round": None,
@@ -2264,15 +2363,21 @@ class AskTest(unittest.TestCase):
         self.assertFalse((self.run / "asks").exists())
 
     def test_a_review_that_did_not_finish_can_be_asked_why(self):
-        # The review left no findings.json, and stdout.log as a Devin review does.
-        (self.run / "findings.json").unlink()
+        # The review's findings did not fit the schema, so whooper-review set them aside as
+        # findings.invalid.json and saved why as failure.txt. The run left stdout.log, as a Devin
+        # review does.
+        (self.run / "findings.json").rename(self.run / "findings.invalid.json")
+        (self.run / "failure.txt").write_text("the review run's findings.json does not fit the schema\n")
         (self.run / "stdout.log").write_text("the review's stdout.log")
-        (self.fakes / "answer").write_text("The run passed its 45-minute limit.\n")
+        (self.fakes / "answer").write_text("Its findings did not fit the schema.\n")
         result = self.ask(self.run.name, "Why did this review fail?")
-        self.assertEqual((result.returncode, result.stdout), (0, "The run passed its 45-minute limit.\n"), result.stderr)
-        # Its error output may say why, so the prompt lists it with the rest of the record.
+        self.assertEqual((result.returncode, result.stdout), (0, "Its findings did not fit the schema.\n"), result.stderr)
+        # whooper-review's reason comes first. The agent's output may say more, so the prompt lists it
+        # with the findings that did not fit and the rest of the record.
         prompt = (self.run / "asks" / "1.prompt.md").read_text()
-        for name in ["stderr.log", "stdout.log", "log.md", "diff.patch", "transcript.jsonl"]:
+        listed = [line for line in prompt.splitlines() if line.startswith(f"- {self.run}/")]
+        self.assertTrue(listed[0].startswith(f"- {self.run / 'failure.txt'}: "), listed)
+        for name in ["findings.invalid.json", "stderr.log", "stdout.log", "log.md", "diff.patch", "transcript.jsonl"]:
             self.assertIn(f"{self.run / name}: ", prompt)
         self.assertNotIn(f"{self.run / 'findings.json'}: ", prompt)
         no_finding = self.ask(self.run.name, self.QUESTION, "--finding", "1")

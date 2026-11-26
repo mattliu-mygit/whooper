@@ -168,13 +168,18 @@ run, such as "Why is it bad to have invisible characters?", or "Why did this rev
 that did not finish, and prints the answer. Prompting Time's "Ask about this" runs it with the
 finding. A new run of the agent that did the review answers, with the review's skills, since Whooper
 ends each review's session. Its prompt, `prompts/ask.md` filled in, names the question, the finding,
-and the path of each file of the review's record the run directory has: `log.md`, `findings.json`,
+and the path of each file of the review's record the run directory has: first `failure.txt`, the
+reason whooper-review gave when it stopped the review, then `log.md`, `findings.json`,
 `diff.patch`, the transcript, `github.json`, `run.json`, `prompt.md`, `verdicts.json`, `post.json`,
 `drafts.json`, `submit.json`, `summary.md`, and earlier asks. For a review that did not finish,
 which left no `findings.json`, it also names the review agent's `stderr.log` and `stdout.log`, which
-may say why. The PR's code is gone by then, since whooper-review removes the worktrees, so the run
-answers from the record, where `diff.patch` holds the PR's change. [Approvals](#approvals) says what
-the run may do.
+may say why, and `findings.invalid.json`, the findings that did not fit the schema. The PR's code is
+gone by then, since whooper-review removes the worktrees, so the run answers from the record, where
+`diff.patch` holds the PR's change. [Approvals](#approvals) says what the run may do.
+
+whooper-ask refuses a review that is still running, and says so: one whose whooper-review holds the
+PR's lock with the run's ID in it. A lock whose process is gone, as after a `kill -9`, does not
+count, so a review killed that way can be asked about.
 
 whooper-ask saves each answer in the run directory as `asks/<n>.json`, numbered in order from 1:
 `question`, `finding` (its ID or null), `answer`, `agent`, `started_at` and `ended_at` in UTC, and
@@ -220,14 +225,18 @@ review.
 whooper-review takes the PR's lock, then fetches with the user's login everything the run will
 read: the head and the merge base of the head and `base_ref`, checked out as two worktrees, and the
 PR's conversation as `github.json`. It saves the diff the run reads, `git diff <merge base> HEAD`
-in the head worktree, as `diff.patch`, which stays when the worktrees go. Then it runs the repo's
+in the head worktree, as `diff.patch`, which stays when the worktrees go. `diff.patch` is a plain
+patch whatever your git config says: no external diff tool, textconv filter, or color, `a/` and
+`b/` before the paths, and a submodule's commit lines rather than its log. Then it runs the repo's
 setup script, if the config names one, which may add variables to the run's environment and prints
 a paragraph for the prompt. Then the agent that `[jobs] review` names runs from the head worktree
 through its launcher, `agents/<agent>/review`. The run follows `prompts/review.md`, filled in from
 the config with that agent's tool names and saved as `prompt.md` in the run directory, and leaves
 `findings.json`, which must fit `schemas/findings.json`. A run that passes
 `[review] timeout_minutes` is stopped, and when whooper-review exits it stops the run and every
-process the run started.
+process the run started. When whooper-review stops a review for a reason it names, such as the time
+limit, a failed setup script, or findings that do not fit the schema, it saves that reason in the
+run directory as `failure.txt`.
 
 `agents/claude/review` runs `claude -p`, which returns the findings as structured output, and
 reports the run's cost in dollars, capped by `[agents.claude] budget_usd` when the config sets one. `agents/devin/review`
@@ -316,8 +325,9 @@ run's `drafts.json`, `submit-request.json`, and `submit.json` the same way, whoo
   source, and Slack ask it had. A later mark of the PR replaces it. whooper-select deletes it once
   the newest poll lists the PR, which then comes with the head the PR has now, or once the record at
   the listed head is done or has failed 3 times.
-- `locks/<owner>-<repo>-<pr>/pid`: the process ID of the review that holds the PR. A lock whose
-  process is gone is stale, and the next review takes it.
+- `locks/<owner>-<repo>-<pr>/`: the lock of the review that holds the PR, with its process ID in
+  `pid` and its run ID in `run_id`. A lock whose process is gone is stale: the next review takes
+  it, and whooper-ask no longer counts its review as running.
 - `run.lock/`: the running whooper-run's lock, with its process ID in `pid`. A lock whose process is
   gone, or is now some other program, is stale, and the next whooper-run takes it over.
 - `next-round`: the Unix time of the round whooper-run waits for, written before each wait and
@@ -337,10 +347,11 @@ run's `drafts.json`, `submit-request.json`, and `submit.json` the same way, whoo
   work item with the run ID, merge base, cutoff, agent, and a content hash of each skill in
   `~/.claude/skills`, so a finding traces to the skill text behind it. `github.json` is the PR
   conversation the run read, missing when the fetch failed. `diff.patch` is the PR's change,
-  `git diff <merge base> HEAD` as the run read it. `prompt.md` is the prompt the run got.
+  `git diff <merge base> HEAD`, as a plain patch. `prompt.md` is the prompt the run got.
   The transcript (`transcript.jsonl` for Claude, the ATIF export `transcript.json` for Devin, with
   `devin-config.json` and `stdout.log`) and `stderr.log` are the run, `findings.json` its result
-  (`findings.invalid.json` when it did not fit the schema), `log.md` its evidence for each finding and the candidates it dropped,
+  (`findings.invalid.json` when it did not fit the schema), `failure.txt` the reason whooper-review
+  gave when it stopped the run, `log.md` its evidence for each finding and the candidates it dropped,
   `verdicts.json` whooper-classify's output, and `post.json` and `post-request.json` whooper-post's.
   `drafts.json` holds the user's choices for the review: `event` (`APPROVE` or `COMMENT`),
   `message`, and `findings`, which maps a finding ID to `included` and, once edited, `text`.

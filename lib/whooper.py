@@ -1024,13 +1024,16 @@ def append_digest(data, run_dir, item, verdicts):
 
 
 # The files of a review run's record that an ask run's prompt lists, in this order, with what each
-# holds. A file the run directory lacks is left out: a Claude review leaves transcript.jsonl and a
-# Devin review transcript.json, and drafts.json, submit.json, and summary.md come only from the
-# user's choices or a Devin summary.
+# holds. A file the run directory lacks is left out: only a review whooper-review stopped leaves
+# failure.txt, a Claude review leaves transcript.jsonl and a Devin review transcript.json, and
+# drafts.json, submit.json, and summary.md come only from the user's choices or a Devin summary.
+# failure.txt is here rather than in ASK_FAILURE_RECORD because a Devin review writes findings.json
+# itself, and can pass its time limit after writing it.
 ASK_RECORD = {
+    "failure.txt": "the reason whooper-review gave for stopping the review before it finished",
     "log.md": "the review's log: what the change does, the evidence for each finding, and the candidates it dropped",
     "findings.json": "the review's findings, each with its draft comment, and its approval verdict with the reason",
-    "diff.patch": "the pull request's change, git diff <merge base> HEAD as the review read it",
+    "diff.patch": "the pull request's change, git diff <merge base> HEAD",
     "github.json": "the PR's title, body, reviews, and comments, as the review read them",
     "transcript.jsonl": "the review's whole conversation, with every command it ran and that command's output",
     "transcript.json": "the review's whole conversation, with every command it ran and that command's output",
@@ -1043,19 +1046,21 @@ ASK_RECORD = {
     "summary.md": "Whooper's summary of the review",
 }
 # The files an ask run's prompt also lists for a review that did not finish, and so left no
-# findings.json: its agent's output, which may say why. Only a Devin review leaves stdout.log.
+# findings.json: its agent's output, which may say why, and the findings whooper-review set aside
+# because they did not fit the schema. Only a Devin review leaves stdout.log.
 ASK_FAILURE_RECORD = {
     "stderr.log": "the error output of the review's agent, which may say why the review did not finish",
     "stdout.log": "the rest of the review agent's output",
+    "findings.invalid.json": "the findings the review wrote, which did not fit Whooper's findings schema",
 }
 
 
 def ask_facts(run_dir, question, finding_id=None):
     """The end of the prompt of a run that answers question about the review in run_dir: the files of
     the review's record it may read, each with its path, earlier asks about the review among them, and
-    for a review that did not finish, its agent's output too; the finding the question is about when
-    finding_id names one; and the question. None of it goes through fill, so braces in the question
-    stay as written."""
+    for a review that did not finish, its agent's output and the findings that did not fit the schema
+    too; the finding the question is about when finding_id names one; and the question. None of it
+    goes through fill, so braces in the question stay as written."""
     finished = (run_dir / "findings.json").exists()
     record = ASK_RECORD if finished else {**ASK_RECORD, **ASK_FAILURE_RECORD}
     lines = ["", "", "## The review's record", "", f"The review's run directory is {run_dir}. You may read these files:", ""]

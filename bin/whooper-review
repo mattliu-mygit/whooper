@@ -8,7 +8,8 @@
 # The PR's repo must have a table in the config. Before the run starts, this script fetches with
 # the user's login everything the run reads: the head and merge-base commits, checked out as the
 # worktrees head/ and base/ in the run directory, and the PR's conversation as github.json. The
-# diff between the two commits, the one the run reads, stays as diff.patch after the worktrees go.
+# diff between the two commits, the one the run reads, stays as diff.patch after the worktrees go,
+# a plain patch whatever the user's git config says.
 # With --as-of, github.json holds only what people could read before that time, for replaying a past
 # review. Then the repo's setup script, if the config names one, prepares anything else the run
 # needs, such as dependencies or databases (examples/setup.example.sh). The run itself has no
@@ -16,9 +17,12 @@
 # must fit schemas/findings.json, and a run that passes [review] timeout_minutes is stopped.
 # bin/whooper-classify <run dir> then applies rule v1 to its findings.
 #
-# On exit, finished or not, the repo's teardown script runs, the worktrees and PR lock go away,
-# and a run that did not finish counts as a failure in its <state>/prs record. Runs take --dry-run until a live run has a
-# way to add :eyes: to the ask it takes.
+# While it runs, this script holds the PR's lock, <state>/locks/<owner>-<repo>-<pr>/, with its
+# process ID in pid and the run ID in run_id. On exit, finished or not, the repo's teardown script
+# runs, the worktrees and PR lock go away, and a run that did not finish counts as a failure in its
+# <state>/prs record. When this script stops a review once its run directory exists, such as at the
+# time limit, the reason it prints stays there as failure.txt. Runs take --dry-run until a live run
+# has a way to add :eyes: to the ask it takes.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -26,8 +30,14 @@ eval "$("$root/lib/python" "$root/lib/whooper.py" env)"
 data="$WHOOPER_STATE"
 usage="usage: whooper-review <work-item.json> --dry-run [--as-of <time>]"
 
+# Once this review has its run directory, die also saves the reason there, so an ask about the
+# failed review can read it.
+failure=""
 die() {
   echo "whooper-review: $*" >&2
+  if [[ -n "$failure" ]]; then
+    echo "$*" > "$failure"
+  fi
   exit 1
 }
 
@@ -78,6 +88,9 @@ if ! mkdir "$lock" 2>/dev/null; then
   mkdir "$lock"
 fi
 echo "$$" > "$lock/pid"
+# The lock names the run, so whooper-ask refuses an ask about this review, and not about an earlier
+# review of the PR, while this script runs.
+echo "$run_id" > "$lock/run_id"
 
 # The unfiltered GitHub data stays here, outside the run directory the model reads.
 work="$(mktemp -d)"
@@ -114,6 +127,7 @@ trap cleanup EXIT
 trap 'exit 130' INT TERM HUP
 
 mkdir -p "$run/tmp"
+failure="$run/failure.txt"
 "$root/lib/python" "$root/lib/whooper.py" record "$data" "$item" running
 
 git -C "$core" fetch --quiet --no-write-fetch-head origin \
@@ -124,8 +138,11 @@ git -C "$core" worktree add --quiet --detach "$run/head" "$head_sha"
 git -C "$core" worktree add --quiet --detach "$run/base" "$merge_base"
 # The worktrees go when the review ends, so the diff the run reads stays as diff.patch, for showing a
 # past review and for asks about it. It runs in the head worktree, as the run's git diff does, because
-# git applies the .gitattributes it finds there: a file marked -diff shows as binary.
-git -C "$run/head" diff "$merge_base" HEAD > "$run/diff.patch"
+# git applies the .gitattributes it finds there: a file marked -diff shows as binary. The flags keep
+# it a plain patch whatever the user's git config says: no external diff tool, textconv filter, or
+# color, a/ and b/ before the paths, and a submodule's commit lines rather than its log.
+git -C "$run/head" diff --no-ext-diff --no-textconv --no-color --src-prefix=a/ --dst-prefix=b/ --submodule=short \
+  "$merge_base" HEAD > "$run/diff.patch"
 # skills holds a content hash of every skill the run can load, so a finding traces to the skill version behind it.
 jq --arg run_id "$run_id" --arg merge_base "$merge_base" --arg as_of "$as_of" --arg agent "$WHOOPER_REVIEW_AGENT" \
   --argjson skills "$("$root/lib/python" "$root/lib/whooper.py" skills "$HOME/.claude/skills")" \
