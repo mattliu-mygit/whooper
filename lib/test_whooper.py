@@ -1654,11 +1654,11 @@ class SlackGuardTest(unittest.TestCase):
 
 
 class RunTest(unittest.TestCase):
-    """bin/whooper-run, whooper-round, whooper-status, whooper-pause, and whooper-resume on a copy of
-    the test config and a throwaway state folder, with gh, slackdump, and the agent CLIs replaced by
-    commands that fail unless a test says otherwise, so even a broken check cannot reach GitHub,
-    Slack, or a model. Each command runs in a process group of its own, which the test stops whole
-    when it ends."""
+    """bin/whooper-run, whooper-round, whooper-review, whooper-status, whooper-pause, and
+    whooper-resume on a copy of the test config and a throwaway state folder, with gh, slackdump, and
+    the agent CLIs replaced by commands that fail unless a test says otherwise, so even a broken check
+    cannot reach GitHub, Slack, or a model. Each command runs in a process group of its own, which the
+    test stops whole when it ends."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1821,6 +1821,58 @@ class RunTest(unittest.TestCase):
                          {"result": "interrupted", "selected": 1,
                           "reviews": [{"pr": "example-org/example-repo#12", "outcome": "interrupted"}]})
         self.assertFalse((self.state / "round.lock").exists())
+
+    def test_a_review_keeps_the_diff_it_read_after_its_worktrees_go(self):
+        tmp = Path(self.tmp.name)
+        # A home without the user's git config or skills, for the fixture's git commands and the review.
+        home, origin, run_diff = tmp / "home", tmp / "origin", tmp / "run.diff"
+        (home / ".claude" / "skills").mkdir(parents=True)
+        env = {**self.env, "HOME": str(home), "GIT_AUTHOR_NAME": "Sam", "GIT_AUTHOR_EMAIL": "sam@example.com",
+               "GIT_COMMITTER_NAME": "Sam", "GIT_COMMITTER_EMAIL": "sam@example.com"}
+
+        def git(*args, cwd=origin):
+            return subprocess.run(["git", *args], cwd=cwd, env=env, check=True, capture_output=True,
+                                  text=True).stdout.strip()
+
+        # PR 12 branches off main, which moves on after it. The repo's .gitattributes marks
+        # generated.txt -diff, which git reads from the worktree it runs in.
+        origin.mkdir()
+        git("init", "--quiet", "--initial-branch=main")
+        for name, content in [("app.txt", "one\n"), ("generated.txt", "g1\n"),
+                              (".gitattributes", "generated.txt -diff\n")]:
+            (origin / name).write_text(content)
+        git("add", ".")
+        git("commit", "--quiet", "-m", "base")
+        merge_base = git("rev-parse", "HEAD")
+        git("checkout", "--quiet", "-b", "pr-12")
+        (origin / "app.txt").write_text("one\ntwo\n")
+        (origin / "generated.txt").write_text("g2\n")
+        git("commit", "--quiet", "-am", "the PR")
+        head = git("rev-parse", "HEAD")
+        git("checkout", "--quiet", "main")
+        (origin / "app.txt").write_text("one\nlater on main\n")
+        git("commit", "--quiet", "-am", "later on main")
+        git("clone", "--quiet", "--no-checkout", str(origin),
+            str(tmp / "cache" / "whooper" / "repos" / "sample-org-plain-repo"))
+        item = tmp / "item.json"
+        item.write_text(json.dumps({"kind": "first_review", "repo": "sample-org/plain-repo", "pr": 12, "head_sha": head,
+                                    "base_ref": "main", "source": "github_request", "slack": None, "reason": "r"}))
+        # The run starts in the head worktree, reads the change as prompts/review.md tells it to, and
+        # finds nothing.
+        (self.fakes / "result.json").write_text(json.dumps({
+            "type": "result", "subtype": "success", "total_cost_usd": 0, "duration_ms": 0, "num_turns": 1,
+            "structured_output": {"status": "reviewed", "skip_reason": "", "findings": [],
+                                  "approval": {"verdict": "approve_once_ci_passes", "reason": "Read the diff."}}}))
+        self.script(self.fakes / "claude", f"git diff {merge_base} HEAD > '{run_diff}'\ncat \"${{0%/*}}/result.json\"")
+        result = self.command("whooper-review", str(item), "--dry-run", env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        run = Path(result.stdout.strip())
+        self.assertEqual(run.parent, self.state / "runs")
+        diff = (run / "diff.patch").read_text()
+        self.assertEqual(diff, run_diff.read_text())
+        self.assertIn("\n+two\n", diff)
+        self.assertIn("Binary files a/generated.txt and b/generated.txt differ", diff)
+        self.assertFalse((run / "head").exists() or (run / "base").exists())
 
     def test_status_reports_the_loop_pause_next_round_and_rounds_from_the_state_folder(self):
         nothing = {"version": 1, "loop": {"running": False, "pid": None}, "paused": False, "next_round": None,
@@ -2162,7 +2214,7 @@ class AskTest(unittest.TestCase):
             "status": "reviewed", "skip_reason": "",
             "approval": {"verdict": "look_first", "reason": "Finding 1 needs the author."},
             "findings": [finding(), self.NIT]}))
-        for name in ["log.md", "github.json", "transcript.jsonl", "prompt.md", "stderr.log"]:
+        for name in ["log.md", "github.json", "diff.patch", "transcript.jsonl", "prompt.md", "stderr.log"]:
             (self.run / name).write_text(f"the review's {name}")
 
     def prompt(self, *args):
@@ -2184,8 +2236,8 @@ class AskTest(unittest.TestCase):
         # Braces in a question stay as written instead of reading as placeholders.
         question = f"{self.QUESTION} Is {{{{this}}}} one?"
         prompt = self.prompt("claude", str(self.run), question, "2")
-        for name in ["log.md", "findings.json", "github.json", "transcript.jsonl", "run.json", "prompt.md",
-                     "drafts.json", "asks/1.json"]:
+        for name in ["log.md", "findings.json", "diff.patch", "github.json", "transcript.jsonl", "run.json",
+                     "prompt.md", "drafts.json", "asks/1.json"]:
             self.assertIn(f"{self.run / name}: ", prompt)
         # Files the run does not have, and files that hold nothing to answer from.
         for name in ["transcript.json", "submit.json", "summary.md", "stderr.log", "asks/1.prompt.md"]:
@@ -2209,11 +2261,23 @@ class AskTest(unittest.TestCase):
                 result = self.ask(*args)
                 self.assertEqual(result.returncode, 1)
                 self.assertIn(why, result.stderr)
-        (self.run / "findings.json").unlink()
-        unfinished = self.ask(self.run.name, self.QUESTION)
-        self.assertEqual(unfinished.returncode, 1)
-        self.assertIn("its review did not finish", unfinished.stderr)
         self.assertFalse((self.run / "asks").exists())
+
+    def test_a_review_that_did_not_finish_can_be_asked_why(self):
+        # The review left no findings.json, and stdout.log as a Devin review does.
+        (self.run / "findings.json").unlink()
+        (self.run / "stdout.log").write_text("the review's stdout.log")
+        (self.fakes / "answer").write_text("The run passed its 45-minute limit.\n")
+        result = self.ask(self.run.name, "Why did this review fail?")
+        self.assertEqual((result.returncode, result.stdout), (0, "The run passed its 45-minute limit.\n"), result.stderr)
+        # Its error output may say why, so the prompt lists it with the rest of the record.
+        prompt = (self.run / "asks" / "1.prompt.md").read_text()
+        for name in ["stderr.log", "stdout.log", "log.md", "diff.patch", "transcript.jsonl"]:
+            self.assertIn(f"{self.run / name}: ", prompt)
+        self.assertNotIn(f"{self.run / 'findings.json'}: ", prompt)
+        no_finding = self.ask(self.run.name, self.QUESTION, "--finding", "1")
+        self.assertEqual(no_finding.returncode, 1)
+        self.assertIn("has no finding 1; its findings are none", no_finding.stderr)
 
     def test_saves_each_answer_numbered_in_order(self):
         asks = self.run / "asks"
@@ -2397,7 +2461,7 @@ class SettingsTest(unittest.TestCase):
         return out.getvalue()
 
     def test_get_fills_in_whoopers_defaults(self):
-        # The test config has no [schedule] and no [poll].
+        # The test config has no [schedule], [poll], or [ask].
         self.assertEqual(json.loads(self.settings("get")), {
             "schedule": {"interval_minutes": 15, "start": "10:00", "end": "18:00", "days": ["mon", "tue", "wed", "thu", "fri"]},
             "poll": {"timeout_minutes": 10},
@@ -2405,6 +2469,7 @@ class SettingsTest(unittest.TestCase):
             "agents": {"claude": {"review_model": "review-model", "poll_model": "poll-model", "budget_usd": 15},
                        "devin": {"review_model": "devin-review-model", "poll_model": "devin-poll-model"}},
             "review": {"timeout_minutes": 45, "skills": ["review-skill", "language-skill"]},
+            "ask": {"timeout_minutes": 10},
         })
 
     def test_each_job_offers_the_agents_with_a_launcher_for_it(self):
@@ -2418,11 +2483,13 @@ class SettingsTest(unittest.TestCase):
             ({"schedule": {"interval_minutes": 30}}, "interval_minutes = 15\n", "interval_minutes = 30\n"),
             # The changed line keeps its own comment too.
             ({"poll": {"timeout_minutes": 5}}, "timeout_minutes = 10 ", "timeout_minutes = 5 "),
+            ({"ask": {"timeout_minutes": 15}}, "timeout_minutes = 10               # whooper-ask",
+             "timeout_minutes = 15               # whooper-ask"),
         ]:
             with self.subTest(values):
                 path = self.use_config(EXAMPLE)
                 self.settings("set", json.dumps(values))
-                # [ask] has the same timeout_minutes line as [poll], below it, and keeps it.
+                # [poll] and [ask] each have the line timeout_minutes = 10, and a change to one keeps the other.
                 self.assertEqual(path.read_text(), EXAMPLE.replace(old, new, 1))
 
     def test_a_claude_budget_is_optional_and_can_be_set(self):
@@ -2456,6 +2523,7 @@ class SettingsTest(unittest.TestCase):
             ("an interval in quotes", '{"schedule": {"interval_minutes": "30"}}', "interval_minutes is not of type integer"),
             # A poll takes 2 to 3 minutes, so a shorter limit would stop every poll.
             ("a poll limit under 5 minutes", '{"poll": {"timeout_minutes": 4}}', "timeout_minutes is below 5"),
+            ("an ask limit under a minute", '{"ask": {"timeout_minutes": 0}}', "timeout_minutes is below 1"),
             ("a budget of nothing", '{"agents": {"claude": {"budget_usd": 0}}}', "budget_usd is below 1"),
             ("an unknown key", '{"schedule": {"interval": 30}}', "unexpected interval"),
             ("a setting the form does not edit", '{"slack": {"ask_channel": "C0000000009"}}', "unexpected slack"),

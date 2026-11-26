@@ -112,6 +112,19 @@
           "items": { "type": "string" }
         }
       }
+    },
+    "ask": {
+      "title": "Questions about a review",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "timeout_minutes": {
+          "title": "Stop an answer after (minutes)",
+          "description": "whooper-ask stops a run that takes longer to answer a question about a review, and saves no answer.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
     }
   }
 }

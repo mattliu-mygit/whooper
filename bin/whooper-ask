@@ -5,10 +5,12 @@
 #   whooper-ask <run-id> <question> [--finding <finding-id>]
 #
 # The run's directory is <state>/runs/<run-id>/, where <state> is $XDG_STATE_HOME/whooper (default
-# ~/.local/state/whooper), and its review must have finished. The new run loads the review's skills
-# ([review] skills) and may read the review's record there: log.md, findings.json, the transcript,
-# github.json, and the other record files the run has, earlier asks included. Its prompt is
-# prompts/ask.md filled in, then those files' paths, the finding --finding names, and the question.
+# ~/.local/state/whooper). The new run loads the review's skills ([review] skills) and may read the
+# review's record there: log.md, findings.json, diff.patch, the transcript, github.json, and the other
+# record files the run has, earlier asks included. Its prompt is prompts/ask.md filled in, then those
+# files' paths, the finding --finding names, and the question. A review that did not finish has no
+# findings.json, and for it the prompt also names its agent's stderr.log and stdout.log, which may say
+# why.
 # It can write nothing but its answer, has no GitHub login, and has every Slack write denied, as in
 # reviews (README.md, "Ask about a review"). A run that passes [ask] timeout_minutes is stopped with
 # everything it started.
@@ -73,8 +75,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM HUP
 
-# lib/whooper.py refuses a review that did not finish and a finding the run lacks, before this ask
-# takes a number.
+# lib/whooper.py refuses a finding the run lacks before this ask takes a number.
 "$root/lib/python" "$root/lib/whooper.py" prompt ask "$agent" "$run" "$question" ${finding:+"$finding"} \
   > "$work/prompt.md"
 asks="$run/asks"

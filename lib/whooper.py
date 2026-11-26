@@ -271,7 +271,8 @@ def read_settings(config):
     """The config's values for the settings in SETTINGS_SCHEMA, with Whooper's defaults for what the
     config leaves out, such as SCHEDULE_DEFAULTS. A setting with neither is left out."""
     values = {**config, "schedule": {**SCHEDULE_DEFAULTS, **config.get("schedule", {})},
-              "poll": {"timeout_minutes": POLL_TIMEOUT_MINUTES, **config.get("poll", {})}}
+              "poll": {"timeout_minutes": POLL_TIMEOUT_MINUTES, **config.get("poll", {})},
+              "ask": {"timeout_minutes": ASK_TIMEOUT_MINUTES, **config.get("ask", {})}}
 
     def pick(value, schema):
         # Only what the schema names, at every level.
@@ -1029,6 +1030,7 @@ def append_digest(data, run_dir, item, verdicts):
 ASK_RECORD = {
     "log.md": "the review's log: what the change does, the evidence for each finding, and the candidates it dropped",
     "findings.json": "the review's findings, each with its draft comment, and its approval verdict with the reason",
+    "diff.patch": "the pull request's change, git diff <merge base> HEAD as the review read it",
     "github.json": "the PR's title, body, reviews, and comments, as the review read them",
     "transcript.jsonl": "the review's whole conversation, with every command it ran and that command's output",
     "transcript.json": "the review's whole conversation, with every command it ran and that command's output",
@@ -1040,23 +1042,31 @@ ASK_RECORD = {
     "submit.json": "the review the user submitted to GitHub",
     "summary.md": "Whooper's summary of the review",
 }
+# The files an ask run's prompt also lists for a review that did not finish, and so left no
+# findings.json: its agent's output, which may say why. Only a Devin review leaves stdout.log.
+ASK_FAILURE_RECORD = {
+    "stderr.log": "the error output of the review's agent, which may say why the review did not finish",
+    "stdout.log": "the rest of the review agent's output",
+}
 
 
 def ask_facts(run_dir, question, finding_id=None):
-    """The end of the prompt of a run that answers question about the finished review in run_dir: the
-    files of the review's record it may read, each with its path, earlier asks about the review among
-    them; the finding the question is about when finding_id names one; and the question. None of it
-    goes through fill, so braces in the question stay as written."""
-    if not (run_dir / "findings.json").exists():
-        raise SystemExit(f"whooper-ask: {run_dir} has no findings.json, so its review did not finish")
+    """The end of the prompt of a run that answers question about the review in run_dir: the files of
+    the review's record it may read, each with its path, earlier asks about the review among them, and
+    for a review that did not finish, its agent's output too; the finding the question is about when
+    finding_id names one; and the question. None of it goes through fill, so braces in the question
+    stay as written."""
+    finished = (run_dir / "findings.json").exists()
+    record = ASK_RECORD if finished else {**ASK_RECORD, **ASK_FAILURE_RECORD}
     lines = ["", "", "## The review's record", "", f"The review's run directory is {run_dir}. You may read these files:", ""]
-    lines += [f"- {run_dir / name}: {what}" for name, what in ASK_RECORD.items() if (run_dir / name).exists()]
+    lines += [f"- {run_dir / name}: {what}" for name, what in record.items() if (run_dir / name).exists()]
     # bin/whooper-ask numbers its answers asks/1.json, asks/2.json, and so on; a Devin ask's config
     # sits beside them as asks/<n>.devin-config.json.
     asks = sorted((p for p in (run_dir / "asks").glob("*.json") if p.stem.isdigit()), key=lambda p: int(p.stem))
     lines += [f"- {p}: an earlier question about this review, with its answer" for p in asks]
     if finding_id is not None:
-        findings = {f["id"]: f for f in json.loads((run_dir / "findings.json").read_text())["findings"]}
+        findings = ({f["id"]: f for f in json.loads((run_dir / "findings.json").read_text())["findings"]}
+                    if finished else {})
         if finding_id not in findings:
             raise SystemExit(f"whooper-ask: the run has no finding {finding_id}; its findings are"
                              f" {', '.join(findings) or 'none'}")

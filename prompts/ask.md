@@ -15,10 +15,11 @@ what you can find.
 
 1. Load the skills {{skills}} with {{skill_tool}}, as the review did: they hold the rules its
    findings follow.
-2. Read what bears on the question, starting with `log.md` and `findings.json`. The transcript
-   holds every command the review ran and its output; search it for the commands the log cites.
-   The pull request's code is no longer on disk, so the log, the transcript, and `github.json` hold
-   all the review saw of it.
+2. Read what bears on the question, starting with `log.md` and `findings.json`, or with
+   `stderr.log` when the review did not finish and left no `findings.json`. The transcript holds
+   every command the review ran and its output; search it for the commands the log cites. The pull
+   request's code is no longer on disk: `diff.patch`, when the record has it, holds its change, and
+   the log, the transcript, and `github.json` hold the rest of what the review saw.
 3. Answer {{user_name}} in Markdown. Lead with the answer in one or two sentences, then give the
    evidence, naming the file and the finding, command, or comment it comes from. When the record
    does not settle the question, say so, and say what would.

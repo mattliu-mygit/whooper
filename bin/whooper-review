@@ -7,8 +7,9 @@
 #
 # The PR's repo must have a table in the config. Before the run starts, this script fetches with
 # the user's login everything the run reads: the head and merge-base commits, checked out as the
-# worktrees head/ and base/ in the run directory, and the PR's conversation as github.json. With
-# --as-of, github.json holds only what people could read before that time, for replaying a past
+# worktrees head/ and base/ in the run directory, and the PR's conversation as github.json. The
+# diff between the two commits, the one the run reads, stays as diff.patch after the worktrees go.
+# With --as-of, github.json holds only what people could read before that time, for replaying a past
 # review. Then the repo's setup script, if the config names one, prepares anything else the run
 # needs, such as dependencies or databases (examples/setup.example.sh). The run itself has no
 # GitHub login, and its launcher denies the Slack writes, so it can post nothing. Its findings.json
@@ -121,6 +122,10 @@ merge_base="$(git -C "$core" merge-base "refs/whooper/$run_id/head" "refs/whoope
 # Checking out both trees fetches every file in them, so the run can read both without a login.
 git -C "$core" worktree add --quiet --detach "$run/head" "$head_sha"
 git -C "$core" worktree add --quiet --detach "$run/base" "$merge_base"
+# The worktrees go when the review ends, so the diff the run reads stays as diff.patch, for showing a
+# past review and for asks about it. It runs in the head worktree, as the run's git diff does, because
+# git applies the .gitattributes it finds there: a file marked -diff shows as binary.
+git -C "$run/head" diff "$merge_base" HEAD > "$run/diff.patch"
 # skills holds a content hash of every skill the run can load, so a finding traces to the skill version behind it.
 jq --arg run_id "$run_id" --arg merge_base "$merge_base" --arg as_of "$as_of" --arg agent "$WHOOPER_REVIEW_AGENT" \
   --argjson skills "$("$root/lib/python" "$root/lib/whooper.py" skills "$HOME/.claude/skills")" \
