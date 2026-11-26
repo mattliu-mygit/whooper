@@ -3243,10 +3243,11 @@ class ReviewsTest(unittest.TestCase):
 
     def review(self, run, **fields):
         """What whooper-status lists for the run, given the fields that differ from a review that ended
-        with a look_first verdict and no findings 20 minutes after it started, read its PR's title, and
-        waits for the user."""
+        with a look_first verdict and no findings 20 minutes after it started, read its PR's title and
+        author, and waits for the user."""
         started, pr = self.started(run), int(run.name.split("-")[1])
         return {"run_id": run.name, "repo": "example-org/example-repo", "pr": pr, "title": self.TITLE,
+                "author": "alice",
                 "url": f"https://github.com/example-org/example-repo/pull/{pr}", "started_at": self.local(started),
                 "ended_at": self.local(started + timedelta(minutes=20)), "outcome": "reviewed",
                 "verdict": "look_first", "skipped": False, "findings": 0, "submitted": None, "needs_you": True,
@@ -3323,7 +3324,7 @@ class ReviewsTest(unittest.TestCase):
         self.hold(killed, gone.pid)
         running = {"outcome": "running", "ended_at": None, "verdict": None, "needs_you": False}
         self.assertEqual(self.reviews(), [
-            self.review(fetching, **running, repo=None, url=None, title=None, head_sha=None),
+            self.review(fetching, **running, repo=None, url=None, title=None, author=None, head_sha=None),
             self.review(current, **running),
             # The run the lock names is newer, so the earlier run of its PR no longer needs the user.
             self.review(earlier, needs_you=False),
@@ -3382,8 +3383,9 @@ class ReviewsTest(unittest.TestCase):
         (self.state / "runs" / "notes").mkdir()
         failed = {"outcome": "failed", "verdict": None}
         self.assertEqual(self.reviews(), [
-            *[self.review(run, **failed, repo=None, url=None, title=None, cause=CAUSES["unknown"], head_sha=None,
-                          ended_at=self.local(self.started(run) + timedelta(minutes=1))) for run in unreadable],
+            *[self.review(run, **failed, repo=None, url=None, title=None, author=None, cause=CAUSES["unknown"],
+                          head_sha=None, ended_at=self.local(self.started(run) + timedelta(minutes=1)))
+              for run in unreadable],
             self.review(empty, **failed, cause=CAUSES["agent_no_findings"],
                         ended_at=self.local(self.started(empty) + timedelta(minutes=21))),
             self.review(unfit, **failed, cause=CAUSES["unknown"]),
@@ -3404,7 +3406,8 @@ class ReviewsTest(unittest.TestCase):
                 self.write(other, "github.json", github, 1)
             self.write(other, "findings.json", self.findings(), 20)
             unread.append(other)
-        self.assertEqual(self.reviews(), [self.review(run), *[self.review(other, title=None) for other in unread]])
+        self.assertEqual(self.reviews(), [self.review(run),
+                                          *[self.review(other, title=None, author=None) for other in unread]])
         shown = [self.shown(r) for r in [run, *unread]]
         self.assertEqual([(s["title"], s["author"]) for s in shown],
                          [(self.TITLE, "alice")] + [(None, None)] * len(unread))
@@ -3453,7 +3456,7 @@ class ReviewsTest(unittest.TestCase):
         waits = self.waiting(timedelta(hours=2) - timedelta(minutes=3), 13)
         self.assertEqual(self.reviews(), [
             self.review(waits, outcome="waiting", cause=CAUSES["docker_unavailable"], needs_you=False, ended_at=None,
-                        verdict=None, title=None),
+                        verdict=None, title=None, author=None),
             self.review(failed, outcome="failed", cause=CAUSES["docker_unavailable"], verdict=None,
                         ended_at=self.local(self.started(failed) + timedelta(minutes=2))),
             # PR 13's newer run supersedes this one, though it waits.

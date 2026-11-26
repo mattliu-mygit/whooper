@@ -121,9 +121,9 @@ failure it prints why and leaves the file as it was. A change applies from the n
 ## See reviews
 
 `bin/whooper-status --json` lists, as `reviews`, the review runs in `<state>/runs` that started in
-the last 30 days, newest first: each one's PR, title, and times, how it went, its verdict and number
-of findings, what whooper-submit posted, and whether it needs you. Prompting Time builds its "Needs
-you" list and its history of past reviews from them.
+the last 30 days, newest first: each one's PR, the PR's title and author, and times, how it went, its
+verdict and number of findings, what whooper-submit posted, and whether it needs you. Prompting Time
+builds its "Needs you" list and its history of past reviews from them.
 
 ```sh
 bin/whooper-show <run-id> --json   # one review in full, for its review screen

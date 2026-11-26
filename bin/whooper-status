@@ -23,13 +23,14 @@
 #               many PRs' newest review waits. A review that runs is passed over, and null comes back
 #               once a review succeeds or stops at a cause of its PR's own
 #   reviews     the review runs in <state>/runs that started in the last 30 days, newest first, each
-#               {run_id, repo, pr, title, url, started_at, ended_at, outcome, verdict, skipped,
+#               {run_id, repo, pr, title, author, url, started_at, ended_at, outcome, verdict, skipped,
 #               findings, submitted, needs_you, cause, head_sha, pr_head_sha, skipped_by_user}:
 #     repo        <owner>/<repo>, from run.json, or null when run.json cannot be read, as when
 #                 whooper-review stopped before it wrote the file
 #     pr          the PR's number, from the run ID, <UTC start time>-<PR number>
 #     title       the PR's title in github.json, or null when the review's GitHub fetch failed or the
 #                 file cannot be read
+#     author      the login of the PR's author in github.json, or null the same way
 #     url         the PR's address, or null without the repo
 #     started_at  when the run started, from its ID
 #     ended_at    when whooper-review saved failure.txt as it stopped the review, or else when the

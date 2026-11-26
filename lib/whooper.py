@@ -494,12 +494,12 @@ def pr_head(data, polled, repo, pr):
 def read_reviews(data, now):
     """The review runs under data/runs that started in the REVIEW_DAYS days before now, newest first, as
     whooper-status lists them. A review's PR number and start come from its run ID, its repo from
-    run.json, its title from github.json, and the rest from read_review. Only the newest run of each PR
-    can need the user, since a newer run supersedes the older ones, even while it runs or waits, and
-    one that runs or waits needs no one yet, nor one the user marked skipped. A name in runs that is not a run ID, such as Finder's
-    .DS_Store, is no run. Each review also gets the head it reviewed, from run.json, and the newest
-    head Whooper knows of its PR (pr_head), which differ once the PR has new commits since the
-    review."""
+    run.json, its title and author from github.json, and the rest from read_review. Only the newest
+    run of each PR can need the user, since a newer run supersedes the older ones, even while it runs
+    or waits, and one that runs or waits needs no one yet, nor one the user marked skipped. A name in
+    runs that is not a run ID, such as Finder's .DS_Store, is no run. Each review also gets the head it
+    reviewed, from run.json, and the newest head Whooper knows of its PR (pr_head), which differ once
+    the PR has new commits since the review."""
     def modified(path):
         try:
             return local_time(path.stat().st_mtime)
@@ -521,7 +521,7 @@ def read_reviews(data, now):
     reviews, newer = [], set()
     for run, started, pr in runs:
         item, outcome, result, submit, cause, skipped = read_review(run, running)
-        title, _ = read_title_and_author(run)
+        title, author = read_title_and_author(run)
         repo = item["repo"] if item else None
         head = item.get("head_sha") if item and isinstance(item.get("head_sha"), str) else None
         # No file records when a review ended, so it ended when whooper-review saved failure.txt as it
@@ -532,6 +532,7 @@ def read_reviews(data, now):
             "repo": repo,
             "pr": pr,
             "title": title,
+            "author": author,
             "url": f"https://github.com/{repo}/pull/{pr}" if repo else None,
             "started_at": local_time(started.timestamp()),
             "ended_at": ended,
