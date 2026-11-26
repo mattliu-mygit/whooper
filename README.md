@@ -527,9 +527,11 @@ denied by name. Devin starts in an empty directory in accept-edits mode, where i
 writes only there, with your Devin config minus its allow rules and plus deny rules for the shell
 and every Slack tool. The summary run
 may call only `slack_schedule_message`, and `hooks/slack-guard.sh` blocks any other Slack call,
-any other channel, a thread, a changed text or time, and a second summary. Only whooper-submit writes
-to GitHub, with the user's own login: the one review the user chose in a run's `drafts.json`, and an
-approval of a run that is not safe to approve only after the user looked and passed `--approve-anyway`.
+any other channel, a thread, a changed text or time, and a second summary; from version 2.1.295,
+Claude Code also blocks the call when the hook cannot start, crashes, or times out. Only
+whooper-submit writes to GitHub, with the user's own login: the one review the user chose in a run's
+`drafts.json`, and an approval of a run that is not safe to approve only after the user looked and
+passed `--approve-anyway`.
 
 ## Stop it
 

@@ -21,10 +21,15 @@ arguments="$(jq -n --arg channel "$WHOOPER_SUMMARY_CHANNEL" --rawfile message "$
   --argjson post_at "$post_at" '{channel_id: $channel, message: $message, post_at: $post_at}')"
 slack="mcp__claude_ai_Slack__slack"
 # As in bin/whooper-poll, the Slack connector loads only with user settings, so the run keeps the
-# user's hooks; only ToolSearch and the one Slack write are allowed.
+# user's hooks; only ToolSearch and the one Slack write are allowed. With args, even empty, Claude
+# Code starts slack-guard by its path; without, it runs the path through sh -c, which splits it at a
+# space, as in the Application Support folder Prompting Time installs Whooper in, so the hook never
+# starts. Claude Code lets the call through when its hook cannot start, crashes, or times out,
+# unless onFailure is "block", which it reads from version 2.1.295.
 settings="$(jq -cn --arg hook "$root/hooks/slack-guard.sh" '{
   allowedMcpServers: [{serverUrl: "https://mcp.slack.com/mcp"}],
-  hooks: {PreToolUse: [{matcher: "mcp__claude_ai_Slack__.*", hooks: [{type: "command", command: $hook}]}]}
+  hooks: {PreToolUse: [{matcher: "mcp__claude_ai_Slack__.*",
+    hooks: [{type: "command", command: $hook, args: [], onFailure: "block"}]}]}
 }')"
 WHOOPER_SUMMARY_FILE="$summary" WHOOPER_SUMMARY_POST_AT="$post_at" \
   CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude -p "Load ${slack}_schedule_message \

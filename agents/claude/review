@@ -16,8 +16,10 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 run="$WHOOPER_RUN"
 slack="mcp__claude_ai_Slack__slack"
+# As in agents/claude/summary, args has Claude Code start the hook by its path, not through sh -c.
+# The hook runs after each call, so it has no call to block, and onFailure stays at its default.
 settings="$(jq -cn --arg hook "$root/hooks/tool-use-id.sh" \
-  '[{matcher: "Bash", hooks: [{type: "command", command: $hook}]}] as $bash | {hooks: {PostToolUse: $bash, PostToolUseFailure: $bash}}')"
+  '[{matcher: "Bash", hooks: [{type: "command", command: $hook, args: []}]}] as $bash | {hooks: {PostToolUse: $bash, PostToolUseFailure: $bash}}')"
 status=0
 # With no [agents.claude] budget_usd, the run has no spending limit.
 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude -p "$(<"$1")" \
