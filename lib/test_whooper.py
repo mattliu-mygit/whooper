@@ -2129,6 +2129,19 @@ class RunTest(unittest.TestCase):
         self.assertEqual(self.read(run / "failure.txt"),
                          "the review stopped at an unexpected error; see whooper-review's error output\n")
 
+    def test_a_repo_the_config_does_not_list_stops_the_review_with_the_configs_message(self):
+        # whooper-select drops such an item, so only a review run by hand gets here.
+        item = Path(self.tmp.name) / "item.json"
+        item.write_text(json.dumps({"kind": "first_review", "repo": "example-org/unlisted-repo", "pr": 12,
+                                    "head_sha": "1" * 40, "base_ref": "main", "source": "github_request",
+                                    "slack": None, "reason": "r"}))
+        result = self.command("whooper-review", str(item), "--dry-run")
+        config = self.env["WHOOPER_CONFIG"]
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (
+            1, "", f'whooper: example-org/unlisted-repo has no [repos."example-org/unlisted-repo"] table in {config}\n'))
+        # It stopped before it took the PR's lock or made the run's directory and record.
+        self.assertFalse(self.state.exists())
+
     def test_an_ask_about_a_review_still_running_is_refused_until_its_whooper_review_is_gone(self):
         env, item, _ = self.pull_request()
         agent_pid = Path(self.tmp.name) / "agent.pid"

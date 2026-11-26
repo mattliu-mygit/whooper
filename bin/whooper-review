@@ -5,7 +5,8 @@
 #
 #   whooper-review <work-item.json> --dry-run [--as-of <ISO 8601 time with a zone>]
 #
-# The PR's repo must have a table in the config. Before the run starts, this script fetches with
+# The PR's repo must have a table in the config; for a repo without one, the review stops with the
+# config's message before it takes the PR's lock. Before the run starts, this script fetches with
 # the user's login everything the run reads: the head and merge-base commits, checked out as the
 # worktrees head/ and base/ in the run directory, and the PR's conversation as github.json. The
 # diff between the two commits, the one the run reads, stays as diff.patch after the worktrees go,
@@ -67,9 +68,12 @@ if [[ -n "$as_of" ]] &&
 fi
 IFS=$'\t' read -r repo pr head_sha base_ref kind source tagged reason < <(
   jq -r '[.repo, .pr, .head_sha, .base_ref, .kind, .source, (.slack.tagged_user | tostring), .reason] | @tsv' "$item")
-# Sets WHOOPER_REPO_CLONE, WHOOPER_REPO_SETUP, and WHOOPER_REPO_TEARDOWN, or fails for a repo the
-# config does not list.
-eval "$("$root/lib/python" "$root/lib/whooper.py" repo "$repo")"
+# Sets WHOOPER_REPO_CLONE, WHOOPER_REPO_SETUP, and WHOOPER_REPO_TEARDOWN. For a repo the config does
+# not list, the lookup prints the config's message and fails, and the review stops with that message,
+# before it has a run directory for failure.txt: eval of the lookup's empty output would succeed, and
+# the review would go on without the variables.
+repo_env="$("$root/lib/python" "$root/lib/whooper.py" repo "$repo")" || exit 1
+eval "$repo_env"
 core="$WHOOPER_REPO_CLONE"
 [[ -d "$core/.git" ]] || die "no clone of $repo at $core; see README.md"
 [[ "$kind" == first_review ]] || die "re-checks come in phase 4"
