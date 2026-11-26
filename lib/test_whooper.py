@@ -2576,6 +2576,16 @@ class AskTest(unittest.TestCase):
         self.assertIn("finding 2, Invisible characters in the setup steps (README.md:3)",
                       (self.run / "asks" / "1.prompt.md").read_text())
 
+    def test_refuses_a_finding_when_findings_json_gives_ids_as_numbers(self):
+        # The schema makes each ID a string, and --finding passes a string, so the number 1 in
+        # findings.json is not finding "1"; the refusal lists the IDs the file holds.
+        (self.run / "findings.json").write_text(json.dumps({"findings": [finding(id=1), finding(id=2)]}))
+        result = self.ask(self.run.name, self.QUESTION, "--finding", "1")
+        self.assertEqual((result.returncode, result.stdout), (1, ""))
+        self.assertIn("whooper-ask: the run has no finding 1; its findings are 1, 2\n", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertFalse((self.run / "asks").exists())
+
     def test_a_finding_without_its_title_path_or_line_is_named_by_the_fields_it_has(self):
         # whooper-review leaves findings.json as the run wrote it when it stops the review before its
         # schema check, such as at the time limit, so a finding can lack any field but its ID.

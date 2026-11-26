@@ -1123,8 +1123,10 @@ def ask_facts(run_dir, question, finding_id=None):
                              " findings Whooper can read")
         findings = {f["id"]: f for f in result["findings"]} if finished else {}
         if finding_id not in findings:
+            # finding_id is a string, and an ID that does not fit the schema, such as the number 1,
+            # never equals it; str lists such IDs too.
             raise SystemExit(f"whooper-ask: the run has no finding {finding_id}; its findings are"
-                             f" {', '.join(findings) or 'none'}")
+                             f" {', '.join(map(str, findings)) or 'none'}")
         f = findings[finding_id]
         # read_findings takes findings that do not fit the schema, such as those of a review
         # whooper-review stopped before its schema check, so a finding may lack its title, path, or
