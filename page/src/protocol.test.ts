@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { status } from "./fixtures";
 import { readHostMessage, readPageMessage } from "./protocol";
 
 describe("the page's messages", () => {
@@ -15,6 +16,13 @@ describe("the page's messages", () => {
     ]) {
       expect(readHostMessage(bad)).toBeNull();
     }
+  });
+
+  it("reads a status message without queue, which the page does not read and Prompting Time may leave out", () => {
+    const answer = { version: 1, type: "status", status: status(), reply_to: 1 };
+    expect(readHostMessage(answer)).toEqual(answer);
+    expect(readHostMessage({ ...answer, queue: [] })).toEqual({ ...answer, queue: [] });
+    expect(readHostMessage({ version: 1, type: "status", queue: [], reply_to: 1 })).toBeNull();
   });
 
   it("reads a page request only with an id and a change whooper-draft takes", () => {

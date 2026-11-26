@@ -21,6 +21,7 @@
 //                                       and answers with answer.
 // Host -> page: answers, with reply_to, and updates, without it.
 //   status {status, queue}              `bin/whooper-status --json`, and the reviews in Whooper's queue.
+//                                       The host may leave queue out.
 //   review {review}                     One review run, as above.
 //   drafts {run_id, drafts}             Also sent unasked when the run's drafts.json changes, such as
 //                                       after a whooper-draft from a terminal.
@@ -31,8 +32,8 @@
 //                                       whooper-draft's or whooper-submit's refusal.
 //
 // Whooper's page shows only the review Prompting Time opens, since Prompting Time's sidebar lists the
-// reviews and shows Whooper's status: it sends no open-review and shows neither part of status. Both
-// stay in protocol 1.
+// reviews and shows Whooper's status: it sends no open-review and shows neither part of status, so it
+// takes a status message with or without queue. Both stay in protocol 1.
 
 export const PROTOCOL_VERSION = 1;
 
@@ -171,7 +172,7 @@ export type PageRequest =
 export type PageMessage = PageRequest & { version: typeof PROTOCOL_VERSION; id: number };
 
 export type HostUpdate =
-  | { type: "status"; status: WhooperStatus; queue: QueueItem[] }
+  | { type: "status"; status: WhooperStatus; queue?: QueueItem[] }
   | { type: "review"; review: Review }
   | { type: "drafts"; run_id: string; drafts: Drafts }
   | { type: "submit-result"; run_id: string; posted: boolean; message: string }
@@ -198,9 +199,10 @@ function envelope(data: unknown): Record<string, unknown> | null {
 }
 
 // The fields each host message must have, by type. The page trusts its host for the rest, such as
-// the inside of a review, which comes from Whooper's own files.
+// the inside of a review, which comes from Whooper's own files. A status message needs no queue,
+// which the page does not read and Prompting Time may leave out.
 const HOST_FIELDS: Record<HostUpdate["type"], Shape> = {
-  status: { status: "object", queue: "object" },
+  status: { status: "object" },
   review: { review: "object" },
   drafts: { run_id: "string", drafts: "object" },
   "submit-result": { run_id: "string", posted: "boolean", message: "string" },
