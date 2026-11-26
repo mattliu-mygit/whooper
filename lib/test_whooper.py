@@ -1,6 +1,7 @@
 import unittest
 from contextlib import redirect_stderr, redirect_stdout, suppress
 from datetime import datetime, time, timedelta, timezone
+import hashlib
 import io
 import json
 import os
@@ -571,16 +572,24 @@ class SelectWorkTest(unittest.TestCase):
         path.write_text(json.dumps({"status": status, "failures": failures, "started_at": started_at}))
 
     def selected(self, item):
-        work, drops = select_work([item], self.prs, self.now, REPOS)
+        work, drops, _ = select_work([item], self.prs, self.now, REPOS)
         self.assertEqual(len(work) + len(drops), 1)
         return bool(work)
+
+    def listed_again(self, head="head3"):
+        """A recheck-list item: PR 12, which only a Slack ask brought in, as whooper-submit listed it on
+        finding its head moved to head."""
+        slack = {"ts": "1943194837.000100", "tagged_user": True,
+                 "permalink": "https://example.slack.com/archives/C0000000001/p1943194837000100"}
+        return {**work_item(kind="first_review", head=head), "source": "slack_ask", "slack": slack,
+                "reason": "Alex asked for a review."}
 
     def test_no_record_is_work(self):
         self.assertTrue(self.selected(work_item()))
 
     def test_repo_the_config_does_not_list_is_dropped(self):
         item = {**work_item(), "repo": "example-org/unlisted-repo"}
-        work, drops = select_work([item], self.prs, self.now, REPOS)
+        work, drops, _ = select_work([item], self.prs, self.now, REPOS)
         self.assertEqual(work, [])
         self.assertEqual(drops, [(item, 'the config has no [repos."example-org/unlisted-repo"] table')])
 
@@ -622,6 +631,40 @@ class SelectWorkTest(unittest.TestCase):
         # 23:30 on 2031-07-31 at UTC-7, though 2031-08-01 in UTC.
         self.record("head0.recheck.json", "done", started_at="2031-08-01T06:30:00Z")
         self.assertTrue(self.selected(work_item()))
+
+    def test_a_recheck_list_item_is_work_until_a_review_at_its_head_is_done_or_gives_up(self):
+        listed = self.listed_again()
+        cases = [
+            # (the record at its head as (status, failures), selected, finished)
+            (None, True, False),
+            (("running", 0), False, False),
+            (("failed", 2), True, False),
+            (("failed", 3), False, True),
+            (("done", 0), False, True),
+        ]
+        for record, want_selected, want_finished in cases:
+            with self.subTest(record):
+                if record:
+                    self.record("head3.first_review.json", *record)
+                work, _, finished = select_work([], self.prs, self.now, REPOS, [listed])
+                self.assertEqual(work, [listed] if want_selected else [])
+                self.assertEqual(finished, [listed] if want_finished else [])
+
+    def test_the_poll_listing_the_pr_finishes_its_recheck_list_item(self):
+        # Such as a new ask for the PR, which the poll lists at the head the PR has now.
+        polled, listed = work_item(kind="first_review", head="head4"), self.listed_again()
+        self.assertEqual(select_work([polled], self.prs, self.now, REPOS, [listed]), ([polled], [], [listed]))
+
+    def test_the_recheck_limit_holds_a_recheck_list_item_for_the_next_day(self):
+        for head in ["head0", "head1", "head2"]:
+            self.record(f"{head}.first_review.json", "stale", started_at="2031-08-01T16:00:00Z")
+        listed = self.listed_again()
+        self.assertEqual(select_work([], self.prs, self.now, REPOS, [listed]),
+                         ([], [(listed, "3 re-checks already today")], []))
+        # The poll's own first reviews have no daily limit.
+        self.assertTrue(self.selected(work_item(kind="first_review")))
+        tomorrow = self.now + timedelta(days=1)
+        self.assertEqual(select_work([], self.prs, tomorrow, REPOS, [listed]), ([listed], [], []))
 
 
 class WriteRecordTest(unittest.TestCase):
@@ -982,8 +1025,10 @@ class PostTest(unittest.TestCase):
         self.data = Path(tempfile.mkdtemp())
         self.run = self.data / "runs" / "20310727T010246Z-12"
         self.run.mkdir(parents=True)
-        self.item = {"run_id": self.run.name, "repo": "example-org/example-repo", "pr": 12, "head_sha": "h1", "kind": "first_review",
-                     "dry_run": True, "as_of": None}
+        # run.json is the work item the review got, with the run's own fields.
+        self.work = {"kind": "first_review", "repo": "example-org/example-repo", "pr": 12, "head_sha": "h1", "base_ref": "master",
+                     "source": "github_request", "slack": None, "reason": "A GitHub review request names sam-example."}
+        self.item = {**self.work, "run_id": self.run.name, "dry_run": True, "as_of": None}
         (self.run / "run.json").write_text(json.dumps(self.item))
         approval = {"verdict": "look_first", "reason": "The question needs the author's answer."}
         (self.run / "findings.json").write_text(json.dumps({"status": "reviewed", "skip_reason": "", "approval": approval, "findings": []}))
@@ -1015,12 +1060,15 @@ class PostTest(unittest.TestCase):
         self.assertEqual(request["comments"], [{"path": "services/orders/internal/api/orders.go", "line": 88,
                                                 "side": "RIGHT", "body": "Whooper AI\n\n**issue:** ..."}])
 
-    def test_moved_head_posts_nothing_and_marks_the_record_stale(self):
+    def test_moved_head_posts_nothing_marks_the_record_stale_and_lists_the_pr_again(self):
         post = self.post(head_now="h2")
         self.assertEqual(post["status"], "stale")
         self.assertFalse((self.run / "post-request.json").exists())
         record = self.data / "prs" / "example-org-example-repo-12" / "h1.first_review.json"
         self.assertEqual(json.loads(record.read_text())["status"], "stale")
+        # The recheck list holds the work item at the new head, for the next round's whooper-select.
+        listed = self.data / "rechecks" / "example-org-example-repo-12.json"
+        self.assertEqual(json.loads(listed.read_text()), {**self.work, "head_sha": "h2"})
 
     def test_finding_is_held_back_into_the_digest(self):
         cases = [
@@ -1083,12 +1131,33 @@ class PostTest(unittest.TestCase):
 class SubmitTest(unittest.TestCase):
     """bin/whooper-submit, and whooper.py draft, which bin/whooper-draft runs, on a review run of
     example-org/example-repo#12 at head h1 in a throwaway state folder. gh is a fake: it reports the
-    PR's head from the file head, lists a teammate's comment on finding 1's line written after the
-    review started, records the body of each review it is asked to post in posted.jsonl, and fails
-    any other call, so no test can reach GitHub."""
+    PR's head from the file head and the CI checks on it from checks.json, lists a teammate's comment
+    on finding 1's line written after the review started, records the body of each review it is asked
+    to post in posted.jsonl, and fails any other call, so no test can reach GitHub. Unless a test
+    changes it, the run is not safe to approve: its verdict is look_first, and of its findings BUG,
+    QUESTION, and NIT, only NIT is a nit."""
 
     # What GitHub answers a review it created with, in part.
     RESPONSE = {"id": 7001, "html_url": "https://github.com/example-org/example-repo/pull/12#pullrequestreview-7001"}
+    BUG = finding(draft="**issue (blocking):** Bad JSON now returns 500 instead of 422.")
+    QUESTION = finding(id="2", kind="question", line=40, title="Why retry twice?",
+                       draft="**question:** Why does the client retry a call that succeeded?")
+    # The review skills open each draft with its label; this one lacks it.
+    NIT = finding(id="3", kind="nit", nit_kind="wording", path="services/orders/README.md", line=3, side="LEFT",
+                  title="Old flag name", draft="This line still names the old --fast flag.")
+    OTHER_NIT = finding(id="4", kind="nit", nit_kind="redundant_code", line=95, title="Unused count",
+                        draft="**nit:** `count` is never read.")
+    REASONS = {"approve_once_ci_passes": "Ran the orders tests; nothing needs the author.",
+               "look_first": "The question needs the author's answer."}
+    # The CI checks on a head where every check passed, as gh pr view --json statusCheckRollup lists
+    # them: GitHub Actions jobs, a check run of an app with no workflow, and a commit status. As on
+    # GitHub, a skipped or neutral check counts as passed.
+    PASSED = [
+        {"__typename": "CheckRun", "name": "test", "workflowName": "CI", "status": "COMPLETED", "conclusion": "SUCCESS"},
+        {"__typename": "CheckRun", "name": "docs", "workflowName": "CI", "status": "COMPLETED", "conclusion": "SKIPPED"},
+        {"__typename": "CheckRun", "name": "coverage", "workflowName": "", "status": "COMPLETED", "conclusion": "NEUTRAL"},
+        {"__typename": "StatusContext", "context": "ci/lint", "state": "SUCCESS"},
+    ]
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1097,13 +1166,16 @@ class SubmitTest(unittest.TestCase):
         self.fakes = tmp / "bin"
         self.fakes.mkdir()
         (self.fakes / "head").write_text("h1\n")
+        self.write_checks(self.PASSED)
         (self.fakes / "comments.json").write_text(json.dumps([{**review_comment(), "user": {"login": "teammate"}}]))
         gh = self.fakes / "gh"
         gh.write_text("\n".join([
             "#!/bin/sh",
             'fakes="${0%/*}"',
             'case "$*" in',
-            '  "api repos/example-org/example-repo/pulls/12 --jq .head.sha") cat "$fakes/head" ;;',
+            '  "pr view 12 --repo example-org/example-repo --json headRefOid,statusCheckRollup")',
+            '    jq -n --arg head "$(cat "$fakes/head")" --slurpfile checks "$fakes/checks.json"'
+            " '{headRefOid: $head, statusCheckRollup: $checks[0]}' ;;",
             '  "api --paginate repos/example-org/example-repo/pulls/12/comments?per_page=100") cat "$fakes/comments.json" ;;',
             '  "api --method POST repos/example-org/example-repo/pulls/12/reviews --input "*)',
             '    for arg; do [ "$previous" = --input ] && input="$arg"; previous="$arg"; done',
@@ -1124,19 +1196,25 @@ class SubmitTest(unittest.TestCase):
         self.state = tmp / "whooper"
         self.run = self.state / "runs" / "20310727T010246Z-12"
         self.run.mkdir(parents=True)
-        (self.run / "run.json").write_text(json.dumps({
-            "run_id": self.run.name, "repo": "example-org/example-repo", "pr": 12, "head_sha": "h1",
-            "kind": "first_review", "dry_run": True, "as_of": None}))
-        approval = {"verdict": "look_first", "reason": "The question needs the author's answer."}
-        (self.run / "findings.json").write_text(json.dumps({
-            "status": "reviewed", "skip_reason": "", "approval": approval, "findings": [
-                finding(draft="**issue (blocking):** Bad JSON now returns 500 instead of 422."),
-                finding(id="2", kind="question", line=40, title="Why retry twice?",
-                        draft="**question:** Why does the client retry a call that succeeded?"),
-                # The review skills open each draft with its label; this one lacks it.
-                finding(id="3", kind="nit", nit_kind="wording", path="services/orders/README.md", line=3, side="LEFT",
-                        title="Old flag name", draft="This line still names the old --fast flag."),
-            ]}))
+        self.work = {"kind": "first_review", "repo": "example-org/example-repo", "pr": 12, "head_sha": "h1",
+                     "base_ref": "master", "source": "github_request", "slack": None,
+                     "reason": "A GitHub review request names sam-example, who has not reviewed this PR."}
+        self.write_run(self.work)
+        self.write_findings("look_first", [self.BUG, self.QUESTION, self.NIT])
+
+    def write_run(self, work):
+        """Writes the run's run.json: the work item the review got, with the run's own fields."""
+        (self.run / "run.json").write_text(json.dumps({**work, "run_id": self.run.name, "dry_run": True, "as_of": None}))
+
+    def write_findings(self, verdict, findings):
+        """Gives the run the approval verdict, with its reason in REASONS, and the findings."""
+        approval = {"verdict": verdict, "reason": self.REASONS[verdict]}
+        (self.run / "findings.json").write_text(json.dumps(
+            {"status": "reviewed", "skip_reason": "", "approval": approval, "findings": findings}))
+
+    def write_checks(self, checks):
+        """Has the fake gh report checks as the CI checks on the PR's head."""
+        (self.fakes / "checks.json").write_text(json.dumps(checks))
 
     def draft(self, *change):
         """whooper.py draft on the run, as bin/whooper-draft runs it; returns the drafts it prints."""
@@ -1154,12 +1232,20 @@ class SubmitTest(unittest.TestCase):
         path = self.fakes / "posted.jsonl"
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
+    def shown(self):
+        """Runs whooper-submit --print, as Prompting Time's confirmation does, and returns the
+        fingerprint it prints."""
+        printed = self.submit("--print")
+        self.assertEqual(printed.returncode, 0, printed.stderr)
+        return printed.stdout.splitlines()[-1].removeprefix("fingerprint: ")
+
     def test_posts_the_included_drafts_as_one_review_at_the_reviewed_head(self):
         for change in [("include", "1"), ("include", "2"), ("include", "3"), ("approve",),
                        ("text", "2", "Why retry a call that succeeded? It duplicates the order."),
                        ("message", "Pre-approving to unblock")]:
             self.draft(*change)
-        result = self.submit()
+        # The run is not safe to approve, and the user chose to approve it anyway.
+        result = self.submit("--approve-anyway")
         self.assertEqual(result.returncode, 0, result.stderr)
         # A comment keeps the label its text opens with, and a text without one, such as finding 2's edit
         # or finding 3's draft, gets its finding kind's.
@@ -1191,15 +1277,45 @@ class SubmitTest(unittest.TestCase):
         for flags in [["--print"], []]:
             with self.subTest(flags=flags):
                 result = self.submit(*flags)
-                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.returncode, 10)
                 self.assertIn("new commits", result.stderr)
                 self.assertIn("bin/whooper-round", result.stderr)
+                self.assertNotIn("requests your review", result.stderr)
         self.assertEqual(self.posted(), [])
         self.assertFalse((self.run / "submit.json").exists())
         self.assertFalse((self.run / "submit-request.json").exists())
-        # The mark whooper-post leaves: the reviewed head's record says stale.
+        # The mark whooper-post leaves: the reviewed head's record says stale, and the recheck list
+        # holds the work item at the new head.
         record = self.state / "prs" / "example-org-example-repo-12" / "h1.first_review.json"
         self.assertEqual(json.loads(record.read_text())["status"], "stale")
+        listed = self.state / "rechecks" / "example-org-example-repo-12.json"
+        self.assertEqual(json.loads(listed.read_text()), {**self.work, "head_sha": "h2"})
+
+    def test_new_commits_bring_back_a_pr_only_a_slack_ask_brought_in(self):
+        slack = {"ts": "1943194837.000100", "tagged_user": True,
+                 "permalink": "https://example.slack.com/archives/C0000000001/p1943194837000100"}
+        work = {**self.work, "source": "slack_ask", "slack": slack, "reason": "Alex asked for a review."}
+        self.write_run(work)
+        (self.fakes / "head").write_text("h2\n")
+        self.assertEqual(self.submit().returncode, 10)
+        # A poll reads only the Slack posts new since the last poll, and GitHub requests no review of
+        # this PR, so the next round's poll lists other work only.
+        other = {**work_item(kind="first_review", head="h7", number=7), "repo": "sample-org/plain-repo"}
+        (self.state / "poll").mkdir()
+        (self.state / "poll" / "20310727T020000Z.json").write_text(json.dumps({"items": [other]}))
+
+        def select():
+            result = subprocess.run([str(ROOT / "bin" / "whooper-select")], env=self.env, capture_output=True,
+                                    text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return [json.loads(line) for line in result.stdout.splitlines()]
+
+        self.assertEqual(select(), [other, {**work, "head_sha": "h2"}])
+        # Once the review of the new head is done, whooper-select takes the PR off the list.
+        done = {"status": "done", "failures": 0, "started_at": "2031-07-27T02:05:00+00:00"}
+        (self.state / "prs" / "example-org-example-repo-12" / "h2.first_review.json").write_text(json.dumps(done))
+        self.assertEqual(select(), [other])
+        self.assertFalse((self.state / "rechecks" / "example-org-example-repo-12.json").exists())
 
     def test_an_at_mention_posts_only_with_allow_mentions(self):
         self.draft("include", "1")
@@ -1208,7 +1324,7 @@ class SubmitTest(unittest.TestCase):
         for flags in [[], ["--print"]]:
             with self.subTest(flags=flags):
                 refused = self.submit(*flags)
-                self.assertEqual(refused.returncode, 1)
+                self.assertEqual(refused.returncode, 12)
                 for text in ["@alice in the comment on services/orders/internal/api/orders.go:88 (finding 1)",
                              "@example-org/orders-team in the message", "--allow-mentions"]:
                     self.assertIn(text, refused.stderr)
@@ -1240,9 +1356,32 @@ class SubmitTest(unittest.TestCase):
         self.assertIn("submit-request.json", printed.stdout)
         self.assertEqual(self.posted(), [])
         self.assertFalse((self.run / "submit.json").exists())
-        request = json.loads((self.run / "submit-request.json").read_text())
+        # Its last line is the request's fingerprint: the SHA-256 of the file it wrote.
+        text = (self.run / "submit-request.json").read_bytes()
+        self.assertEqual(printed.stdout.splitlines()[-1], f"fingerprint: {hashlib.sha256(text).hexdigest()}")
         self.assertEqual(self.submit().returncode, 0)
-        self.assertEqual(self.posted(), [request])
+        self.assertEqual(self.posted(), [json.loads(text)])
+
+    def test_expect_posts_only_the_request_print_showed(self):
+        missing = self.submit("--expect")
+        self.assertEqual(missing.returncode, 1)
+        self.assertIn("usage", missing.stderr)
+        self.draft("include", "2")
+        confirmed = self.shown()
+        # Whooper's agent edits the comment after the user confirmed the review.
+        self.draft("text", "2", "**question:** Why retry at all?")
+        changed = self.submit("--expect", confirmed)
+        self.assertEqual(changed.returncode, 13, changed.stderr)
+        self.assertIn("--print", changed.stderr)
+        self.assertEqual(self.posted(), [])
+        self.assertFalse((self.run / "submit.json").exists())
+        # Shown and confirmed again, the new request posts.
+        again = self.shown()
+        self.assertNotEqual(again, confirmed)
+        result = self.submit("--expect", again)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        [request] = self.posted()
+        self.assertEqual(request["comments"][0]["body"], "AI comment (vetted)\n\n**question:** Why retry at all?")
 
     def test_a_review_posts_once(self):
         self.draft("include", "1")
@@ -1275,8 +1414,10 @@ class SubmitTest(unittest.TestCase):
             (self.run / "submit.json").write_text(json.dumps(claim))
             return read_drafts(run_dir)
 
+        pr = Path(self.tmp.name) / "pr.json"
+        pr.write_text(json.dumps({"headRefOid": "h1", "statusCheckRollup": self.PASSED}))
         with mock.patch("whooper.read_drafts", claimed_meanwhile), self.assertRaises(SystemExit) as caught:
-            main("submit", str(self.state), str(self.run), "h1")
+            main("submit", str(self.state), str(self.run), str(pr))
         self.assertIn("already submitted", str(caught.exception))
         self.assertEqual(json.loads((self.run / "submit.json").read_text()), claim)
         # The losing claim's temporary file is gone too.
@@ -1295,7 +1436,8 @@ class SubmitTest(unittest.TestCase):
         self.assertEqual(len(self.posted()), 1)
 
     def test_a_review_without_comments_posts_only_as_an_approval(self):
-        # Without drafts.json the review includes nothing and only comments; a message alone does not count.
+        # The run is not safe to approve, so its review starts as a comment with nothing included; a
+        # message alone does not count.
         for change in [None, ("message", "Looks fine.")]:
             with self.subTest(change=change):
                 if change:
@@ -1304,13 +1446,106 @@ class SubmitTest(unittest.TestCase):
                 self.assertEqual(empty.returncode, 1)
                 self.assertIn("nothing to submit", empty.stderr)
         self.draft("approve")
-        result = self.submit()
+        result = self.submit("--approve-anyway")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.posted(), [{"commit_id": "h1", "event": "APPROVE", "body": "Looks fine.", "comments": []}])
 
+    def test_a_safe_run_starts_as_an_approval_of_its_nits_and_posts_it(self):
+        self.write_findings("approve_once_ci_passes", [self.NIT, self.OTHER_NIT])
+        shown = subprocess.run([str(ROOT / "bin" / "whooper-draft"), self.run.name], env=self.env,
+                               capture_output=True, text=True, timeout=60)
+        self.assertEqual(json.loads(shown.stdout), {"event": "APPROVE", "message": "", "findings": {
+            "3": {"included": True}, "4": {"included": True}}})
+        result = self.submit()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.posted(), [{"commit_id": "h1", "event": "APPROVE", "body": "Pre-approving to unblock",
+                                          "comments": [
+            {"path": "services/orders/README.md", "line": 3, "side": "LEFT",
+             "body": "AI comment (vetted)\n\n**nit:** This line still names the old --fast flag."},
+            {"path": "services/orders/internal/api/orders.go", "line": 95, "side": "RIGHT",
+             "body": "AI comment (vetted)\n\n**nit:** `count` is never read."},
+        ]}])
+
+    def test_any_other_run_starts_as_a_comment_with_nothing_included(self):
+        for name, verdict, findings in [
+            ("the verdict is look_first", "look_first", [self.NIT]),
+            ("a finding is not a nit", "approve_once_ci_passes", [self.NIT, self.QUESTION]),
+        ]:
+            with self.subTest(name):
+                self.write_findings(verdict, findings)
+                self.assertEqual(self.draft(), {"event": "COMMENT", "message": "", "findings": {}})
+
+    def test_approving_a_run_that_is_not_safe_waits_for_the_users_decision(self):
+        failed = [
+            {"__typename": "CheckRun", "name": "test", "workflowName": "CI", "status": "COMPLETED", "conclusion": "FAILURE"},
+            {"__typename": "CheckRun", "name": "build", "workflowName": "CI", "status": "COMPLETED", "conclusion": "CANCELLED"},
+        ]
+        running = [
+            {"__typename": "CheckRun", "name": "e2e", "workflowName": "CI", "status": "IN_PROGRESS", "conclusion": ""},
+            {"__typename": "StatusContext", "context": "ci/preview", "state": "PENDING"},
+        ]
+        cases = [
+            # (name, verdict, findings, CI checks on the head, the reasons whooper-submit lists)
+            ("the verdict is look_first", "look_first", [self.NIT], self.PASSED,
+             ["the run's verdict is look_first: The question needs the author's answer."]),
+            ("findings that are not nits", "approve_once_ci_passes", [self.BUG, self.NIT, self.QUESTION], self.PASSED,
+             ["finding 1 is a caller_visible_bug: Bad JSON now returns 500 (services/orders/internal/api/orders.go:88)",
+              "finding 2 is a question: Why retry twice? (services/orders/internal/api/orders.go:40)"]),
+            ("a check failed or was cancelled", "approve_once_ci_passes", [self.NIT], self.PASSED[1:] + failed,
+             ["CI check CI / test: FAILURE", "CI check CI / build: CANCELLED"]),
+            ("checks are still running", "approve_once_ci_passes", [self.NIT], self.PASSED + running,
+             ["CI check CI / e2e: IN_PROGRESS", "CI check ci/preview: PENDING"]),
+            ("no check has reported yet", "approve_once_ci_passes", [self.NIT], [], ["no CI check has reported on h1"]),
+        ]
+        for name, verdict, findings, checks, reasons in cases:
+            with self.subTest(name):
+                self.setUp()
+                self.write_findings(verdict, findings)
+                self.write_checks(checks)
+                self.draft("approve")
+                for flags in [[], ["--print"]]:
+                    refused = self.submit(*flags)
+                    self.assertEqual(refused.returncode, 11, refused.stderr)
+                    self.assertEqual([line.strip() for line in refused.stderr.splitlines() if line.startswith("  ")],
+                                     reasons)
+                    self.assertIn("--approve-anyway", refused.stderr)
+                self.assertEqual(self.posted(), [])
+                self.assertFalse((self.run / "submit-request.json").exists())
+                # The user looked, and approves anyway.
+                approved = self.submit("--approve-anyway")
+                self.assertEqual(approved.returncode, 0, approved.stderr)
+                self.assertEqual([request["event"] for request in self.posted()], ["APPROVE"])
+
+    def test_a_review_that_only_comments_needs_no_decision(self):
+        # The run is not safe to approve on any count: no CI check has reported either.
+        self.write_checks([])
+        self.draft("include", "1")
+        result = self.submit()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([request["event"] for request in self.posted()], ["COMMENT"])
+
+    def test_an_approval_without_a_message_says_pre_approving_only_when_it_comments(self):
+        self.write_findings("approve_once_ci_passes", [self.NIT, self.OTHER_NIT])
+        cases = [
+            # (name, changes to the drafts the safe run starts with, the message that would post)
+            ("with its nits", [], "Pre-approving to unblock"),
+            ("with no comment", [("leave-out", "3"), ("leave-out", "4")], ""),
+            ("with a message the user set", [("message", "Thanks, looks good.")], "Thanks, looks good."),
+            ("with no comment and a message the user set", [("leave-out", "3"), ("leave-out", "4"), ("message", "LGTM")],
+             "LGTM"),
+            ("only commenting", [("comment",)], ""),
+        ]
+        for name, changes, message in cases:
+            with self.subTest(name):
+                (self.run / "drafts.json").unlink(missing_ok=True)
+                for change in changes:
+                    self.draft(*change)
+                self.shown()
+                self.assertEqual(json.loads((self.run / "submit-request.json").read_text())["body"], message)
+
     def test_whooper_draft_records_each_choice_and_prints_the_drafts(self):
         command = [str(ROOT / "bin" / "whooper-draft"), self.run.name]
-        # A run without drafts.json includes nothing and only comments.
+        # The run is not safe to approve, so before any change it only comments and includes nothing.
         shown = subprocess.run(command, env=self.env, capture_output=True, text=True, timeout=60)
         self.assertEqual((shown.returncode, json.loads(shown.stdout)), (0, {"event": "COMMENT", "message": "", "findings": {}}))
         self.assertFalse((self.run / "drafts.json").exists())
@@ -1345,6 +1580,11 @@ class SubmitTest(unittest.TestCase):
                                  capture_output=True, text=True, timeout=60)
         self.assertEqual(missing.returncode, 1)
         self.assertIn("no run 20310101T000000Z-1", missing.stderr)
+        # A review that did not finish has no drafts to print.
+        (self.run / "findings.json").unlink()
+        with self.assertRaises(SystemExit) as caught:
+            self.draft()
+        self.assertIn("did not finish", str(caught.exception))
 
 
 class SlackGuardTest(unittest.TestCase):

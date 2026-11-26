@@ -17,13 +17,15 @@ from the user's config file (config_path), never from this code. The bin/ script
   whooper.py posts <slackdump channel.json> <oldest>                               -> the channel's posts JSON
   whooper.py asks <posts.json> <answer.json> <oldest>                              -> asks JSON
   whooper.py items <github.json> <asks.json> <slack-prs.json>                      -> {"items": [...]}
-  whooper.py select <data dir>                                                     -> one work item per line
+  whooper.py select <data dir>                                                     -> one work item per line, and
+                                                                                      prunes the recheck list
   whooper.py conversation <conversation.graphql result> [<as-of time>]             -> a run's github.json
   whooper.py record <data dir> <work-item.json> running|failed                     -> writes the PR record
   whooper.py classify <data dir> <run dir>                                         -> verdicts, digest, record
   whooper.py post <data dir> <run dir> <head now> <review comments.json>          -> post.json, digest, record
   whooper.py draft <data dir> <run-id> [<change>]                                  -> the run's drafts JSON
-  whooper.py submit <data dir> <run dir> <head now> [--print] [--allow-mentions]   -> submit-request.json, submit.json
+  whooper.py submit <data dir> <run dir> <gh pr view JSON> [--print] [--allow-mentions] [--approve-anyway]
+                    [--expect=<fingerprint>]                                       -> submit-request.json, submit.json
   whooper.py summary <run dir>                                                     -> the summary channel's text
   whooper.py skills <skills dir>                                                   -> {skill: content hash}
   whooper.py next-round [<Unix time the last round ended>]                         -> the next round's Unix time
@@ -63,6 +65,17 @@ MENTION = re.compile(r"(?<![\w.@/])@[A-Za-z0-9][A-Za-z0-9-]*(?:/[A-Za-z0-9_-]+)?
 # Each comment whooper-submit posts starts with this line and a blank line: an AI wrote the comment,
 # and the user read it and chose to post it.
 VETTED = "AI comment (vetted)"
+# The message of an approval the user left without one, when it includes comments: the author need
+# not wait for the user, and the comments still ask for a look.
+PRE_APPROVAL = "Pre-approving to unblock"
+# What a CI check may end as and still count as passed, as on GitHub, where a skipped or neutral
+# check does not block a merge either.
+PASSING = ("SUCCESS", "SKIPPED", "NEUTRAL")
+# whooper-submit's exit codes for the refusals Prompting Time handles each its own way: the PR has
+# new commits since the review, the review approves a run that is not safe to approve, it
+# @-mentions someone, and its request is not the one --print showed. Any other failure exits 1, or
+# with gh's or jq's own code, and neither uses 10 to 13.
+NEW_COMMITS_EXIT, NOT_SAFE_EXIT, MENTIONS_EXIT, CHANGED_EXIT = 10, 11, 12, 13
 # The review skills open each draft with its Conventional Comments label, such as **nit:** or
 # **suggestion (non-blocking):**, and whooper-submit keeps the label a comment opens with. A comment
 # that opens with none, such as one the user rewrote, gets the label of its finding's kind.
@@ -545,31 +558,45 @@ def work_item(pr, kind, source, reason, slack=None):
     }
 
 
-def select_work(items, prs_dir, now, repos):
-    """Splits items into work to start and (item, reason) for items already handled or unreviewable.
+def select_work(items, prs_dir, now, repos, rechecks=()):
+    """Splits work items into work to start and (item, reason) for items already handled or
+    unreviewable, and returns the recheck-list items that no longer wait, for the caller to delete.
 
-    prs_dir holds the records write_record writes, and repos is the config's [repos] table. An item
-    is dropped when repos has no table for its repo, since a review needs the repo's settings, or
-    when its record is done or running or has failed MAX_FAILURES times. A re-check is dropped when
-    its PR already has MAX_RECHECKS_PER_DAY re-check records for other heads started on now's local
-    day.
+    items are the newest poll's, and rechecks the recheck list's (mark_new_commits). prs_dir holds the
+    records write_record writes, and repos is the config's [repos] table. An item is dropped when
+    repos has no table for its repo, since a review needs the repo's settings, or when its record is
+    running or done or has failed MAX_FAILURES times. A re-check is dropped when its PR already has
+    MAX_RECHECKS_PER_DAY re-check records for other heads started on now's local day.
+
+    The limit holds a recheck-list item too, counting the records of the item's own kind, and an item
+    it drops stays on the list for the next day. A recheck-list item no longer waits once items list
+    its PR, since they carry the head the PR has now, or once its record is done or has failed
+    MAX_FAILURES times. Nothing here reads GitHub, so a listed PR merged, closed, or reviewed on
+    GitHub since the mark still gets its review, at the head the mark saw; have whooper-poll fetch
+    the listed PRs if such reviews come to waste runs.
     """
+    listed = {(i["repo"], i["pr"]) for i in items}
+    finished = [r for r in rechecks if (r["repo"], r["pr"]) in listed]
+    waiting = [r for r in rechecks if (r["repo"], r["pr"]) not in listed]
     work, drops = [], []
-    for item in items:
+    for item, from_list in [(i, False) for i in items] + [(r, True) for r in waiting]:
         path = record_path(prs_dir, item)
         pr_dir = path.parent
         record = json.loads(path.read_text()) if path.exists() else None
         reason = None
         if item["repo"] not in repos:
             reason = f"the config has no [repos.\"{item['repo']}\"] table"
-        elif record and record["status"] in ("done", "running"):
-            reason = f"{record['status']} at this head"
-        elif record and record["failures"] >= MAX_FAILURES:
-            reason = f"failed {record['failures']} times at this head"
-        elif item["kind"] == "recheck":
+        elif record and record["status"] == "running":
+            reason = "running at this head"
+        elif record and (record["status"] == "done" or record["failures"] >= MAX_FAILURES):
+            reason = "done at this head" if record["status"] == "done" else f"failed {record['failures']} times at this head"
+            # No review starts at this head again, so the list has nothing left to bring back.
+            if from_list:
+                finished.append(item)
+        elif item["kind"] == "recheck" or from_list:
             started = [
                 datetime.fromisoformat(json.loads(p.read_text())["started_at"]).astimezone(now.tzinfo).date()
-                for p in pr_dir.glob("*.recheck.json") if p != path
+                for p in pr_dir.glob(f"*.{item['kind']}.json") if p != path
             ]
             if started.count(now.date()) >= MAX_RECHECKS_PER_DAY:
                 reason = f"{MAX_RECHECKS_PER_DAY} re-checks already today"
@@ -577,7 +604,7 @@ def select_work(items, prs_dir, now, repos):
             drops.append((item, reason))
         else:
             work.append(item)
-    return work, drops
+    return work, drops, finished
 
 
 def record_path(prs_dir, item):
@@ -604,6 +631,25 @@ def write_record(prs_dir, item, status, now, approval=None):
         record["approval"] = approval
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(record))
+
+
+def mark_new_commits(data, item, head_now, now):
+    """Records that a review run's PR has new commits since the run, for whooper-post and
+    whooper-submit, which post nothing then: the reviewed head's record says stale, and the recheck
+    list under data holds the run's work item at head_now, so the next round's whooper-select reviews
+    the new commits whatever brought the PR in. Without the list only a PR GitHub still lists would
+    come back, since the poll reads each Slack post once. item is the run's run.json. A later mark of
+    the same PR replaces this one, so the list holds the newest head either command saw."""
+    write_record(data / "prs", item, "stale", now)
+    path = recheck_path(data, item)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    work = {key: item[key] for key in ("kind", "repo", "pr", "head_sha", "base_ref", "source", "slack", "reason")}
+    write_file(path, json.dumps(work | {"head_sha": head_now}))
+
+
+def recheck_path(data, item):
+    """The recheck list's file for the item's PR: rechecks/<owner>-<repo>-<pr>.json under data."""
+    return data / "rechecks" / f"{item['repo'].replace('/', '-')}-{item['pr']}.json"
 
 
 def conversation(pr, as_of=None):
@@ -838,12 +884,19 @@ def review_request(head_sha, event, body, comments):
 def read_drafts(run_dir):
     """The user's choices for a review run, from <run dir>/drafts.json, which bin/whooper-draft
     writes: the review's event, APPROVE or COMMENT, and message, and per finding ID whether its
-    comment is included and, when the user edited it, the comment's text. Without the file the run
-    includes nothing, so nothing posts until the user chooses, and the review only comments and has
-    no message."""
+    comment is included and, when the user edited it, the comment's text.
+
+    Until the user changes anything, a run that run_concerns finds nothing against starts as an
+    approval with every finding, each a nit, included, and any other run as a comment with nothing
+    included, so the user decides. CI does not count here: whooper-submit reads it before it
+    approves. Either way the message starts empty."""
     path = run_dir / "drafts.json"
-    saved = json.loads(path.read_text()) if path.exists() else {}
-    return {"event": "COMMENT", "message": "", "findings": {}, **saved}
+    if path.exists():
+        return json.loads(path.read_text())
+    result = json.loads((run_dir / "findings.json").read_text())
+    if run_concerns(result):
+        return {"event": "COMMENT", "message": "", "findings": {}}
+    return {"event": "APPROVE", "message": "", "findings": {f["id"]: {"included": True} for f in result["findings"]}}
 
 
 # Each change bin/whooper-draft makes, with the number of arguments it takes.
@@ -860,8 +913,6 @@ def change_drafts(run_dir, change, *args):
         raise SystemExit(DRAFT_USAGE)
     if (run_dir / "submit.json").exists():
         raise SystemExit(f"whooper-draft: {run_dir} was already submitted; see its submit.json")
-    if not (run_dir / "findings.json").exists():
-        raise SystemExit(f"whooper-draft: {run_dir} has no findings.json, so its review did not finish")
     if change == "text" and not args[1].strip():
         raise SystemExit("whooper-draft: the text is empty; to drop the comment, leave the finding out")
     drafts = read_drafts(run_dir)
@@ -900,6 +951,48 @@ def vetted_comments(findings, drafts):
             text = f"{LABELS[f['kind']]} {text}"
         comments.append((f, f"{VETTED}\n\n{text}"))
     return comments
+
+
+def run_concerns(result):
+    """What in a review run's findings.json argues against approving the PR, as lines for
+    whooper-submit to list: a verdict other than approve_once_ci_passes, with its reason, and each
+    finding that is not a nit. A run with none starts its drafts as an approval (read_drafts), and
+    whooper-submit approves it unless ci_concerns finds something."""
+    approval, concerns = result["approval"], []
+    if approval["verdict"] != "approve_once_ci_passes":
+        concerns.append(f"the run's verdict is {approval['verdict']}: {approval['reason']}")
+    return concerns + [f"finding {f['id']} is a {f['kind']}: {f['title']} ({f['path']}:{f['line']})"
+                       for f in result["findings"] if f["kind"] != "nit"]
+
+
+def ci_concerns(checks, head):
+    """Each CI check on head that has not passed, as lines for whooper-submit to list: failed,
+    cancelled, still running, or waiting. checks are the statusCheckRollup of gh pr view --json:
+    check runs, whose conclusion counts once they completed, and commit statuses. A head no check has
+    reported on is a concern too, since CI may not have started on a push yet.
+
+    statusCheckRollup can list a check more than once, when it ran again on the same head, so a check
+    that failed and then passed is still a concern. Keep only each check's latest run, as gh pr
+    checks does, if that stops approvals the user wanted."""
+    if not checks:
+        return [f"no CI check has reported on {head[:12]}"]
+    concerns = []
+    for c in checks:
+        if c["__typename"] == "CheckRun":
+            name = f"{c['workflowName']} / {c['name']}" if c["workflowName"] else c["name"]
+            state = c["conclusion"] if c["status"] == "COMPLETED" else c["status"]
+        else:
+            name, state = c["context"], c["state"]
+        if state not in PASSING:
+            concerns.append(f"CI check {name}: {state}")
+    return concerns
+
+
+def refuse(code, message):
+    """Stops whooper-submit with message on stderr and code, one of the exit codes Prompting Time
+    tells apart, such as NOT_SAFE_EXIT."""
+    print(message, file=sys.stderr)
+    raise SystemExit(code)
 
 
 APPROVAL_TEXT = {"approve_once_ci_passes": "Approve once CI passes", "look_first": "Look first"}
@@ -1060,10 +1153,15 @@ def main(command, *args):
         newest = max((data / "poll").glob("[0-9]*Z.json"), default=None)
         if newest is None:
             raise SystemExit(f"whooper-select: no poll output in {data / 'poll'}")
-        work, drops = select_work(load(newest)["items"], data / "prs", datetime.now().astimezone(),
-                                  load_config().get("repos", {}))
+        rechecks = [load(path) for path in sorted((data / "rechecks").glob("*.json"))]
+        work, drops, finished = select_work(load(newest)["items"], data / "prs", datetime.now().astimezone(),
+                                            load_config().get("repos", {}), rechecks)
         for item, reason in drops:
             print(f"whooper-select: dropped {item['repo']}#{item['pr']} {item['kind']}: {reason}", file=sys.stderr)
+        # Nothing locks the list, so a mark of the same PR written between the read above and this
+        # delete is lost; add a lock if submits during a round's selection come to lose reviews.
+        for item in finished:
+            recheck_path(data, item).unlink(missing_ok=True)
         for item in work:
             print(json.dumps(item))
     elif command == "conversation":
@@ -1106,9 +1204,9 @@ def main(command, *args):
             raise SystemExit(f"whooper-post: {run} was already handled; see its post.json")
         item = load(run / "run.json")
         if head_now != item["head_sha"]:
-            write_record(data / "prs", item, "stale", datetime.now(timezone.utc))
+            mark_new_commits(data, item, head_now, datetime.now(timezone.utc))
             (run / "post.json").write_text(json.dumps({"status": "stale", "head_now": head_now, "posted": [], "held": []}))
-            print(f"stale: the PR's head is now {head_now}, so nothing posts")
+            print(f"stale: the PR's head is now {head_now}, so nothing posts; the next round reviews the new commits")
             return
         # A run ID is the run's UTC start time and the PR number.
         started = datetime.strptime(item["run_id"].split("-")[0], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
@@ -1135,9 +1233,12 @@ def main(command, *args):
         run, change = Path(args[0]) / "runs" / args[1], args[2:]
         if not (run / "run.json").exists():
             raise SystemExit(f"whooper-draft: no run {args[1]} in {run.parent}")
+        # Drafts start from the run's findings (read_drafts), which only a finished review has.
+        if not (run / "findings.json").exists():
+            raise SystemExit(f"whooper-draft: {run} has no findings.json, so its review did not finish")
         print(json.dumps(change_drafts(run, *change) if change else read_drafts(run), indent=2))
     elif command == "submit":
-        data, run, head_now, flags = Path(args[0]), Path(args[1]).resolve(), args[2], args[3:]
+        data, run, pr, flags = Path(args[0]), Path(args[1]).resolve(), load(args[2]), args[3:]
         # bin/whooper-submit writes submit.json saying posting before it posts, and adds GitHub's
         # response after, so a run that has the file may have its review on GitHub.
         if (run / "submit.json").exists():
@@ -1147,30 +1248,48 @@ def main(command, *args):
             raise SystemExit(f"whooper-submit: {run} was already submitted; see its submit.json")
         if not (run / "findings.json").exists():
             raise SystemExit(f"whooper-submit: {run} has no findings.json, so its review did not finish")
-        item = load(run / "run.json")
+        item, result, head_now = load(run / "run.json"), load(run / "findings.json"), pr["headRefOid"]
         if head_now != item["head_sha"]:
-            # whooper-post's mark. While GitHub requests the user's review, the next poll lists the PR at
-            # its new head, which no record covers yet, so the round reviews it.
-            write_record(data / "prs", item, "stale", datetime.now(timezone.utc))
-            raise SystemExit(f"whooper-submit: nothing posted: the PR has new commits since the review (head"
-                             f" {item['head_sha'][:12]}, now {head_now[:12]}). Whooper reviews them in its next round"
-                             " while GitHub still requests your review; bin/whooper-round runs that round now.")
+            mark_new_commits(data, item, head_now, datetime.now(timezone.utc))
+            refuse(NEW_COMMITS_EXIT, f"whooper-submit: nothing posted: the PR has new commits since the review (head"
+                   f" {item['head_sha'][:12]}, now {head_now[:12]}). Whooper reviews them in its next round;"
+                   " bin/whooper-round runs that round now.")
         drafts = read_drafts(run)
-        comments = vetted_comments(load(run / "findings.json")["findings"], drafts)
+        comments = vetted_comments(result["findings"], drafts)
         if not comments and drafts["event"] == "COMMENT":
             raise SystemExit("whooper-submit: nothing to submit: the drafts include no comment and do not approve;"
                              " change them with bin/whooper-draft")
+        message = drafts["message"]
+        if drafts["event"] == "APPROVE" and not message.strip():
+            message = PRE_APPROVAL if comments else ""
+        # An approval lets the PR merge under the user's name, so whatever in the run or in CI argues
+        # against it waits for the user's own look.
+        if drafts["event"] == "APPROVE" and "--approve-anyway" not in flags:
+            if concerns := run_concerns(result) + ci_concerns(pr["statusCheckRollup"], head_now):
+                refuse(NOT_SAFE_EXIT, "whooper-submit: nothing posted: the review approves, and the run is not safe to"
+                       " approve:\n" + "".join(f"  {c}\n" for c in concerns)
+                       + "Pass --approve-anyway to approve it anyway, or make the review only comment with"
+                       " bin/whooper-draft.")
         # A mention notifies someone under the user's name, so each one waits for the user's approval.
         mentions = [f"{m} in the comment on {f['path']}:{f['line']} (finding {f['id']})"
                     for f, body in comments for m in MENTION.findall(body)]
-        mentions += [f"{m} in the message" for m in MENTION.findall(drafts["message"])]
+        mentions += [f"{m} in the message" for m in MENTION.findall(message)]
         if mentions and "--allow-mentions" not in flags:
-            raise SystemExit("whooper-submit: nothing posted: the review @-mentions someone, and posting would notify them:\n"
-                             + "".join(f"  {m}\n" for m in mentions) + "Pass --allow-mentions to post it anyway.")
-        request = review_request(item["head_sha"], drafts["event"], drafts["message"], comments)
-        write_file(run / "submit-request.json", json.dumps(request, indent=2))
+            refuse(MENTIONS_EXIT, "whooper-submit: nothing posted: the review @-mentions someone, and posting would"
+                   " notify them:\n" + "".join(f"  {m}\n" for m in mentions) + "Pass --allow-mentions to post it anyway.")
+        request = review_request(item["head_sha"], drafts["event"], message, comments)
+        text = json.dumps(request, indent=2)
+        write_file(run / "submit-request.json", text)
+        # The fingerprint names this exact request, so the submit Prompting Time runs after its
+        # confirmation, with --expect, posts nothing the user did not see.
+        fingerprint = hashlib.sha256(text.encode()).hexdigest()
+        expect = next((flag.removeprefix("--expect=") for flag in flags if flag.startswith("--expect=")), None)
+        if expect is not None and expect != fingerprint:
+            refuse(CHANGED_EXIT, f"whooper-submit: nothing posted: the drafts changed since --print showed the review,"
+                   f" so its fingerprint is now {fingerprint}, not {expect}. Run with --print to show it again.")
         if "--print" in flags:
             print(f"printed the request to {run / 'submit-request.json'}; nothing posted")
+            print(f"fingerprint: {fingerprint}")
             return
         # bin/whooper-submit posts the request next. Only one submit can create submit.json, so of two
         # at once only one posts.

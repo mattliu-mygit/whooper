@@ -74,7 +74,7 @@ To run the steps by hand:
 ```sh
 bin/whooper-fetch   # GitHub reads -> <state>/poll/github.json
 bin/whooper-poll    # slackdump reads Slack, an agent picks the asks -> <state>/poll/<UTC start time>.json
-bin/whooper-select  # prints the newest poll's items that no record marks as handled, one per line
+bin/whooper-select  # prints the newest poll's items and the recheck list's that no record marks as handled, one per line
 ```
 
 To review one work item, save it as a file and run:
@@ -89,9 +89,11 @@ bin/whooper-summary <run id> --print  # prints the summary; without --print, the
 `--as-of` replays a past review: `github.json` then holds only what people could read on the PR
 before that time.
 
-whooper-post re-reads the PR first. It posts nothing when the head moved, and it moves to the
-digest any finding whose line got a new review comment since the run started, or whose draft
-@-mentions someone or links outside the configured orgs. Its live posting is not built yet.
+whooper-post re-reads the PR first. When the head moved, it posts nothing and puts the PR on the
+recheck list, so the next round reviews the new commits (see [What counts as work](#what-counts-as-work)).
+Otherwise it moves to the digest any finding whose line got a new review comment since the run
+started, or whose draft @-mentions someone or links outside the configured orgs. Its live posting is
+not built yet.
 whooper-summary delivers through the agent `[jobs] summary` names. On Claude, a Haiku run sends
 it, and its only Slack call, `slack_schedule_message`, is pinned by `hooks/slack-guard.sh` to the
 composed text, channel, and time. Devin cannot reach Slack, so it writes `summary.md` in the run
@@ -121,25 +123,42 @@ its message. Prompting Time, Whooper's agent, and a terminal all change them wit
 bin/whooper-draft <run-id>                                  # prints the drafts
 bin/whooper-draft <run-id> include 2                        # or leave-out 2
 bin/whooper-draft <run-id> text 2 '**question:** Why ...?'  # replaces finding 2's draft, label included
-bin/whooper-draft <run-id> approve                          # or comment, the default
-bin/whooper-draft <run-id> message 'Pre-approving to unblock'
+bin/whooper-draft <run-id> approve                          # or comment
+bin/whooper-draft <run-id> message 'Thanks, this reads well.'
 ```
 
-A run without `drafts.json` includes nothing, so nothing posts until the user chooses.
+A run is safe to approve when its verdict is `approve_once_ci_passes`, every finding it has is a
+nit, and every CI check on the reviewed head has passed when the review is submitted; as on GitHub,
+a skipped or neutral check counts as passed, but a head no check has reported on yet is not safe.
+Until the user changes anything, a run that is safe as far as its own findings tell starts as an
+approval with every nit included, and any other run as a comment with nothing included, so the user
+decides. CI does not count there: only whooper-submit reads it.
+
 `bin/whooper-submit <run-id>` posts the review with the user's own gh login, as one GitHub review
 at the head the run reviewed. Each comment is `AI comment (vetted)`, a blank line, and the text,
 which keeps the Conventional Comments label it opens with, such as `**nit:**`; a text without one
-gets its finding kind's. Prompting Time's Submit button and Whooper's agent both run it after
-Prompting Time's confirmation, which shows the request that `whooper-submit <run-id> --print`
-writes to `submit-request.json` without posting.
+gets its finding kind's. An approval without a message says `Pre-approving to unblock` when it
+includes comments and nothing when it includes none; a message the user set posts as written.
+Prompting Time's Submit button and Whooper's agent both run it after Prompting Time's confirmation,
+which shows the request that `whooper-submit <run-id> --print` writes to `submit-request.json`
+without posting. `--print` also prints the request's fingerprint, the SHA-256 of that file, as its
+last line, `fingerprint: <hex>`, and the submit after the confirmation passes it back as
+`--expect <hex>`, so drafts changed after the confirmation post nothing the user did not see.
 
-whooper-submit re-reads the PR first. When the PR has new commits, it posts nothing and marks the
-reviewed head's record stale, as whooper-post does, so the next round reviews the new commits while
-GitHub still requests the user's review; `bin/whooper-round` runs that round at once. It also posts
-nothing while an included comment or the message @-mentions someone, and lists each mention;
-`--allow-mentions` posts them. A comment someone wrote on the same line since the review, and a link
-outside the configured orgs, do not stop it. It refuses a review that includes no comment and does
-not approve, and a run it already submitted, so a review never posts twice.
+whooper-submit re-reads the PR and the CI checks on its head first. Each refusal posts nothing and
+exits with its own code, so Prompting Time can tell them apart:
+
+| Exit | Why | What then |
+| --- | --- | --- |
+| 10 | The PR has new commits since the review. | The reviewed head's record says stale and the PR goes on the recheck list, as whooper-post does, so the next round reviews the new commits whatever brought the PR in; `bin/whooper-round` runs that round at once. |
+| 11 | The review approves, and the run is not safe to approve. | It lists why: the verdict and its reason, the findings that are not nits, and the checks that failed, were cancelled, are still running, or have not reported. `--approve-anyway` approves after the user has looked. |
+| 12 | An included comment or the message @-mentions someone. | It lists each mention, and `--allow-mentions` posts them. |
+| 13 | The request is not the one whose fingerprint `--expect` gives. | `--print` shows the new request for another confirmation. |
+
+Any other failure exits 1, or with gh's or jq's own code, none of which is 10 to 13. A comment
+someone wrote on the same line since the review, and a link outside the configured orgs, do not
+stop it. It refuses a review that includes no comment and does not approve, and a run it already
+submitted, so a review never posts twice.
 
 ## What counts as work
 
@@ -154,6 +173,12 @@ posts only. Only PRs in the configured GitHub orgs count. Each item is one PR an
   asks about a PR the user already reviewed, or the user reviewed the PR without approving, every
   thread the user started has an author reply or is resolved, and the head moved or the author
   replied since the user's latest review.
+
+When whooper-post or whooper-submit finds that a PR's head moved since its review, it posts
+nothing and puts the PR on the recheck list. The next round's whooper-select adds it to the work at
+the new head, with the kind and source it had, so the new commits get a review even when only a
+Slack ask brought the PR in, which a poll reads once. Like a re-check, it waits for the next day
+once the PR has 3 records of its kind for other heads started today.
 
 A PENDING review or a thread reply does not count as reviewing. Slack text is untrusted: an ask
 must name a post or thread reply slackdump read, and only plain
@@ -219,7 +244,8 @@ slackdump only reads. Review runs have no GitHub
 login and every Slack write denied, and whooper-review refuses to run without `--dry-run`. The summary run
 may call only `slack_schedule_message`, and `hooks/slack-guard.sh` blocks any other Slack call,
 any other channel, a thread, a changed text or time, and a second summary. Only whooper-submit writes
-to GitHub, with the user's own login: the one review the user chose in a run's `drafts.json`.
+to GitHub, with the user's own login: the one review the user chose in a run's `drafts.json`, and an
+approval of a run that is not safe to approve only after the user looked and passed `--approve-anyway`.
 
 ## Stop it
 
@@ -235,8 +261,9 @@ whooper-submit refuses that run until you check the PR on GitHub and delete the 
 ## Files under the state directory
 
 whooper-run and whooper-round write each of their files through a temporary file and a rename, so a
-program watching the directory never reads half of one, and whooper-draft and whooper-submit write a
-run's `drafts.json`, `submit-request.json`, and `submit.json` the same way.
+program watching the directory never reads half of one, whooper-draft and whooper-submit write a
+run's `drafts.json`, `submit-request.json`, and `submit.json` the same way, and whooper-post and
+whooper-submit write the recheck list's files the same way too.
 
 - `poll/github.json`: whooper-fetch's latest output, one entry per PR as `queries/pr.graphql`
   returns it.
@@ -251,7 +278,14 @@ run's `drafts.json`, `submit-request.json`, and `submit.json` the same way.
   whooper-submit write stale when the head moved.
   whooper-select drops an item in a repo the config has no `[repos."<owner>/<repo>"]` table for,
   an item whose record is done or running or has failed 3 times, and a re-check of a PR that
-  already has 3 re-check records for other heads started today (local time).
+  already has 3 re-check records for other heads started today (local time). A recheck-list item
+  counts under that limit too, by the records of its own kind; dropped for it, the item stays on the
+  list for the next day.
+- `rechecks/<owner>-<repo>-<pr>.json`: the recheck list: a PR whose head whooper-post or
+  whooper-submit found moved since its review, as the work item for the new head, with the kind,
+  source, and Slack ask it had. A later mark of the PR replaces it. whooper-select deletes it once
+  the newest poll lists the PR, which then comes with the head the PR has now, or once the record at
+  the listed head is done or has failed 3 times.
 - `locks/<owner>-<repo>-<pr>/pid`: the process ID of the review that holds the PR. A lock whose
   process is gone is stale, and the next review takes it.
 - `run.lock/`: the running whooper-run's lock, with its process ID in `pid`. A lock whose process is
@@ -279,7 +313,8 @@ run's `drafts.json`, `submit-request.json`, and `submit.json` the same way.
   `verdicts.json` whooper-classify's output, and `post.json` and `post-request.json` whooper-post's.
   `drafts.json` holds the user's choices for the review: `event` (`APPROVE` or `COMMENT`),
   `message`, and `findings`, which maps a finding ID to `included` and, once edited, `text`.
-  `submit-request.json` is the request whooper-submit built last, and `submit.json` the review it
-  posted: the request and GitHub's `response`, with `status` `posted`, or `posting` while gh posts.
+  `submit-request.json` is the request whooper-submit built last, whose SHA-256 is the fingerprint
+  `--print` prints, and `submit.json` the review it posted: the request and GitHub's `response`,
+  with `status` `posted`, or `posting` while gh posts.
   The worktrees `head/` and `base/` exist only while the run does.
 - `digest.jsonl`: one line per finding that waits for the user, with its run.

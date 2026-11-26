@@ -14,10 +14,13 @@
 #
 # The drafts hold the review's event (APPROVE or COMMENT) and message, and per finding ID whether
 # its comment is included and, once edited, its text; a comment not edited posts the finding's
-# draft. A run without drafts.json includes nothing, so nothing posts until the user chooses, and
-# only comments, with no message. Each change goes through a temporary file and a rename, so a
-# program watching the state directory never reads half the file. After the run is submitted,
-# changes are refused.
+# draft. Until the user changes anything, a run whose verdict is approve_once_ci_passes and whose
+# findings are all nits starts as an approval with every nit included, and any other run as a
+# comment with nothing included, so the user decides; whooper-submit reads CI before it approves.
+# The message starts empty, and an approval posted without one says "Pre-approving to unblock" when
+# it includes comments. Each change goes through a temporary file and a rename, so a program
+# watching the state directory never reads half the file. A review that did not finish has no
+# drafts, and after the run is submitted, changes are refused.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"

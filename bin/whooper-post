@@ -6,10 +6,11 @@
 #   whooper-post <run-id> --print
 #
 # It first re-reads the PR with the user's login. When the head has moved since the run, nothing
-# posts and the PR record says stale, so the next poll picks up the new head. Otherwise
-# lib/whooper.py holds back each finding that a review comment written since the run started
-# covers, or whose draft @-mentions someone or links outside the configured orgs, and adds it to the
-# digest. Either way the run's post.json records what happened, and a second call refuses.
+# posts, the PR record says stale, and the PR goes on the recheck list, so the next round reviews
+# the new head whatever brought the PR in. Otherwise lib/whooper.py holds back each finding that a
+# review comment written since the run started covers, or whose draft @-mentions someone or links
+# outside the configured orgs, and adds it to the digest. Either way the run's post.json records
+# what happened, and a second call refuses.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"

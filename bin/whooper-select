@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Prints the newest poll's work items that no record under <state>/prs marks as handled, one JSON
-# object per line, and the dropped items with their reasons on stderr.
+# Prints the work items to start, one JSON object per line: the newest poll's, and the recheck
+# list's in <state>/rechecks, PRs whose head whooper-post or whooper-submit found moved since their
+# review. It drops the items a record under <state>/prs marks as handled, printing each with its
+# reason on stderr, and deletes the recheck list's entries that no longer wait: the poll lists the
+# PR, or the review at the listed head is done or has failed 3 times.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
