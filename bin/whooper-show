@@ -28,6 +28,8 @@
 #   asks       whooper-ask's answers, each asks/<n>.json, in number order
 #   submitted  submit.json once whooper-submit posted the review: the request and GitHub's response;
 #              null before, and while the file says posting
+#   cause      for a failed review, what stopped it, {id, summary, scope}, as in bin/whooper-status;
+#              null otherwise
 #
 # A run ID that names no run directory gets "no run <run-id>" and exit 1. Prompting Time runs this
 # as the manifest's show-review action, whose fixed argument --json comes before the run ID; either

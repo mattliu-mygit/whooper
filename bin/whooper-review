@@ -6,7 +6,8 @@
 #   whooper-review <work-item.json> --dry-run [--as-of <ISO 8601 time with a zone>]
 #
 # The PR's repo must have a table in the config; for a repo without one, the review stops with the
-# config's message before it takes the PR's lock. Before the run starts, this script fetches with
+# config's message before it takes the PR's lock. A repo without a clone in the cache fails the review
+# once its run directory exists. Before the run starts, this script fetches with
 # the user's login everything the run reads: the head and merge-base commits, checked out as the
 # worktrees head/ and base/ in the run directory, and the PR's conversation as github.json. The
 # diff between the two commits, the one the run reads, stays as diff.patch after the worktrees go,
@@ -24,8 +25,10 @@
 # <state>/prs record. Once the run directory exists, a review that does not finish leaves why there
 # as failure.txt: the reason this script prints when it stops the review, such as at the time limit,
 # or else "the review was interrupted" after a signal such as Ctrl-C, or a line about an unexpected
-# error after a command that failed. Runs take --dry-run until a live run has a way to add :eyes: to
-# the ask it takes.
+# error after a command that failed. Beside it, failure.json holds the cause, {id, summary, scope},
+# which lib/whooper.py's failure_cause names from the step the review stopped at and that step's
+# error output, such as docker_unavailable, which stops every review, when the setup script could not
+# reach Docker. Runs take --dry-run until a live run has a way to add :eyes: to the ask it takes.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -34,12 +37,18 @@ data="$WHOOPER_STATE"
 usage="usage: whooper-review <work-item.json> --dry-run [--as-of <time>]"
 
 # Once this review has its run directory, die also saves the reason there, so an ask about the
-# failed review can read it.
-failure=""
+# failed review can read it, and the cause beside it in failure.json: what stopped the review, and
+# whether that stops every review or only this PR's. lib/whooper.py names it from the step the
+# review stopped at, $step, and the file holding that step's error output, $step_log, if any.
+failure="" step="" step_log=""
+save_failure() {
+  echo "$1" > "$failure"
+  "$root/lib/python" "$root/lib/whooper.py" cause "$run" "$step" ${step_log:+"$step_log"} || true
+}
 die() {
   echo "whooper-review: $*" >&2
   if [[ -n "$failure" ]]; then
-    echo "$*" > "$failure"
+    save_failure "$*"
   fi
   exit 1
 }
@@ -75,11 +84,11 @@ IFS=$'\t' read -r repo pr head_sha base_ref kind source tagged reason < <(
 repo_env="$("$root/lib/python" "$root/lib/whooper.py" repo "$repo")" || exit 1
 eval "$repo_env"
 core="$WHOOPER_REPO_CLONE"
-[[ -d "$core/.git" ]] || die "no clone of $repo at $core; see README.md"
 [[ "$kind" == first_review ]] || die "re-checks come in phase 4"
 [[ "$pr" =~ ^[0-9]+$ && "$head_sha" =~ ^[0-9a-f]{40}$ ]] || die "$item needs a PR number and a full head_sha"
-# base_ref names a branch, or for a replay the commit the base branch pointed at then.
-git -C "$core" check-ref-format --branch "$base_ref" >/dev/null || die "base_ref $base_ref is not a branch or commit"
+# base_ref names a branch, or for a replay the commit the base branch pointed at then. The check needs
+# no repo, since the clone is checked only once the run directory exists.
+git check-ref-format --branch "$base_ref" >/dev/null || die "base_ref $base_ref is not a branch or commit"
 
 run_id="$(date -u +%Y%m%dT%H%M%SZ)-$pr"
 run="$data/runs/$run_id"
@@ -110,7 +119,7 @@ cleanup() {
   # This comes first, so a second Ctrl-C during a slow teardown, which would end the cleanup, cannot
   # lose the reason.
   if [[ "$finished" != true && -n "$failure" && ! -e "$failure" ]]; then
-    echo "$stop_reason" > "$failure" || true
+    save_failure "$stop_reason" || true
   fi
   # The run and everything it started share one process group, so this also stops a server a
   # probe left running.
@@ -138,14 +147,26 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
-trap 'stop_reason="the review was interrupted"; exit 130' INT TERM HUP
+trap 'stop_reason="the review was interrupted" step=interrupted step_log=""; exit 130' INT TERM HUP
 
 mkdir -p "$run/tmp"
 failure="$run/failure.txt"
 "$root/lib/python" "$root/lib/whooper.py" record "$data" "$item" running
 
+# Checked only now, so a review of a repo without a clone leaves its run directory and failure, which
+# Prompting Time shows, and counts as a failure in its record.
+step=clone
+[[ -d "$core/.git" ]] || die "no clone of $repo at $core; see README.md"
+# The fetch is the review's first use of the user's GitHub login, so its error output shows when gh
+# is signed out. That output still goes to this script's, and a failed fetch stops the review as any
+# failed command does.
+step=fetch step_log="$work/fetch.log"
+fetch_exit=0
 git -C "$core" fetch --quiet --no-write-fetch-head origin \
-  "$head_sha:refs/whooper/$run_id/head" "$base_ref:refs/whooper/$run_id/base"
+  "$head_sha:refs/whooper/$run_id/head" "$base_ref:refs/whooper/$run_id/base" 2> "$step_log" || fetch_exit=$?
+cat "$step_log" >&2
+((fetch_exit == 0)) || exit "$fetch_exit"
+step=prepare step_log=""
 merge_base="$(git -C "$core" merge-base "refs/whooper/$run_id/head" "refs/whooper/$run_id/base")"
 # Checking out both trees fetches every file in them, so the run can read both without a login.
 git -C "$core" worktree add --quiet --detach "$run/head" "$head_sha"
@@ -184,11 +205,19 @@ export WHOOPER_RUN_ID="$run_id" WHOOPER_RUN="$run" WHOOPER_HEAD="$run/head" WHOO
   WHOOPER_CHANGED="$work/changed.txt" WHOOPER_SETUP_ENV="$work/setup.env"
 setup="none"
 if [[ -n "$WHOOPER_REPO_SETUP" ]]; then
-  setup="$("$WHOOPER_REPO_SETUP")" || die "$WHOOPER_REPO_SETUP failed"
+  # The script's error output still goes to this script's, once the script ends. When the script fails,
+  # it names the cause, such as Docker not running, and its last line ends the reason.
+  step=setup step_log="$work/setup.log"
+  setup_exit=0
+  setup="$("$WHOOPER_REPO_SETUP" 2> "$step_log")" || setup_exit=$?
+  cat "$step_log" >&2
+  ((setup_exit == 0)) ||
+    die "$WHOOPER_REPO_SETUP failed$(awk 'NF { line = $0 } END { if (line != "") print ": " line }' "$step_log")"
   set -a
   source "$work/setup.env"
   set +a
 fi
+step=review step_log=""
 
 untagged=""
 if [[ "$source" == slack_ask && "$tagged" == false ]]; then
@@ -233,8 +262,11 @@ wait "$agent_group" || agent_exit=$?
 kill "$watchdog_pid" 2>/dev/null || true
 watchdog_pid=""
 
+# Each check names its own step, which failure.json names the cause by.
+step=time-limit
 [[ ! -e "$work/timed-out" ]] ||
   die "the review run passed its $WHOOPER_REVIEW_TIMEOUT_MINUTES-minute limit; see $run/stderr.log and the transcript in $run"
+step=findings
 [[ -s "$run/findings.json" ]] ||
   die "the review run exited $agent_exit without findings; see $run/stderr.log and the transcript in $run"
 # A finding that does not fit the schema would break classify, post, and the summary later.

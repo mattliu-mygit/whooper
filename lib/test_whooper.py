@@ -16,8 +16,8 @@ from unittest import mock
 from zoneinfo import ZoneInfo
 
 from whooper import (REVIEW_WORDING, SETTINGS_SCHEMA, bot_list, check_schema, claude_shell_calls, classify, conversation,
-                     devin_shell_calls, fill, main, next_round, pr_link, poll_items, read_asks, read_drafts,
-                     read_schedule, select_work, skill_hashes, slack_posts, summary_text, write_record)
+                     devin_shell_calls, failure_cause, fill, main, next_round, pr_link, poll_items, read_asks,
+                     read_drafts, read_schedule, select_work, skill_hashes, slack_posts, summary_text, write_record)
 
 LOGIN = "sam-example"
 # Every test runs on this made-up config, never on the user's own.
@@ -62,6 +62,18 @@ notes = "notes.md"
 [repos."sample-org/plain-repo"]
 """
 ROOT = Path(__file__).resolve().parent.parent
+# What whooper-status and whooper-show print as the cause of a review that failed or waits: what
+# stopped it, and whether that stops every review or only its PR's.
+CAUSES = {
+    "docker_unavailable": {"id": "docker_unavailable", "summary": "Docker isn't running", "scope": "all"},
+    "setup_failed": {"id": "setup_failed", "summary": "The repo's setup script failed", "scope": "all"},
+    "gh_signed_out": {"id": "gh_signed_out", "summary": "gh isn't signed in to GitHub", "scope": "all"},
+    "repo_not_configured": {"id": "repo_not_configured", "summary": "Whooper isn't set up for this repo", "scope": "pr"},
+    "agent_no_findings": {"id": "agent_no_findings", "summary": "The review agent left no usable findings",
+                          "scope": "pr"},
+    "time_limit": {"id": "time_limit", "summary": "The review ran past its time limit", "scope": "pr"},
+    "unknown": {"id": "unknown", "summary": "The review stopped unexpectedly", "scope": "pr"},
+}
 
 
 def setUpModule():
@@ -802,6 +814,65 @@ class ConversationTest(unittest.TestCase):
         pr["reviews"]["totalCount"] = 101
         with self.assertRaises(ValueError):
             conversation(pr)
+
+
+class FailureCauseTest(unittest.TestCase):
+    """failure_cause, which names what stopped a review from the step of bin/whooper-review that failed
+    and that step's error output, on output the real commands print."""
+
+    def test_a_setup_script_that_cannot_reach_docker_stops_every_review(self):
+        for output in [
+            # OrbStack with a newer docker CLI, after a warning of the script's own.
+            "! You are not logged in to FloxHub. Run 'flox auth login' to log in.\n"
+            "failed to connect to the docker API at unix:///Users/sam/.orbstack/run/docker.sock; check if the path is"
+            " correct and if the daemon is running: dial unix /Users/sam/.orbstack/run/docker.sock: connect: no such"
+            " file or directory\n",
+            # Docker Desktop, from docker run, and colima.
+            "docker: Cannot connect to the Docker daemon at unix:///Users/sam/.docker/run/docker.sock. Is the docker"
+            " daemon running?\nRun 'docker run --help' for more information\n",
+            "Cannot connect to the Docker daemon at unix:///Users/sam/.colima/default/docker.sock. Is the docker daemon"
+            " running?\n",
+        ]:
+            with self.subTest(output):
+                self.assertEqual(failure_cause("setup", output), CAUSES["docker_unavailable"])
+
+    def test_any_other_setup_failure_stops_every_review_too(self):
+        for output in ["", "make: *** [migrate] Error 1\n", "docker: Error response from daemon: Conflict. The container"
+                       ' name "/whooper-postgres" is already in use.\n']:
+            with self.subTest(output):
+                self.assertEqual(failure_cause("setup", output), CAUSES["setup_failed"])
+
+    def test_a_fetch_github_refuses_for_want_of_a_login_stops_every_review(self):
+        for output in [
+            # git with gh as its credential helper, signed out, and no terminal to ask on.
+            "fatal: could not read Username for 'https://github.com': terminal prompts disabled\n",
+            "fatal: could not read Username for 'https://github.com': Device not configured\n",
+            # git with a token GitHub no longer takes.
+            "remote: Invalid username or token. Password authentication is not supported for Git operations.\n"
+            "fatal: Authentication failed for 'https://github.com/example-org/example-repo.git/'\n",
+            # gh itself.
+            "To get started with GitHub CLI, please run:  gh auth login\n"
+            "Alternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token.\n",
+            "HTTP 401: Bad credentials (https://api.github.com/graphql)\nTry authenticating with:  gh auth login\n",
+        ]:
+            with self.subTest(output):
+                self.assertEqual(failure_cause("fetch", output), CAUSES["gh_signed_out"])
+
+    def test_any_other_fetch_failure_is_unknown(self):
+        for output in ["fatal: couldn't find remote ref no-such-branch\n",
+                       "fatal: unable to access 'https://github.com/example-org/example-repo.git/': Could not resolve"
+                       " host: github.com\n"]:
+            with self.subTest(output):
+                self.assertEqual(failure_cause("fetch", output), CAUSES["unknown"])
+
+    def test_the_other_steps_name_their_cause_whatever_they_printed(self):
+        for step, cause in [("clone", "repo_not_configured"), ("time-limit", "time_limit"),
+                            ("findings", "agent_no_findings"), ("prepare", "unknown"), ("review", "unknown"),
+                            ("interrupted", "unknown"), (None, "unknown")]:
+            with self.subTest(step):
+                # Docker's and gh's messages count only for the steps that run them.
+                self.assertEqual(failure_cause(step, "Cannot connect to the Docker daemon. gh auth login"),
+                                 CAUSES[cause])
 
 
 def tool_call(tool_use_id, name, output, command="", is_error=False, subagent=None):
@@ -1909,6 +1980,16 @@ class RunTest(unittest.TestCase):
                                     "base_ref": "main", "source": "github_request", "slack": None, "reason": "r"}))
         return env, item, merge_base
 
+    def setup_script(self, body):
+        """Names setup.sh, which runs body, a few lines of sh, as sample-org/plain-repo's setup script in
+        the config, and returns its path."""
+        config = Path(self.env["WHOOPER_CONFIG"])
+        table = '[repos."sample-org/plain-repo"]\n'
+        if f'{table}setup = "setup.sh"\n' not in config.read_text():
+            config.write_text(config.read_text().replace(table, f'{table}setup = "setup.sh"\n'))
+        self.script(config.parent / "setup.sh", body)
+        return config.parent / "setup.sh"
+
     def fake_claude(self, review):
         """Has claude run review, a line of sh, in a review run, which alone passes --json-schema, and
         answer an ask run with "It stopped."."""
@@ -2104,6 +2185,7 @@ class RunTest(unittest.TestCase):
         self.assertIn(f"whooper-review: {reason}\n", result.stderr)
         # The cleanup keeps die's reason rather than writing its own fixed one.
         self.assertEqual((run / "failure.txt").read_text(), f"{reason}\n")
+        self.assertEqual(json.loads((run / "failure.json").read_text()), CAUSES["agent_no_findings"])
         ask = self.command("whooper-ask", run.name, "Why did this review fail?", env=env)
         self.assertEqual((ask.returncode, ask.stdout), (0, "It stopped.\n"), ask.stderr)
         prompt = (run / "asks" / "1.prompt.md").read_text()
@@ -2124,6 +2206,7 @@ class RunTest(unittest.TestCase):
         review.wait(timeout=30)
         [run] = (self.state / "runs").iterdir()
         self.assertEqual((review.returncode, self.read(run / "failure.txt")), (130, "the review was interrupted\n"))
+        self.assertEqual(json.loads((run / "failure.json").read_text()), CAUSES["unknown"])
 
     def test_a_review_stopped_by_a_failed_command_saves_a_fixed_reason(self):
         env, item, _ = self.pull_request()
@@ -2136,6 +2219,62 @@ class RunTest(unittest.TestCase):
         self.assertIn("couldn't find remote ref no-such-branch", result.stderr)
         self.assertEqual(self.read(run / "failure.txt"),
                          "the review stopped at an unexpected error; see whooper-review's error output\n")
+        self.assertEqual(json.loads((run / "failure.json").read_text()), CAUSES["unknown"])
+
+    def test_a_fetch_github_refuses_for_want_of_a_login_names_that_cause(self):
+        env, item, _ = self.pull_request()
+        # A transport of git's stands in for GitHub refusing the fetch, as it does when gh, git's
+        # credential helper, is signed out.
+        self.script(self.fakes / "git-remote-whoopertest",
+                    "echo \"fatal: could not read Username for 'https://github.com': terminal prompts disabled\" >&2\n"
+                    "exit 128")
+        clone = Path(self.tmp.name) / "cache" / "whooper" / "repos" / "sample-org-plain-repo"
+        subprocess.run(["git", "-C", str(clone), "remote", "set-url", "origin", "whoopertest::github"], env=env,
+                       check=True)
+        result = self.command("whooper-review", str(item), "--dry-run", env=env)
+        [run] = (self.state / "runs").iterdir()
+        # git's message still goes to whooper-review's error output, where failure.txt points.
+        self.assertEqual(result.returncode, 128)
+        self.assertIn("fatal: could not read Username for 'https://github.com'", result.stderr)
+        self.assertEqual(self.read(run / "failure.txt"),
+                         "the review stopped at an unexpected error; see whooper-review's error output\n")
+        self.assertEqual(json.loads((run / "failure.json").read_text()), CAUSES["gh_signed_out"])
+
+    def test_a_setup_script_that_cannot_reach_docker_stops_the_review_and_names_that_cause(self):
+        env, item, _ = self.pull_request()
+        line = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"
+        setup = self.setup_script(f"echo 'Starting PostgreSQL' >&2\necho '{line}' >&2\necho\nexit 1")
+        result = self.command("whooper-review", str(item), "--dry-run", env=env)
+        [run] = (self.state / "runs").iterdir()
+        # The script's error output still goes to whooper-review's, and failure.txt adds its last line.
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"Starting PostgreSQL\n{line}\n", result.stderr)
+        self.assertEqual((run / "failure.txt").read_text(), f"{setup} failed: {line}\n")
+        self.assertEqual(json.loads((run / "failure.json").read_text()), CAUSES["docker_unavailable"])
+        # Any other failure of the script is setup_failed, and one that printed nothing gets the bare reason.
+        shutil.rmtree(run)
+        self.setup_script("exit 3")
+        self.assertEqual(self.command("whooper-review", str(item), "--dry-run", env=env).returncode, 1)
+        [run] = (self.state / "runs").iterdir()
+        self.assertEqual((run / "failure.txt").read_text(), f"{setup} failed\n")
+        self.assertEqual(json.loads((run / "failure.json").read_text()), CAUSES["setup_failed"])
+
+    def test_a_review_of_a_repo_without_a_clone_fails_and_names_that_cause(self):
+        # The config lists example-org/example-repo, and the cache holds no clone of it.
+        item = Path(self.tmp.name) / "item.json"
+        item.write_text(json.dumps({"kind": "first_review", "repo": "example-org/example-repo", "pr": 12,
+                                    "head_sha": "1" * 40, "base_ref": "main", "source": "github_request",
+                                    "slack": None, "reason": "r"}))
+        result = self.command("whooper-review", str(item), "--dry-run")
+        [run] = (self.state / "runs").iterdir()
+        clone = Path(self.tmp.name) / "cache" / "whooper" / "repos" / "example-org-example-repo"
+        reason = f"no clone of example-org/example-repo at {clone}; see README.md"
+        self.assertEqual((result.returncode, result.stderr), (1, f"whooper-review: {reason}\n"))
+        self.assertEqual((run / "failure.txt").read_text(), f"{reason}\n")
+        self.assertEqual(json.loads((run / "failure.json").read_text()), CAUSES["repo_not_configured"])
+        # Like any review that does not finish, it counts as a failure at its head.
+        record = self.state / "prs" / "example-org-example-repo-12" / f"{'1' * 40}.first_review.json"
+        self.assertEqual(json.loads(record.read_text())["failures"], 1)
 
     def test_a_repo_the_config_does_not_list_stops_the_review_with_the_configs_message(self):
         # whooper-select drops such an item, so only a review run by hand gets here.
@@ -3017,7 +3156,7 @@ class ReviewsTest(unittest.TestCase):
                 "url": f"https://github.com/example-org/example-repo/pull/{pr}", "started_at": self.local(started),
                 "ended_at": self.local(started + timedelta(minutes=20)), "outcome": "reviewed",
                 "verdict": "look_first", "skipped": False, "findings": 0, "submitted": None, "needs_you": True,
-                **fields}
+                "cause": None, **fields}
 
     def show(self, *args):
         return subprocess.run([str(ROOT / "bin" / "whooper-show"), *args], env=self.env, capture_output=True,
@@ -3062,9 +3201,9 @@ class ReviewsTest(unittest.TestCase):
                 "event": "APPROVE", "at": self.local(self.started(submitted) + timedelta(minutes=30))}),
             self.review(posting, verdict="approve_once_ci_passes", findings=1),
             self.review(skipped, skipped=True),
-            self.review(failed, outcome="failed", verdict=None,
+            self.review(failed, outcome="failed", verdict=None, cause=CAUSES["agent_no_findings"],
                         ended_at=self.local(self.started(failed) + timedelta(minutes=21))),
-            self.review(timed_out, outcome="failed", findings=1,
+            self.review(timed_out, outcome="failed", findings=1, cause=CAUSES["time_limit"],
                         ended_at=self.local(self.started(timed_out) + timedelta(minutes=45))),
             self.review(month),
         ])
@@ -3094,7 +3233,7 @@ class ReviewsTest(unittest.TestCase):
             self.review(current, **running),
             # The run the lock names is newer, so the earlier run of its PR no longer needs the user.
             self.review(earlier, needs_you=False),
-            self.review(killed, outcome="failed", verdict=None, ended_at=None),
+            self.review(killed, outcome="failed", verdict=None, ended_at=None, cause=CAUSES["unknown"]),
         ])
 
     def test_a_newer_run_of_a_pr_supersedes_its_older_runs(self):
@@ -3119,7 +3258,7 @@ class ReviewsTest(unittest.TestCase):
             self.review(newer),
             self.review(elsewhere, repo="sample-org/plain-repo", url="https://github.com/sample-org/plain-repo/pull/12"),
             self.review(older, findings=1, needs_you=False),
-            self.review(failed, outcome="failed", verdict=None, needs_you=False,
+            self.review(failed, outcome="failed", verdict=None, needs_you=False, cause=CAUSES["time_limit"],
                         ended_at=self.local(self.started(failed) + timedelta(minutes=45))),
         ])
 
@@ -3149,10 +3288,11 @@ class ReviewsTest(unittest.TestCase):
         (self.state / "runs" / "notes").mkdir()
         failed = {"outcome": "failed", "verdict": None}
         self.assertEqual(self.reviews(), [
-            *[self.review(run, **failed, repo=None, url=None, title=None,
+            *[self.review(run, **failed, repo=None, url=None, title=None, cause=CAUSES["unknown"],
                           ended_at=self.local(self.started(run) + timedelta(minutes=1))) for run in unreadable],
-            self.review(empty, **failed, ended_at=self.local(self.started(empty) + timedelta(minutes=21))),
-            self.review(unfit, **failed),
+            self.review(empty, **failed, cause=CAUSES["agent_no_findings"],
+                        ended_at=self.local(self.started(empty) + timedelta(minutes=21))),
+            self.review(unfit, **failed, cause=CAUSES["unknown"]),
         ])
 
     def test_status_and_show_take_the_title_and_author_from_github_json(self):
@@ -3175,6 +3315,42 @@ class ReviewsTest(unittest.TestCase):
         self.assertEqual([(s["title"], s["author"]) for s in shown],
                          [(self.TITLE, "alice")] + [(None, None)] * len(unread))
 
+    def test_status_and_show_name_what_stopped_each_failed_review(self):
+        # whooper-review saves the cause in failure.json beside failure.txt as it stops a review.
+        saved = self.make_run(timedelta(hours=1))
+        self.fetched(saved)
+        self.write(saved, "failure.txt", "/config/setup.sh failed: Cannot connect to the Docker daemon at"
+                   " unix:///var/run/docker.sock. Is the docker daemon running?\n", 2)
+        self.write(saved, "failure.json", CAUSES["docker_unavailable"], 2)
+        # Reviews from before failure.json get the cause that whooper-review's wording of failure.txt at
+        # each step names, and unknown for any other.
+        older = []
+        for hours, (text, cause) in enumerate([
+            ("the review run passed its 45-minute limit; see /state/runs/x/stderr.log and the transcript in"
+             " /state/runs/x\n", "time_limit"),
+            ("the review run exited 1 without findings; see /state/runs/x/stderr.log and the transcript in"
+             " /state/runs/x\n", "agent_no_findings"),
+            ("the review run's findings.json does not fit the schema\n", "agent_no_findings"),
+            ("/Users/sam/.config/whooper/setup.sh failed\n", "setup_failed"),
+            ("no clone of example-org/example-repo at /cache/repos/example-org-example-repo; see README.md\n",
+             "repo_not_configured"),
+            ("the review was interrupted\n", "unknown"),
+            ("the review stopped at an unexpected error; see whooper-review's error output\n", "unknown"),
+        ], start=2):
+            run = self.make_run(timedelta(hours=hours), pr=20 + hours)
+            self.fetched(run)
+            self.write(run, "failure.txt", text, 2)
+            older.append((run, cause))
+        # A failure.json cut short reads as missing, so failure.txt names the cause.
+        cut = self.make_run(timedelta(hours=10), pr=30)
+        self.fetched(cut)
+        self.write(cut, "failure.txt", "/config/setup.sh failed\n", 2)
+        self.write(cut, "failure.json", '{"id": "docker_unav', 2)
+        expected = {saved.name: CAUSES["docker_unavailable"], cut.name: CAUSES["setup_failed"],
+                    **{run.name: CAUSES[cause] for run, cause in older}}
+        self.assertEqual({r["run_id"]: r["cause"] for r in self.reviews()}, expected)
+        self.assertEqual({run_id: self.shown(self.state / "runs" / run_id)["cause"] for run_id in expected}, expected)
+
     def test_show_prints_a_finished_review(self):
         run = self.make_run(timedelta(hours=1))
         self.finish(run, findings=[finding(), self.NIT])
@@ -3186,7 +3362,7 @@ class ReviewsTest(unittest.TestCase):
             # The run is not safe to approve, so until the user changes anything the review only comments
             # and includes nothing.
             "drafts": {"event": "COMMENT", "message": "", "findings": {}},
-            "diff": self.DIFF, "failure": None, "asks": [], "submitted": None,
+            "diff": self.DIFF, "failure": None, "asks": [], "submitted": None, "cause": None,
         })
         drafts = subprocess.run([str(ROOT / "bin" / "whooper-draft"), run.name], env=self.env, capture_output=True,
                                 text=True, timeout=60)
@@ -3208,6 +3384,7 @@ class ReviewsTest(unittest.TestCase):
         self.assertEqual(self.shown(failed), {
             **nothing, "run_id": failed.name, "run": json.loads((failed / "run.json").read_text()),
             "title": self.TITLE, "author": "alice", "outcome": "failed", "diff": self.DIFF, "failure": reason,
+            "cause": CAUSES["time_limit"],
         })
         # A Devin review that wrote findings that fit before its time limit has them and whooper-draft's
         # drafts, though it failed.
@@ -3220,7 +3397,7 @@ class ReviewsTest(unittest.TestCase):
         self.write(stopped, "failure.txt", "the review stopped at an unexpected error\n", 1)
         self.assertEqual(self.shown(stopped), {
             **nothing, "run_id": stopped.name, "run": None, "title": None, "author": None, "outcome": "failed",
-            "diff": None, "failure": "the review stopped at an unexpected error\n",
+            "diff": None, "failure": "the review stopped at an unexpected error\n", "cause": CAUSES["unknown"],
         })
         # A Devin review that is still running may still change the findings.json it wrote, so it shows
         # no findings yet.
@@ -3231,6 +3408,7 @@ class ReviewsTest(unittest.TestCase):
         self.assertEqual(self.shown(running), {
             **nothing, "run_id": running.name, "run": json.loads((running / "run.json").read_text()),
             "title": self.TITLE, "author": "alice", "outcome": "running", "diff": self.DIFF, "failure": None,
+            "cause": None,
         })
 
     def test_show_prints_the_drafts_and_the_review_whooper_submit_posted(self):

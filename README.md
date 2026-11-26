@@ -154,6 +154,23 @@ writes `findings.json` itself and may still change it. Nothing records when a re
 end is when whooper-review saved `failure.txt`, or else when the run wrote `findings.json`, and a
 posted review's time is when whooper-submit wrote GitHub's answer to `submit.json`.
 
+A failed review's `cause` says what stopped it, as `id`, a short `summary`, and `scope`: `all` when
+the cause stops every review until you fix it, and `pr` when it stops only this PR's:
+
+| `id` | `summary` | `scope` | When |
+| --- | --- | --- | --- |
+| `docker_unavailable` | Docker isn't running | `all` | The repo's setup script could not reach Docker, such as `Cannot connect to the Docker daemon`. |
+| `setup_failed` | The repo's setup script failed | `all` | The setup script failed any other way. |
+| `gh_signed_out` | gh isn't signed in to GitHub | `all` | GitHub refused the fetch of the PR's commits for want of a login. |
+| `repo_not_configured` | Whooper isn't set up for this repo | `pr` | The cache has no clone of the repo. |
+| `agent_no_findings` | The review agent left no usable findings | `pr` | The agent ended without `findings.json`, or with findings that do not fit the schema. |
+| `time_limit` | The review ran past its time limit | `pr` | The run passed `[review] timeout_minutes`. |
+| `unknown` | The review stopped unexpectedly | `pr` | Anything else, such as an interrupt or another failed command. |
+
+whooper-review saves the cause in `failure.json` as it stops the review. A review from before then
+gets the cause its `failure.txt` names by the wording whooper-review gave each step, and `unknown`
+when it names none or the review has no `failure.txt`, as after a `kill -9`.
+
 ## Submit a review
 
 Each review run keeps the user's choices for its review in `drafts.json`: which findings' comments
@@ -349,10 +366,14 @@ the config with that agent's tool names and saved as `prompt.md` in the run dire
 `[review] timeout_minutes` is stopped, and when whooper-review exits it stops the run and every
 process the run started. When whooper-review stops a review for a reason it names, such as the time
 limit, a failed setup script, or findings that do not fit the schema, it saves that reason in the
-run directory as `failure.txt`. A review stopped any other way gets a fixed reason there:
+run directory as `failure.txt`; the reason a failed setup script gets ends with the last line the
+script printed on stderr. A review stopped any other way gets a fixed reason there:
 `the review was interrupted` after Ctrl-C or a `kill`, and, after a command that failed,
 `the review stopped at an unexpected error; see whooper-review's error output`, where the
-command's own message went.
+command's own message went. Beside it, `failure.json` names the cause, from the step the review
+stopped at and what that step printed on stderr ([See reviews](#see-reviews) lists the causes). A
+repo the config lists but the cache has no clone of fails the review once its run directory exists,
+so the failure shows in whooper-status.
 
 `agents/claude/review` runs `claude -p`, which returns the findings as structured output, and
 reports the run's cost in dollars, capped by `[agents.claude] budget_usd` when the config sets one. `agents/devin/review`
@@ -478,7 +499,8 @@ same way too.
   The transcript (`transcript.jsonl` for Claude, the ATIF export `transcript.json` for Devin, with
   `devin-config.json` and `stdout.log`) and `stderr.log` are the run, `findings.json` its result
   (`findings.invalid.json` when it did not fit the schema), `failure.txt` the reason whooper-review
-  gave when it stopped the run, `log.md` its evidence for each finding and the candidates it dropped,
+  gave when it stopped the run and `failure.json` its cause, `log.md` its evidence for each finding
+  and the candidates it dropped,
   `verdicts.json` whooper-classify's output, and `post.json` and `post-request.json` whooper-post's.
   `drafts.json` holds the user's choices for the review: `event` (`APPROVE` or `COMMENT`),
   `message`, and `findings`, which maps a finding ID to `included` and, once edited, `text`.

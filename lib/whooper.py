@@ -23,6 +23,7 @@ from the user's config file (config_path), never from this code. The bin/ script
                                                                                       prunes the recheck list
   whooper.py conversation <conversation.graphql result> [<as-of time>]             -> a run's github.json
   whooper.py record <data dir> <work-item.json> running|failed                     -> writes the PR record
+  whooper.py cause <run dir> <step> [<step's error output>]                         -> failure.json, the cause
   whooper.py retry <data dir> <run-id> <head now>                                  -> queues another review
   whooper.py classify <data dir> <run dir>                                         -> verdicts, digest, record
   whooper.py post <data dir> <run dir> <head now> <review comments.json>          -> post.json, digest, record
@@ -287,12 +288,86 @@ def read_object(path):
     return value if isinstance(value, dict) else None
 
 
+# What stops a review, by the cause's ID: a summary for Prompting Time, and whether the cause stops
+# every review ("all"), as Docker not running does for the setup scripts that start containers, or
+# only its PR's ("pr").
+CAUSES = {
+    "docker_unavailable": ("Docker isn't running", "all"),
+    "setup_failed": ("The repo's setup script failed", "all"),
+    "gh_signed_out": ("gh isn't signed in to GitHub", "all"),
+    "repo_not_configured": ("Whooper isn't set up for this repo", "pr"),
+    "agent_no_findings": ("The review agent left no usable findings", "pr"),
+    "time_limit": ("The review ran past its time limit", "pr"),
+    "unknown": ("The review stopped unexpectedly", "pr"),
+}
+# What the docker CLI prints when it cannot reach the Docker daemon: Docker Desktop's and colima's
+# "Cannot connect to the Docker daemon at unix://... Is the docker daemon running?", and newer
+# clients' "failed to connect to the docker API at unix://...", as with OrbStack.
+DOCKER_DOWN = re.compile(r"Cannot connect to the Docker daemon|failed to connect to the docker API"
+                         r"|Is the docker daemon running", re.IGNORECASE)
+# What git and gh print when the user's GitHub login is missing or no longer works: git's messages
+# when the credential helper, gh, gave no login and there is no terminal to ask on, or GitHub refused
+# the token, gh's advice to run gh auth login, and the API's Bad credentials.
+GH_SIGNED_OUT = re.compile(r"could not read Username for 'https://github\.com'|Invalid username or token"
+                           r"|Authentication failed for 'https://github\.com/|gh auth login|Bad credentials",
+                           re.IGNORECASE)
+# The cause of each step of whooper-review whose cause does not depend on what the step printed.
+STEP_CAUSES = {"clone": "repo_not_configured", "time-limit": "time_limit", "findings": "agent_no_findings"}
+
+
+def failure_cause(step, output=""):
+    """What stopped a review, as {id, summary, scope} (CAUSES), from step, the step of whooper-review
+    it stopped at, and output, that step's error output: the setup script's failure is
+    docker_unavailable when it could not reach Docker and setup_failed otherwise, and the fetch's
+    failure is gh_signed_out when GitHub refused it for want of a login. The checkout missing from the
+    cache, the time limit, and an agent that left no findings that fit name their own causes, and any
+    other step, such as an interrupt, is unknown."""
+    if step == "setup":
+        cause = "docker_unavailable" if DOCKER_DOWN.search(output) else "setup_failed"
+    elif step == "fetch":
+        cause = "gh_signed_out" if GH_SIGNED_OUT.search(output) else "unknown"
+    else:
+        cause = STEP_CAUSES.get(step, "unknown")
+    summary, scope = CAUSES[cause]
+    return {"id": cause, "summary": summary, "scope": scope}
+
+
+# How whooper-review worded the first line of failure.txt at each step it stops at with its own
+# reason, which names the step of a review from before it saved failure.json. The setup script's
+# reason, "<script> failed", now ends with the last line the script printed on stderr.
+FAILURE_TEXTS = (
+    ("clone", re.compile(r"^no clone of ")),
+    ("time-limit", re.compile(r"^the review run passed its \d+-minute limit")),
+    ("findings", re.compile(r"^the review run exited \S+ without findings|^the review run's findings\.json does not fit")),
+    ("setup", re.compile(r"^\S.* failed(: |$)")),
+)
+
+
+def read_cause(run, outcome):
+    """What kept the review in run from finishing, as failure_cause gives it, for a failed review, and
+    None for any other outcome: the cause whooper-review saved in failure.json as it stopped the
+    review. Without that file, as for a review from before whooper-review saved it, failure.txt names
+    the step by its wording (FAILURE_TEXTS), and its text is the step's output, so a review with
+    neither, as after a kill -9, is unknown."""
+    if outcome != "failed":
+        return None
+    saved = read_object(run / "failure.json") or {}
+    if isinstance(saved.get("id"), str) and isinstance(saved.get("summary"), str) and saved.get("scope") in ("all", "pr"):
+        return {key: saved[key] for key in ("id", "summary", "scope")}
+    try:
+        text = (run / "failure.txt").read_text(errors="replace")
+    except OSError:
+        text = ""
+    first = text.partition("\n")[0]
+    return failure_cause(next((step for step, wording in FAILURE_TEXTS if wording.search(first)), None), text)
+
+
 def read_review(run, running):
     """How the review in the run directory run went, as whooper-status and whooper-show report it:
-    run.json's work item, the outcome, the findings, and the review whooper-submit posted. running
-    holds the IDs of the runs a live whooper-review still runs (running_runs). A file that is
-    missing, empty, cut short, or does not fit reads as None, so a run directory Whooper cannot read
-    gives a failed review rather than an error.
+    run.json's work item, the outcome, the findings, the review whooper-submit posted, and for a
+    failed review, the cause (read_cause). running holds the IDs of the runs a live whooper-review
+    still runs (running_runs). A file that is missing, empty, cut short, or does not fit reads as
+    None, so a run directory Whooper cannot read gives a failed review rather than an error.
 
     The outcome is running while a live whooper-review runs the review; reviewed once the review ended
     with findings that fit FINDINGS_SCHEMA and without failure.txt, the reason whooper-review saves
@@ -313,7 +388,7 @@ def read_review(run, running):
         outcome = "reviewed" if result is not None and not (run / "failure.txt").exists() else "failed"
     submit = read_object(run / "submit.json")
     posted = submit if submit and submit.get("status") == "posted" else None
-    return read_object(run / "run.json"), outcome, result, posted
+    return read_object(run / "run.json"), outcome, result, posted, read_cause(run, outcome)
 
 
 def read_title_and_author(run):
@@ -350,7 +425,7 @@ def read_reviews(data, now):
     # matches only other runs without one.
     reviews, newer = [], set()
     for run, started, pr in runs:
-        item, outcome, result, submit = read_review(run, running)
+        item, outcome, result, submit, cause = read_review(run, running)
         title, _ = read_title_and_author(run)
         repo = item["repo"] if item else None
         # No file records when a review ended, so it ended when whooper-review saved failure.txt as it
@@ -372,6 +447,7 @@ def read_reviews(data, now):
             "submitted": {"event": submit["request"]["event"], "at": modified(run / "submit.json")}
                          if submit else None,
             "needs_you": (repo, pr) not in newer and outcome != "running" and submit is None,
+            "cause": cause,
         })
         newer.add((repo, pr))
     return reviews
@@ -417,7 +493,7 @@ def show_review(data, run_id):
     # A run ID names a directory right under runs, so a path such as ../x reads nothing outside it.
     if parse_run_id(run_id) is None or not run.is_dir():
         raise SystemExit(f"whooper-show: no run {run_id} in {data / 'runs'}")
-    item, outcome, result, submit = read_review(run, running_runs(data))
+    item, outcome, result, submit, cause = read_review(run, running_runs(data))
     title, author = read_title_and_author(run)
 
     def text(name):
@@ -442,6 +518,7 @@ def show_review(data, run_id):
         "failure": text("failure.txt"),
         "asks": [json.loads(path.read_text()) for path in ask_files(run)],
         "submitted": submit,
+        "cause": cause,
     }
 
 
@@ -1559,6 +1636,15 @@ def main(command, *args):
     elif command == "record":
         data, item, status = args
         write_record(Path(data) / "prs", load(item), status, datetime.now(timezone.utc))
+    elif command == "cause":
+        # whooper-review writes failure.txt first, so a reader that comes between the two still finds
+        # the review failed, and names its cause from failure.txt meanwhile.
+        run, step, *output = args
+        try:
+            text = Path(output[0]).read_text(errors="replace") if output else ""
+        except FileNotFoundError:
+            text = ""
+        write_file(Path(run) / "failure.json", json.dumps(failure_cause(step, text)))
     elif command == "retry":
         data, run_id, head_now = args
         print(retry(Path(data), run_id, head_now, datetime.now(timezone.utc)))
