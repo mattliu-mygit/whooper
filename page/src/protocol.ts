@@ -1,45 +1,41 @@
-// The messages between Whooper's page and the program that shows it, Prompting Time, which hosts the
-// page in a sandboxed iframe (sandbox="allow-scripts"). The page reaches nothing else: no network, no
-// Tauri. Every message is a JSON object with `version`, the number of this message format, and `type`.
-// Prompting Time drops a message that does not fit, and so does the page.
+// The messages between Whooper's page and the program that shows it, Prompting Time, page protocol
+// 2, which prompting-time-plugin.json names as page.protocol. Prompting Time hosts the page in an
+// iframe sandboxed to scripts only (sandbox="allow-scripts"), so the page reaches nothing else: no
+// network, no Tauri, no local server. Every message is a JSON object with `version` 2, `type`, and
+// only the fields its type lists. Prompting Time drops a message that does not fit, and so does the
+// page.
 //
-// Page -> host: requests. Each carries an `id` that the host's answer carries back as `reply_to`.
-//   ready                               The page listens. The host answers with status, and sends the
-//                                       review the user opened, if any.
-//   open-review {run_id}                The host answers with review, read from the run's directory:
-//                                       run.json's repo and PR, github.json's title and author,
-//                                       findings.json, diff.patch, and the drafts
-//                                       `bin/whooper-draft <run_id>` prints, and from
-//                                       `bin/whooper-show <run_id> --json`, the overview, the commits
-//                                       since the review, the files that change with the PR's, how the
-//                                       changed code connects, the changed Go lines no test ran, and the
-//                                       example inputs' results, which the host may leave out.
-//   change-draft {run_id, change}       The host runs `bin/whooper-draft <run_id> <op> [<finding>] [<text>]`
-//                                       and answers with drafts, the JSON it prints.
-//   submit {run_id}                     The host runs `bin/whooper-submit <run_id> --print`, shows the
-//                                       request it wrote in its confirmation (the manifest's submit
-//                                       action has confirm: true), and only after the user confirms runs
-//                                       it again with `--expect <fingerprint>`. It answers with
-//                                       submit-result.
-//   ask {run_id, question, finding}     The host runs `bin/whooper-ask <run_id> <question> [--finding <id>]`
-//                                       and answers with answer.
-// Host -> page: answers, with reply_to, and updates, without it.
-//   status {status, queue}              `bin/whooper-status --json`, and the reviews in Whooper's queue.
-//                                       The host may leave queue out.
-//   review {review}                     One review run, as above.
-//   drafts {run_id, drafts}             Also sent unasked when the run's drafts.json changes, such as
-//                                       after a whooper-draft from a terminal.
-//   submit-result {run_id, posted, message}
-//                                       posted is false when the user cancelled the confirmation.
-//   answer {run_id, finding, question, answer}
-//   error {message}                     The request failed, with Whooper's message, such as
-//                                       whooper-draft's or whooper-submit's refusal.
+// Page -> host:
+//   ready                      The page listens. The host then sends the route the user opened, if any.
+//   call {id, action, args}    Runs one of the manifest's actions with args after the action's own
+//                              command. The host answers with result or error, with the call's id as
+//                              reply_to. Prompting Time runs only an action the manifest declares, and
+//                              one marked confirm only after the user confirms it: it runs the command
+//                              with --print, shows what it printed, and runs it again with --expect
+//                              <fingerprint>, so the page never passes either flag.
+// Host -> page:
+//   result {reply_to, json}    What the action printed: JSON when it printed JSON, else the text.
+//   error {reply_to?, message} The action failed or was refused, with its message, such as
+//                              whooper-draft's refusal, or the user cancelled the confirmation.
+//   open {route}               The user opened an item or blocker of whooper-status's status format 2,
+//                              from a row or Command-J: /reviews/<run-id> or /causes/<cause-id>.
+//   changed {files}            Files changed in Whooper's state folder, relative to it, such as
+//                              runs/<run-id>/drafts.json, or null when more changed than one event
+//                              lists. The page reads again with call.
 //
-// Whooper's page shows only the review Prompting Time opens, since Prompting Time's sidebar lists the
-// reviews and shows Whooper's status: it sends no open-review and shows neither part of status, so it
-// takes a status message with or without queue. Both stay in protocol 1.
+// The actions the page calls, each with the arguments it adds:
+//   status                     bin/whooper-status --json: the reviews, for the open review's header
+//   show-review <run-id>       bin/whooper-show --json <run-id>: the review the page shows
+//   draft <run-id> [<op> [<finding>] [<text>]]
+//                              bin/whooper-draft: changes the drafts and prints them
+//   ask <run-id> <question> [--finding <id>]
+//                              bin/whooper-ask: prints the answer
+//   submit <run-id>            bin/whooper-submit, after Prompting Time's confirmation
+//   skip <run-id> [--undo], remove <run-id> [--undo], retry <run-id>
+//                              bin/whooper-skip, bin/whooper-remove, bin/whooper-retry
+//   round                      bin/whooper-round: reviews the waiting PRs again now
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 /** What stopped a review: scope all for a cause that stops every review, such as Docker not running,
  * and pr for one that stops only its PR's. */
@@ -99,21 +95,37 @@ export interface WhooperStatus {
   }[];
 }
 
-/**
- * One review in Whooper's queue. decide: the review finished and waits for the user; reviewing: a
- * review runs now; failed: the review stopped without findings; submitted: the user submitted it.
- * The host builds these from the reviews `bin/whooper-status --json` lists (see README.md).
- */
-export interface QueueItem {
-  /** The review's run, null while no run directory holds its record yet. */
-  run_id: string | null;
-  /** <owner>/<repo>#<number> */
-  pr: string;
+/** One review in the reviews of `bin/whooper-status --json`. */
+export type StatusReview = WhooperStatus["reviews"][number];
+
+/** `bin/whooper-show --json <run-id>`, format version 1; its header describes each field. */
+export interface Shown {
+  version: 1;
+  run_id: string;
+  /** run.json, or null when whooper-review stopped before it wrote the file. */
+  run: { repo: string; pr: number; head_sha?: string } | null;
   title: string | null;
-  state: "decide" | "reviewing" | "failed" | "submitted";
-  verdict: Verdict | null;
-  /** How many findings the review has. */
-  findings: number;
+  author: string | null;
+  outcome: "running" | "waiting" | "reviewed" | "failed";
+  findings: FindingsResult | null;
+  safe_to_approve: boolean;
+  drafts: Drafts | null;
+  diff: string | null;
+  /** failure.txt, the reason whooper-review gave when it stopped the review. */
+  failure: string | null;
+  /** whooper-ask's answers, oldest first. */
+  asks: { question: string; finding: string | null; answer: string }[];
+  submitted: object | null;
+  cause: Cause | null;
+  head_sha: string | null;
+  skipped_by_user: boolean;
+  removed_by_user: boolean;
+  overview: Overview | null;
+  commits_since_review: CommitSinceReview[] | null;
+  co_change: CoChange[];
+  connections: Connections | null;
+  test_gaps: TestGaps | null;
+  examples: Examples | null;
 }
 
 export type Verdict = "approve_once_ci_passes" | "look_first";
@@ -267,6 +279,7 @@ export interface Examples {
   limits: string[];
 }
 
+/** A review that finished with findings, as the page draws it, from what whooper-show prints. */
 export interface Review {
   run_id: string;
   /** <owner>/<repo> */
@@ -279,18 +292,18 @@ export interface Review {
   drafts: Drafts;
   /** diff.patch: the PR's change, git diff <merge base> HEAD. */
   patch: string;
-  /** From whooper-show; the host may leave these out. The overview is null when the review wrote none
-   * that passed its checks, and the commits since are null when Whooper cannot tell. */
-  overview?: Overview | null;
-  commits_since_review?: CommitSinceReview[] | null;
+  /** The overview is null when the review wrote none that passed its checks, and the commits since are
+   * null when Whooper cannot tell. */
+  overview: Overview | null;
+  commits_since_review: CommitSinceReview[] | null;
   /** At most 5, highest ratio first. */
-  co_change?: CoChange[];
+  co_change: CoChange[];
   /** null when the review saved no connections.json. */
-  connections?: Connections | null;
+  connections: Connections | null;
   /** null when the PR changes no Go code or the review saved no test_gaps.json. */
-  test_gaps?: TestGaps | null;
+  test_gaps: TestGaps | null;
   /** null when the review run chose no examples. */
-  examples?: Examples | null;
+  examples: Examples | null;
 }
 
 /** One whooper-draft change: include <id>, leave-out <id>, text <id> <text>, approve, comment, or message <text>. */
@@ -300,91 +313,65 @@ export type DraftChange =
   | { op: "approve" | "comment" }
   | { op: "message"; text: string };
 
-export type PageRequest =
-  | { type: "ready" }
-  | { type: "open-review"; run_id: string }
-  | { type: "change-draft"; run_id: string; change: DraftChange }
-  | { type: "submit"; run_id: string }
-  | { type: "ask"; run_id: string; question: string; finding: string | null };
-
-export type PageMessage = PageRequest & { version: typeof PROTOCOL_VERSION; id: number };
+export type PageMessage =
+  | { version: typeof PROTOCOL_VERSION; type: "ready" }
+  | { version: typeof PROTOCOL_VERSION; type: "call"; id: number; action: string; args: string[] };
 
 export type HostUpdate =
-  | { type: "status"; status: WhooperStatus; queue?: QueueItem[] }
-  | { type: "review"; review: Review }
-  | { type: "drafts"; run_id: string; drafts: Drafts }
-  | { type: "submit-result"; run_id: string; posted: boolean; message: string }
-  | { type: "answer"; run_id: string; finding: string | null; question: string; answer: string }
-  | { type: "error"; message: string };
+  | { type: "result"; reply_to: number; json: unknown }
+  | { type: "error"; reply_to?: number; message: string }
+  | { type: "open"; route: string }
+  | { type: "changed"; files: string[] | null };
 
-export type HostMessage = HostUpdate & { version: typeof PROTOCOL_VERSION; reply_to?: number };
+export type HostMessage = HostUpdate & { version: typeof PROTOCOL_VERSION };
 
-type Shape = Record<string, "string" | "number" | "boolean" | "object" | "string|null">;
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
 
-function fits(value: Record<string, unknown>, shape: Shape): boolean {
-  return Object.entries(shape).every(([key, kind]) => {
-    const field = value[key];
-    if (kind === "string|null") return field === null || typeof field === "string";
-    if (kind === "object") return typeof field === "object" && field !== null;
-    return typeof field === kind;
-  });
+/** Whether message has exactly the keys required, plus any of optional. */
+function hasKeys(message: Record<string, unknown>, required: string[], optional: string[] = []): boolean {
+  const keys = Object.keys(message);
+  return required.every((key) => keys.includes(key)) && keys.every((key) => required.includes(key) || optional.includes(key));
 }
-
-function envelope(data: unknown): Record<string, unknown> | null {
-  if (typeof data !== "object" || data === null) return null;
-  const message = data as Record<string, unknown>;
-  return message.version === PROTOCOL_VERSION && typeof message.type === "string" ? message : null;
-}
-
-// The fields each host message must have, by type. The page trusts its host for the rest, such as
-// the inside of a review, which comes from Whooper's own files. A status message needs no queue,
-// which the page does not read and Prompting Time may leave out.
-const HOST_FIELDS: Record<HostUpdate["type"], Shape> = {
-  status: { status: "object" },
-  review: { review: "object" },
-  drafts: { run_id: "string", drafts: "object" },
-  "submit-result": { run_id: "string", posted: "boolean", message: "string" },
-  answer: { run_id: "string", finding: "string|null", question: "string", answer: "string" },
-  error: { message: "string" },
-};
 
 /** The host message in data, or null when data is not one: another version, an unknown type, or a
- * missing field. */
+ * field missing, extra, or of the wrong kind. */
 export function readHostMessage(data: unknown): HostMessage | null {
-  const message = envelope(data);
-  const shape = message && HOST_FIELDS[message.type as HostUpdate["type"]];
-  if (!message || !shape || !fits(message, shape)) return null;
-  if (message.reply_to !== undefined && typeof message.reply_to !== "number") return null;
-  return message as unknown as HostMessage;
+  if (!isRecord(data) || data.version !== PROTOCOL_VERSION) return null;
+  switch (data.type) {
+    case "result":
+      return hasKeys(data, ["version", "type", "reply_to", "json"]) && Number.isSafeInteger(data.reply_to) ? (data as HostMessage) : null;
+    case "error":
+      return hasKeys(data, ["version", "type", "message"], ["reply_to"]) &&
+        typeof data.message === "string" &&
+        (data.reply_to === undefined || Number.isSafeInteger(data.reply_to))
+        ? (data as HostMessage)
+        : null;
+    case "open":
+      return hasKeys(data, ["version", "type", "route"]) && typeof data.route === "string" && data.route.startsWith("/")
+        ? (data as HostMessage)
+        : null;
+    case "changed":
+      return hasKeys(data, ["version", "type", "files"]) &&
+        (data.files === null || (Array.isArray(data.files) && data.files.every((file) => typeof file === "string")))
+        ? (data as HostMessage)
+        : null;
+    default:
+      return null;
+  }
 }
 
-const CHANGE_FIELDS: Record<DraftChange["op"], Shape> = {
-  include: { finding: "string" },
-  "leave-out": { finding: "string" },
-  text: { finding: "string", text: "string" },
-  approve: {},
-  comment: {},
-  message: { text: "string" },
-};
-
-const PAGE_FIELDS: Record<PageRequest["type"], Shape> = {
-  ready: {},
-  "open-review": { run_id: "string" },
-  "change-draft": { run_id: "string", change: "object" },
-  submit: { run_id: "string" },
-  ask: { run_id: "string", question: "string", finding: "string|null" },
-};
-
-/** The page message in data, or null when data is not one. This is the check a host runs on what
- * the page sends before it runs anything. */
+/** The page message in data, or null when data is not one: the check Prompting Time runs on what the
+ * page sends before it runs anything, which the fake host runs too. */
 export function readPageMessage(data: unknown): PageMessage | null {
-  const message = envelope(data);
-  const shape = message && PAGE_FIELDS[message.type as PageRequest["type"]];
-  if (!message || !shape || typeof message.id !== "number" || !fits(message, shape)) return null;
-  if (message.type === "change-draft") {
-    const change = message.change as Record<string, unknown>;
-    const fields = CHANGE_FIELDS[change.op as DraftChange["op"]];
-    if (!fields || !fits(change, fields)) return null;
-  }
-  return message as unknown as PageMessage;
+  if (!isRecord(data) || data.version !== PROTOCOL_VERSION) return null;
+  if (data.type === "ready") return hasKeys(data, ["version", "type"]) ? (data as PageMessage) : null;
+  if (data.type !== "call" || !hasKeys(data, ["version", "type", "id", "action", "args"])) return null;
+  const fits =
+    Number.isSafeInteger(data.id) &&
+    typeof data.action === "string" &&
+    data.action !== "" &&
+    Array.isArray(data.args) &&
+    data.args.every((arg) => typeof arg === "string");
+  return fits ? (data as PageMessage) : null;
 }

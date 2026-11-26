@@ -1,14 +1,70 @@
-import { Show } from "solid-js";
+import { Match, Show, Switch } from "solid-js";
+import { CauseScreen, FailedReview, RunningReview } from "./FailedReview";
 import { ReviewScreen } from "./Review";
+import { ReviewHeader } from "./ReviewHeader";
 import type { PageStore } from "./store";
 
-/** The review Prompting Time opened, and nothing until it sends one: Prompting Time's sidebar lists
- * the reviews, so the page has no queue of its own. A review stays mounted while its run stays the
- * same, so a review message for the same run updates it in place. */
+/**
+ * The route Prompting Time opened, and nothing until it opens one: Prompting Time lists Whooper's
+ * reviews and blockers from whooper-status, so the page has no list of its own. A review shows its
+ * header, then its diff when it finished with findings, or the screen for a review that runs, waits,
+ * or failed; a cause that stops every review shows the reviews it holds back. Each review stays
+ * mounted while its run stays the same, so a new read of the same run updates it in place.
+ */
 export function App(props: { store: PageStore }) {
+  const store = props.store;
+  const review = () => {
+    const place = store.place();
+    return place?.kind === "review" ? place.runId : null;
+  };
+  const cause = () => {
+    const place = store.place();
+    return place?.kind === "cause" ? place.cause : null;
+  };
   return (
-    <Show when={props.store.state.review?.run_id} keyed>
-      {(_runId) => <ReviewScreen store={props.store} />}
-    </Show>
+    <Switch>
+      <Match when={review()} keyed>
+        {(runId: string) => (
+          <div class="w-page">
+            <ReviewHeader store={store} />
+            <div class="w-page-body">
+              <Show
+                when={store.state.shown?.run_id === runId ? store.state.shown : null}
+                fallback={
+                  <Show when={store.state.loadError} fallback={<p class="w-hint w-column" role="status">Reading the review…</p>}>
+                    {(error) => (
+                      <p class="w-error w-column" role="alert">
+                        {error()}
+                      </p>
+                    )}
+                  </Show>
+                }
+              >
+                {(shown) => (
+                  <Switch>
+                    <Match when={store.state.review?.run_id === runId}>
+                      <ReviewScreen store={store} />
+                    </Match>
+                    <Match when={shown().outcome === "running"}>
+                      <RunningReview shown={shown()} />
+                    </Match>
+                    <Match when={true}>
+                      <FailedReview store={store} shown={shown()} />
+                    </Match>
+                  </Switch>
+                )}
+              </Show>
+            </div>
+          </div>
+        )}
+      </Match>
+      <Match when={cause()} keyed>
+        {(id: string) => (
+          <div class="w-page-body">
+            <CauseScreen store={store} cause={id} />
+          </div>
+        )}
+      </Match>
+    </Switch>
   );
 }

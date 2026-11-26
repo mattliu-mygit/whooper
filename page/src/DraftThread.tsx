@@ -13,7 +13,7 @@ export function DraftThread(props: { store: PageStore; findingId: string }) {
   const store = props.store;
   const finding = createMemo(() => store.state.review?.findings.findings.find((f) => f.id === props.findingId));
   const choice = () => store.state.review?.drafts.findings[props.findingId];
-  const locked = () => store.state.submitted !== null;
+  const locked = () => store.locked();
   // While the host has not answered, Include shows the user's click.
   const [pendingInclude, setPendingInclude] = createSignal<boolean | null>(null);
   const included = () => pendingInclude() ?? choice()?.included ?? false;

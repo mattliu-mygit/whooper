@@ -300,3 +300,124 @@ ul {
 .w-submit-line {
   inline-size: 100%;
 }
+
+/* The page Prompting Time opens at a route: a review's header and body, or a cause's screen. */
+.w-page {
+  display: flex;
+  flex-direction: column;
+  block-size: 100%;
+}
+
+.w-page-body {
+  flex: 1;
+  min-block-size: 0;
+  overflow: auto;
+}
+
+.w-review-header {
+  display: grid;
+  gap: var(--s-space-4);
+  padding: var(--s-space-8) var(--s-space-12) 0;
+}
+
+.w-review-header-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-8);
+}
+
+.w-spacer {
+  flex: 1;
+}
+
+.w-versions {
+  border: 1px solid var(--s-border);
+  border-radius: var(--s-radius-sm);
+  background: var(--s-surface);
+  color: var(--s-text);
+  font: inherit;
+  font-size: var(--s-size-xs);
+}
+
+.w-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-space-8);
+  padding: var(--s-space-4) var(--s-space-8);
+  border: 1px solid var(--s-border);
+  border-radius: var(--s-radius-sm);
+  font-size: var(--s-size-xs);
+}
+
+/* A review that runs, waits, or failed, and a cause that stops every review. */
+.w-column {
+  display: grid;
+  gap: var(--s-space-8);
+  max-inline-size: 48rem;
+  margin: 0 auto;
+  padding: var(--s-space-12);
+}
+
+.w-column h1 {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-4);
+  font-size: var(--s-size-sm);
+  font-weight: var(--s-weight-medium);
+}
+
+.w-failed,
+.w-column > .w-card {
+  display: grid;
+  gap: var(--s-space-8);
+  padding: var(--s-space-8) var(--s-space-12);
+  font-size: var(--s-size-sm);
+}
+
+.w-failed h2,
+.w-column > .w-card h2 {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-4);
+  font-size: var(--s-size-sm);
+  font-weight: var(--s-weight-medium);
+}
+
+.w-log {
+  overflow: auto;
+  max-block-size: 16rem;
+  margin: 0;
+  padding: var(--s-space-8);
+  border-radius: var(--s-radius-sm);
+  background: var(--s-surface-sunken);
+  font-family: var(--s-font-mono);
+  font-size: var(--s-size-xs);
+  white-space: pre-wrap;
+}
+
+.w-answers {
+  display: grid;
+  gap: var(--s-space-8);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.w-cause-review {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s-space-8);
+  inline-size: 100%;
+  padding: var(--s-space-4);
+  border: 0;
+  border-radius: var(--s-radius-sm);
+  background: transparent;
+  color: var(--s-text);
+  font-size: var(--s-size-xs);
+  text-align: start;
+}
+
+.w-cause-review:hover {
+  background: var(--s-surface-elevated);
+}

@@ -1,29 +1,26 @@
 import * as fixtures from "./fixtures";
-import {
-  PROTOCOL_VERSION,
-  readPageMessage,
-  type DraftChange,
-  type Drafts,
-  type FindingsResult,
-  type HostMessage,
-  type HostUpdate,
-  type PageMessage,
-  type QueueItem,
-  type Review,
-} from "./protocol";
+import { PROTOCOL_VERSION, readPageMessage, type Drafts, type FindingsResult, type HostMessage, type HostUpdate, type PageMessage, type Shown } from "./protocol";
 
-// A stand-in for Prompting Time, for development (dev/index.html) and the page's tests. It answers
-// the page's messages from the invented reviews in fixtures.ts the way Whooper's commands would:
-// drafts change by whooper-draft's rules and refusals, a submit builds whooper-submit's request and
-// asks confirmSubmit first, and an ask answers at once. It reaches no Whooper, GitHub, or model.
+// A stand-in for Prompting Time, for development (dev/index.html) and the page's tests. It runs the
+// page's calls of the manifest's actions on the invented reviews in fixtures.ts the way Whooper's
+// commands would: drafts change by whooper-draft's rules and refusals, a submit builds
+// whooper-submit's request and asks confirmSubmit first, an ask answers at once, and skip, remove,
+// and retry change what status and show-review print, after which it says which files changed. It
+// refuses an action the manifest does not declare, as Prompting Time does. It reaches no Whooper,
+// GitHub, or model.
 
 export interface FakeHostOptions {
   /** Prompting Time's confirmation: gets the text it would show for the request whooper-submit
    * --print wrote, and returns whether the user confirmed. Without it every submit is cancelled. */
   confirmSubmit?: (text: string) => boolean | Promise<boolean>;
-  /** A run whose review the host sends after ready, as when the user opened it in Prompting Time. */
+  /** The route the host opens once the page is ready, as when the user opened a row in Prompting Time. */
   openOnReady?: string;
 }
+
+/** The actions prompting-time-plugin.json declares. */
+const DECLARED = new Set([
+  "status", "round", "pause", "resume", "get-settings", "save-settings", "show-review", "draft", "ask", "skip", "remove", "retry", "submit",
+]);
 
 /** Whooper's comment marker and the message of an approval left without one (lib/whooper.py). */
 const VETTED = "AI comment (vetted)";
@@ -55,52 +52,98 @@ function firstDrafts(result: FindingsResult): Drafts {
 export function createFakeHost(send: (message: HostMessage) => void, options: FakeHostOptions = {}) {
   const records = new Map(fixtures.reviewRecords().map((record) => [record.run_id, record]));
   const drafts = new Map<string, Drafts>();
-  const queue: QueueItem[] = fixtures.queue();
-  const submitted = new Set<string>();
+  const submitted = new Map<string, string>();
+  const skipped = new Set<string>();
+  const removed = new Set<string>();
   /** Every message the page sent that fits the protocol, in order. */
   const received: PageMessage[] = [];
 
-  const reply = (to: number | undefined, update: HostUpdate) =>
-    send({ ...update, version: PROTOCOL_VERSION, ...(to === undefined ? {} : { reply_to: to }) });
+  const post = (update: HostUpdate) => send({ ...update, version: PROTOCOL_VERSION });
 
-  function record(runId: string) {
+  function record(runId: string, command = "whooper-show") {
     const found = records.get(runId);
-    if (!found) throw new Error(`whooper-draft: no run ${runId} in the state folder's runs`);
+    if (!found) throw new Error(`${command}: no run ${runId} in the state folder's runs`);
     return found;
   }
 
-  function draftsOf(runId: string): Drafts {
-    if (!drafts.has(runId)) drafts.set(runId, structuredClone(record(runId).drafts ?? firstDrafts(record(runId).findings)));
+  function findingsOf(runId: string, command: string): FindingsResult {
+    const findings = record(runId, command).findings;
+    if (!findings) throw new Error(`${command}: ${runId} has no findings.json, so its review did not finish`);
+    return findings;
+  }
+
+  function draftsOf(runId: string, command = "whooper-draft"): Drafts {
+    if (!drafts.has(runId)) drafts.set(runId, structuredClone(record(runId, command).drafts ?? firstDrafts(findingsOf(runId, command))));
     return drafts.get(runId)!;
   }
 
-  function review(runId: string): Review {
-    const { drafts: _saved, ...rest } = structuredClone(record(runId));
-    return { ...rest, drafts: structuredClone(draftsOf(runId)) };
+  /** What bin/whooper-status --json prints, with the user's marks and submissions since. */
+  function status() {
+    const base = fixtures.status();
+    for (const review of base.reviews) {
+      review.skipped_by_user = skipped.has(review.run_id);
+      review.removed_by_user = removed.has(review.run_id);
+      if (submitted.has(review.run_id)) review.submitted = { event: draftsOf(review.run_id).event, at: "2031-07-27T15:40:00-07:00" };
+      if (review.skipped_by_user || review.removed_by_user || review.submitted) review.needs_you = false;
+    }
+    return base;
   }
 
-  /** change_drafts in lib/whooper.py: one change, with its refusals. */
-  function changeDrafts(runId: string, change: DraftChange): Drafts {
-    if (submitted.has(runId)) throw new Error(`whooper-draft: ${runId} was already submitted; see its submit.json`);
-    if (change.op === "text" && !change.text.trim())
-      throw new Error("whooper-draft: the text is empty; to drop the comment, leave the finding out");
+  /** What bin/whooper-show --json <run-id> prints. */
+  function show(runId: string): Shown {
+    const r = record(runId);
+    return {
+      version: 1,
+      run_id: runId,
+      run: { repo: r.repo, pr: r.pr, head_sha: r.head_sha },
+      title: r.title,
+      author: r.author,
+      outcome: r.outcome,
+      findings: structuredClone(r.findings),
+      safe_to_approve: r.outcome === "reviewed" && r.findings !== null && concerns(r.findings).length === 0,
+      drafts: r.findings ? structuredClone(draftsOf(runId)) : null,
+      diff: r.patch,
+      failure: r.failure,
+      asks: structuredClone(r.asks),
+      submitted: submitted.has(runId) ? { status: "posted" } : null,
+      cause: r.cause,
+      head_sha: r.head_sha,
+      skipped_by_user: skipped.has(runId),
+      removed_by_user: removed.has(runId),
+      overview: null,
+      commits_since_review: null,
+      co_change: [],
+      connections: null,
+      test_gaps: null,
+      examples: null,
+    };
+  }
+
+  /** change_drafts in lib/whooper.py: one change, with its refusals; no change prints the drafts. */
+  function draft(runId: string, op?: string, ...rest: string[]): Drafts {
     const current = draftsOf(runId);
-    if (change.op === "include" || change.op === "leave-out" || change.op === "text") {
-      const ids = record(runId).findings.findings.map((f) => f.id);
-      if (!ids.includes(change.finding))
-        throw new Error(`whooper-draft: the run has no finding ${change.finding}; its findings are ${ids.join(", ") || "none"}`);
-      const choice = (current.findings[change.finding] ??= { included: false });
-      if (change.op === "text") choice.text = change.text;
-      else choice.included = change.op === "include";
-    } else if (change.op === "message") current.message = change.text;
-    else current.event = change.op === "approve" ? "APPROVE" : "COMMENT";
+    if (op === undefined) return structuredClone(current);
+    if (submitted.has(runId)) throw new Error(`whooper-draft: ${runId} was already submitted; see its submit.json`);
+    if (op === "include" || op === "leave-out" || op === "text") {
+      const [finding, text] = rest;
+      if (op === "text" && !text?.trim()) throw new Error("whooper-draft: the text is empty; to drop the comment, leave the finding out");
+      const ids = findingsOf(runId, "whooper-draft").findings.map((f) => f.id);
+      if (!ids.includes(finding)) throw new Error(`whooper-draft: the run has no finding ${finding}; its findings are ${ids.join(", ") || "none"}`);
+      const choice = (current.findings[finding] ??= { included: false });
+      if (op === "text") choice.text = text;
+      else choice.included = op === "include";
+    } else if (op === "message") current.message = rest[0] ?? "";
+    else if (op === "approve" || op === "comment") current.event = op === "approve" ? "APPROVE" : "COMMENT";
+    else throw new Error(`whooper-draft: unknown change ${op}`);
+    changed([`runs/${runId}/drafts.json`]);
     return structuredClone(current);
   }
 
   /** whooper-submit --print's request, and the text Prompting Time's confirmation would show for it. */
   function submitRequest(runId: string): string {
     if (submitted.has(runId)) throw new Error(`whooper-submit: ${runId} was already submitted; see its submit.json`);
-    const { findings, repo, pr } = record(runId);
+    const { repo, pr } = record(runId, "whooper-submit");
+    const findings = findingsOf(runId, "whooper-submit");
     const choices = draftsOf(runId);
     const comments = findings.findings
       .filter((f) => choices.findings[f.id]?.included)
@@ -124,67 +167,97 @@ export function createFakeHost(send: (message: HostMessage) => void, options: Fa
     ].join("\n");
   }
 
-  async function handle(message: PageMessage) {
-    switch (message.type) {
-      case "ready":
-        reply(message.id, { type: "status", status: fixtures.status(), queue: structuredClone(queue) });
-        if (options.openOnReady) reply(undefined, { type: "review", review: review(options.openOnReady) });
-        break;
-      case "open-review":
-        reply(message.id, { type: "review", review: review(message.run_id) });
-        break;
-      case "change-draft":
-        reply(message.id, { type: "drafts", run_id: message.run_id, drafts: changeDrafts(message.run_id, message.change) });
-        break;
+  /** Marks or unmarks a run as whooper-skip and whooper-remove do, and prints what it did. */
+  function mark(marks: Set<string>, command: string, word: string, runId: string, ...flags: string[]): string {
+    const r = record(runId, command);
+    if (r.outcome === "running") throw new Error(`${command}: the review is still running; ${command.slice(8)} it once it ends`);
+    const name = `${runId} (${r.repo}#${r.pr})`;
+    if (flags.includes("--undo")) {
+      if (!marks.delete(runId)) return `${name} is not marked as ${word}`;
+      changed([`runs/${runId}/${word}-by-user`]);
+      return `unmarked ${name} as ${word}`;
+    }
+    if (marks.has(runId)) return `${name} is already marked as ${word}`;
+    marks.add(runId);
+    changed([`runs/${runId}/${word}-by-user`]);
+    return `marked ${name} as ${word}`;
+  }
+
+  function changed(files: string[] | null) {
+    // As Prompting Time's watch does, it tells the page after the command that wrote the files ends.
+    queueMicrotask(() => post({ type: "changed", files }));
+  }
+
+  async function run(action: string, args: string[]): Promise<unknown> {
+    if (!DECLARED.has(action)) throw new Error(`Whooper declares no ${action} action.`);
+    const [runId, ...rest] = args;
+    switch (action) {
+      case "status":
+        return status();
+      case "show-review":
+        return show(runId);
+      case "draft":
+        return draft(runId, ...rest);
       case "submit": {
-        const text = submitRequest(message.run_id);
-        if (!(await options.confirmSubmit?.(text))) {
-          reply(message.id, { type: "submit-result", run_id: message.run_id, posted: false, message: "cancelled" });
-          break;
-        }
-        const { repo, pr } = record(message.run_id);
-        submitted.add(message.run_id);
-        for (const item of queue) if (item.run_id === message.run_id) item.state = "submitted";
-        reply(message.id, {
-          type: "submit-result",
-          run_id: message.run_id,
-          posted: true,
-          message: `posted the review: https://github.com/${repo}/pull/${pr}#pullrequestreview-1`,
-        });
-        reply(undefined, { type: "status", status: fixtures.status(), queue: structuredClone(queue) });
-        break;
+        if (args.some((arg) => arg.startsWith("--print") || arg.startsWith("--expect")))
+          throw new Error("submit asks to confirm first, so Prompting Time adds --print and --expect itself.");
+        const text = submitRequest(runId);
+        if (!(await options.confirmSubmit?.(text))) throw new Error("Nothing ran: the confirmation was cancelled.");
+        const { repo, pr } = record(runId);
+        const printed = `posted the review: https://github.com/${repo}/pull/${pr}#pullrequestreview-1`;
+        submitted.set(runId, printed);
+        changed([`runs/${runId}/submit.json`]);
+        return `${printed}\n`;
       }
       case "ask": {
-        const finding = record(message.run_id).findings.findings.find((f) => f.id === message.finding);
-        const about = finding ? `finding ${finding.id}, ${finding.title}` : "the review";
-        reply(message.id, {
-          type: "answer",
-          run_id: message.run_id,
-          finding: message.finding,
-          question: message.question,
-          answer: `The fake host stands in for whooper-ask here, which would run the review's agent on ${about} and answer from the review's record.`,
-        });
-        break;
+        const [question, flag, finding] = rest;
+        const found = flag === "--finding" ? findingsOf(runId, "whooper-ask").findings.find((f) => f.id === finding) : undefined;
+        const about = found ? `finding ${found.id}, ${found.title}` : "the review";
+        return `The fake host stands in for whooper-ask here, which would run the review's agent on ${about} and answer from the review's record, about: ${question}\n`;
       }
+      case "skip":
+        return `${mark(skipped, "whooper-skip", "skipped", runId, ...rest)}\n`;
+      case "remove":
+        return `${mark(removed, "whooper-remove", "removed", runId, ...rest)}\n`;
+      case "retry": {
+        const r = record(runId, "whooper-retry");
+        removed.delete(runId);
+        changed([`rechecks/${r.repo.replace("/", "-")}-${r.pr}.json`]);
+        return `queued another review of ${r.repo}#${r.pr} at ${r.head_sha} for the next round; bin/whooper-round runs that round now\n`;
+      }
+      case "round":
+        changed(null);
+        return "";
+      default:
+        throw new Error(`the fake host does not run ${action}`);
     }
   }
 
   return {
     received,
+    /** The calls of action the page made, each with its arguments. */
+    calls: (action: string) => received.flatMap((m) => (m.type === "call" && m.action === action ? [m.args] : [])),
     /** Takes one message from the page. One that does not fit the protocol is dropped, as Prompting Time drops it. */
     receive(data: unknown) {
       const message = readPageMessage(data);
       if (!message) return;
       received.push(message);
-      handle(message).catch((error: Error) => reply(message.id, { type: "error", message: error.message }));
+      if (message.type === "ready") {
+        if (options.openOnReady) post({ type: "open", route: options.openOnReady });
+        return;
+      }
+      run(message.action, message.args).then(
+        (json) => post({ type: "result", reply_to: message.id, json }),
+        (error: Error) => post({ type: "error", reply_to: message.id, message: error.message }),
+      );
     },
-    /** Sends the run's review again, as the host does when the run's files change. */
-    resendReview(runId: string) {
-      reply(undefined, { type: "review", review: review(runId) });
-    },
-    /** Changes the run's drafts as whooper-draft from a terminal would, and tells the page. */
-    changeFromElsewhere(runId: string, change: DraftChange) {
-      reply(undefined, { type: "drafts", run_id: runId, drafts: changeDrafts(runId, change) });
+    /** Opens a route, as when the user opens a row or Command-J in Prompting Time. */
+    open: (route: string) => post({ type: "open", route }),
+    /** Says files changed, as Prompting Time's watch does, such as after a whooper-show's files changed. */
+    changed: (files: string[] | null) => post({ type: "changed", files }),
+    /** Changes the run's drafts as whooper-draft from a terminal would, and says drafts.json changed. */
+    changeFromElsewhere(runId: string, op: string, ...rest: string[]) {
+      draft(runId, op, ...rest);
     },
   };
 }

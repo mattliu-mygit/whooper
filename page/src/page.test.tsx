@@ -14,16 +14,20 @@ const fireEvent = {
 // Pierre loads Shiki and the Go grammar before it draws the threads.
 const SLOW = { timeout: 15_000 };
 
+const OPEN = { openOnReady: `/reviews/${RUN}` };
+
 const thread = (place: string) => screen.findByRole("region", { name: `Draft comment on ${place}` }, SLOW);
-const changes = (host: ReturnType<typeof renderWithFakeHost>) =>
-  host.received.filter((m) => m.type === "change-draft").map((m) => (m.type === "change-draft" ? m.change : null));
+// The changes the page asked whooper-draft for; a call with the run ID alone only reads the drafts.
+const changes = (host: ReturnType<typeof renderWithFakeHost>) => host.calls("draft").filter((args) => args.length > 1);
 
 describe("Whooper's page with the fake host", () => {
-  it("shows the review Prompting Time opened, with no queue of its own", async () => {
-    const host = renderWithFakeHost({ openOnReady: RUN });
+  it("shows the review Prompting Time opened, read with calls of Whooper's actions", async () => {
+    const host = renderWithFakeHost(OPEN);
     expect(await screen.findByRole("heading", { name: "refactor(cache): separate the cache configuration" })).toBeInTheDocument();
-    // Prompting Time's sidebar lists the reviews, so the page asks for no other review and has no way to one.
-    expect(host.received.map((m) => m.type)).toEqual(["ready"]);
+    // Prompting Time lists the reviews, so the page reads only the status and the review it opened.
+    expect(host.received.filter((m) => m.type === "ready")).toHaveLength(1);
+    expect(host.calls("show-review")).toEqual([[RUN]]);
+    expect(host.calls("status")).toEqual([[]]);
     expect(screen.queryByRole("button", { name: "Back to the queue" })).not.toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "Needs you" })).not.toBeInTheDocument();
     // The first file with a finding shows, with each finding under its line.
@@ -31,10 +35,9 @@ describe("Whooper's page with the fake host", () => {
     expect(await thread("config_test.go:43")).toBeInTheDocument();
   }, 30_000);
 
-  it("shows no queue before Prompting Time sends a review", async () => {
+  it("shows nothing and reads nothing before Prompting Time opens a route", async () => {
     const host = renderWithFakeHost();
     await waitFor(() => expect(host.received.map((m) => m.type)).toEqual(["ready"]));
-    // By the next task the host's answer, Whooper's status and the queue protocol 1 carries, is in.
     await new Promise((resolve) => setTimeout(resolve, 0));
     flush();
     expect(screen.queryByRole("main", { name: "Whooper's reviews" })).not.toBeInTheDocument();
@@ -43,7 +46,7 @@ describe("Whooper's page with the fake host", () => {
   });
 
   it("changes drafts only through the host and shows the drafts it answers with", async () => {
-    const host = renderWithFakeHost({ openOnReady: RUN });
+    const host = renderWithFakeHost(OPEN);
     const nit = await thread("config_test.go:43");
     const bar = screen.getByRole("region", { name: "Submit review" });
     // A safe run starts as an approval with every nit included.
@@ -69,16 +72,16 @@ describe("Whooper's page with the fake host", () => {
 
     await waitFor(() =>
       expect(changes(host)).toEqual([
-        { op: "leave-out", finding: "2" },
-        { op: "text", finding: "2", text: "**nit:** A `depguard` rule would do." },
-        { op: "comment" },
-        { op: "message", text: "Thanks, this reads well." },
+        [RUN, "leave-out", "2"],
+        [RUN, "text", "2", "**nit:** A `depguard` rule would do."],
+        [RUN, "comment"],
+        [RUN, "message", "Thanks, this reads well."],
       ]),
     );
   }, 30_000);
 
   it("shows whooper-draft's refusal in the thread and keeps the editor open", async () => {
-    renderWithFakeHost({ openOnReady: RUN });
+    renderWithFakeHost(OPEN);
     const nit = await thread("config_test.go:18");
     fireEvent.click(within(nit).getByRole("button", { name: "Edit" }));
     fireEvent.input(within(nit).getByRole("textbox", { name: "Comment" }), { target: { value: "  " } });
@@ -91,18 +94,16 @@ describe("Whooper's page with the fake host", () => {
 
   it("asks the host to submit, which confirms first, and locks the review once it posted", async () => {
     const confirmSubmit = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
-    const host = renderWithFakeHost({ openOnReady: RUN, confirmSubmit });
+    const host = renderWithFakeHost({ ...OPEN, confirmSubmit });
     await thread("config_test.go:18");
     const bar = screen.getByRole("region", { name: "Submit review" });
     fireEvent.click(within(bar).getByRole("button", { name: "Submit review" }));
-    expect(await within(bar).findByText("Not submitted: you cancelled the confirmation.")).toBeInTheDocument();
+    expect(await within(bar).findByRole("alert")).toHaveTextContent("Nothing ran: the confirmation was cancelled.");
 
     fireEvent.click(await within(bar).findByRole("button", { name: "Submit review" }));
     expect(await within(bar).findByText(/posted the review: https:\/\/github.com\/example-org\/widgets\/pull\/101/)).toBeInTheDocument();
-    expect(host.received.filter((m) => m.type === "submit")).toEqual([
-      { type: "submit", run_id: RUN, version: 1, id: expect.any(Number) },
-      { type: "submit", run_id: RUN, version: 1, id: expect.any(Number) },
-    ]);
+    // The page passes the run ID alone; Prompting Time adds --print and --expect for its confirmation.
+    expect(host.calls("submit")).toEqual([[RUN], [RUN]]);
     // The confirmation showed whooper-submit's request: both nits, as one approval.
     const shown = confirmSubmit.mock.calls[1][0] as string;
     const request = JSON.parse(shown.slice(shown.indexOf("{")));
@@ -115,19 +116,19 @@ describe("Whooper's page with the fake host", () => {
   }, 30_000);
 
   it("keeps a half-typed draft when the diff rebuilds", async () => {
-    const host = renderWithFakeHost({ openOnReady: RUN });
+    const host = renderWithFakeHost(OPEN);
     const first = await thread("config_test.go:18");
     fireEvent.click(within(first).getByRole("button", { name: "Edit" }));
     const editor = within(first).getByRole("textbox", { name: "Comment" }) as HTMLTextAreaElement;
     fireEvent.input(editor, { target: { value: "**nit:** half-typed" } });
     const slot = first.closest("[data-annotation-slot]");
 
-    // The host sends the review again, as when the run's files change: the patch is parsed again,
-    // and Pierre builds every thread's element anew.
-    host.resendReview(RUN);
+    // A file of the run changed, so the page reads the review again: the patch is parsed again, and
+    // Pierre builds every thread's element anew.
+    host.changed([`runs/${RUN}/findings.json`]);
     await waitFor(() => expect(slot).not.toBeInTheDocument(), SLOW);
-    // A change from a terminal and a switch to one column rebuild it too.
-    host.changeFromElsewhere(RUN, { op: "leave-out", finding: "2" });
+    // A change from a terminal, which the page reads as the drafts alone, and a switch to one column.
+    host.changeFromElsewhere(RUN, "leave-out", "2");
     fireEvent.click(screen.getByRole("button", { name: "Unified" }));
     await waitFor(() => expect(within(screen.getByRole("region", { name: "Submit review" })).getByText("1 comment")).toBeInTheDocument());
 
@@ -139,7 +140,7 @@ describe("Whooper's page with the fake host", () => {
   }, 30_000);
 
   it("asks the host about a finding and shows the answer under it", async () => {
-    const host = renderWithFakeHost({ openOnReady: RUN });
+    const host = renderWithFakeHost(OPEN);
     const nit = await thread("config_test.go:18");
     fireEvent.click(within(nit).getByRole("button", { name: "Ask about this" }));
     fireEvent.input(within(nit).getByRole("textbox", { name: "Question about this finding" }), {
@@ -148,10 +149,90 @@ describe("Whooper's page with the fake host", () => {
     fireEvent.click(within(nit).getByRole("button", { name: "Ask" }));
     expect(await within(nit).findByText(/stands in for whooper-ask/)).toBeInTheDocument();
     expect(within(nit).getByText("Does TestValidate cover the same bound?")).toBeInTheDocument();
-    expect(host.received.find((m) => m.type === "ask")).toMatchObject({
-      run_id: RUN,
-      finding: "1",
-      question: "Does TestValidate cover the same bound?",
-    });
+    expect(host.calls("ask")).toEqual([[RUN, "Does TestValidate cover the same bound?", "--finding", "1"]]);
   }, 30_000);
+
+  it("skips and removes the review from its header, and undoes either", async () => {
+    const host = renderWithFakeHost(OPEN);
+    await thread("config_test.go:18");
+    fireEvent.click(await screen.findByRole("button", { name: "Skip" }));
+    expect(await screen.findByText("Skipped")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    expect(await screen.findByRole("button", { name: "Skip" })).toBeInTheDocument();
+    expect(host.calls("skip")).toEqual([[RUN], [RUN, "--undo"]]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    const banner = await screen.findByRole("note");
+    expect(banner).toHaveTextContent("Removed from your lists");
+    // A removed review can't be skipped or removed again, only restored.
+    expect(screen.queryByRole("button", { name: "Skip" })).not.toBeInTheDocument();
+    fireEvent.click(within(banner).getByRole("button", { name: "Restore" }));
+    await waitFor(() => expect(screen.queryByRole("note")).not.toBeInTheDocument());
+    expect(host.calls("remove")).toEqual([[RUN], [RUN, "--undo"]]);
+  }, 30_000);
+
+  it("shows a failed review: why it failed, earlier answers, Ask why, and Retry review", async () => {
+    const failed = "20310727T005510Z-109";
+    const host = renderWithFakeHost({ openOnReady: `/reviews/${failed}` });
+    expect(await screen.findByRole("heading", { name: "Review failed" })).toBeInTheDocument();
+    expect(screen.getByText("The review agent left no usable findings")).toBeInTheDocument();
+    expect(screen.getByLabelText("Why it failed")).toHaveTextContent("the review run exited 0 without findings");
+    expect(screen.getByText("Why did this review fail?")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Ask why" }));
+    fireEvent.input(screen.getByRole("textbox", { name: "Question" }), { target: { value: "Did it run out of time?" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    expect(await screen.findByText(/about: Did it run out of time\?/)).toBeInTheDocument();
+    expect(host.calls("ask")).toEqual([[failed, "Did it run out of time?"]]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry review" }));
+    const queued = await screen.findByRole("status");
+    expect(queued).toHaveTextContent("queued another review of sample-org/gadgets#109");
+    fireEvent.click(within(queued).getByRole("button", { name: "Poll now" }));
+    await waitFor(() => expect(host.calls("round")).toEqual([[]]));
+    expect(host.calls("retry")).toEqual([[failed]]);
+  });
+
+  it("links a review that waits to the cause that stops every review, and the cause back to it", async () => {
+    const waits = "20310727T013000Z-115";
+    renderWithFakeHost({ openOnReady: `/reviews/${waits}` });
+    expect(await screen.findByRole("heading", { name: "Waiting · Docker isn't running" })).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "See all 1 review waiting" }));
+    expect(await screen.findByRole("heading", { name: "Docker isn't running" })).toBeInTheDocument();
+    const held = screen.getByRole("list", { name: "Reviews it holds back" });
+    fireEvent.click(within(held).getByRole("button", { name: /example-org\/widgets#115/ }));
+    expect(await screen.findByRole("heading", { name: "Waiting · Docker isn't running" })).toBeInTheDocument();
+  });
+
+  it("opens each route Prompting Time sends, such as a blocker's", async () => {
+    const host = renderWithFakeHost(OPEN);
+    await thread("config_test.go:18");
+    host.open("/causes/docker_unavailable");
+    expect(await screen.findByRole("heading", { name: "Docker isn't running" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Poll now" }));
+    await waitFor(() => expect(host.calls("round")).toEqual([[]]));
+  });
+
+  it("shows an earlier version read-only, and new commits since the newest", async () => {
+    renderWithFakeHost({ openOnReady: "/reviews/20310726T120000Z-107" });
+    const note = await screen.findByText(/Review 1 of 2, read-only/);
+    expect(screen.queryByRole("button", { name: "Skip" })).not.toBeInTheDocument();
+    expect(await within(screen.getByRole("region", { name: "Submit review" })).findByRole("button", { name: "Submit review" })).toBeDisabled();
+    fireEvent.click(within(note.closest("[role=note]") as HTMLElement).getByRole("button", { name: "Open review 2" }));
+    const commits = (await screen.findByText("New commits since this review")).closest("[role=note]");
+    expect(commits).toHaveTextContent("it reviewed f1abd4c; the pull request is at c83d20e.");
+    expect(screen.getByRole("button", { name: "Rerun review" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Versions of this review" })).toHaveValue("20310727T011502Z-107");
+  }, 30_000);
+
+  it("reads the review again only when one of its run's files changed", async () => {
+    const host = renderWithFakeHost(OPEN);
+    await thread("config_test.go:18");
+    host.changed(["poll/github.json"]);
+    await waitFor(() => expect(host.calls("status")).toHaveLength(2));
+    // Nothing of the run changed, so the page reads neither the review nor its drafts.
+    expect([host.calls("show-review").length, host.calls("draft").length]).toEqual([1, 0]);
+    host.changed(null);
+    await waitFor(() => expect(host.calls("show-review")).toHaveLength(2));
+  });
 });

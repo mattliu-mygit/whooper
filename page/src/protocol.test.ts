@@ -1,16 +1,27 @@
 import { describe, expect, it } from "vitest";
-import { status } from "./fixtures";
 import { readHostMessage, readPageMessage } from "./protocol";
 
-describe("the page's messages", () => {
-  it("reads a host message only at version 1 with its type's fields", () => {
-    const drafts = { version: 1, type: "drafts", run_id: "r", drafts: { event: "COMMENT", message: "", findings: {} }, reply_to: 3 };
-    expect(readHostMessage(drafts)).toEqual(drafts);
+describe("the page's messages, page protocol 2", () => {
+  it("reads a host message only at version 2 with exactly its type's fields", () => {
+    const good = [
+      { version: 2, type: "result", reply_to: 3, json: { event: "COMMENT" } },
+      { version: 2, type: "result", reply_to: 4, json: "posted the review\n" },
+      { version: 2, type: "error", reply_to: 3, message: "whooper-draft: no run" },
+      { version: 2, type: "error", message: "Prompting Time could not run the action." },
+      { version: 2, type: "open", route: "/reviews/20310727T010246Z-101" },
+      { version: 2, type: "changed", files: ["runs/20310727T010246Z-101/drafts.json"] },
+      { version: 2, type: "changed", files: null },
+    ];
+    for (const message of good) expect(readHostMessage(message)).toEqual(message);
     for (const bad of [
-      { ...drafts, version: 2 },
-      { ...drafts, type: "run-command" },
-      { version: 1, type: "drafts", drafts: drafts.drafts },
-      { ...drafts, reply_to: "3" },
+      { version: 1, type: "open", route: "/reviews/r" },
+      { version: 2, type: "status", status: {} },
+      { version: 2, type: "result", reply_to: "3", json: null },
+      { version: 2, type: "result", json: null },
+      { version: 2, type: "error", reply_to: 1 },
+      { version: 2, type: "open", route: "reviews/r" },
+      { version: 2, type: "open", route: "/reviews/r", extra: true },
+      { version: 2, type: "changed", files: [1] },
       "not an object",
       null,
     ]) {
@@ -18,23 +29,19 @@ describe("the page's messages", () => {
     }
   });
 
-  it("reads a status message without queue, which the page does not read and Prompting Time may leave out", () => {
-    const answer = { version: 1, type: "status", status: status(), reply_to: 1 };
-    expect(readHostMessage(answer)).toEqual(answer);
-    expect(readHostMessage({ ...answer, queue: [] })).toEqual({ ...answer, queue: [] });
-    expect(readHostMessage({ version: 1, type: "status", queue: [], reply_to: 1 })).toBeNull();
-  });
-
-  it("reads a page request only with an id and a change whooper-draft takes", () => {
-    const include = { version: 1, id: 1, type: "change-draft", run_id: "r", change: { op: "include", finding: "2" } };
-    expect(readPageMessage(include)).toEqual(include);
-    expect(readPageMessage({ version: 1, id: 2, type: "ask", run_id: "r", question: "Why?", finding: null })).not.toBeNull();
+  it("reads a page message as Prompting Time does before it runs anything", () => {
+    const call = { version: 2, type: "call", id: 1, action: "draft", args: ["r", "include", "2"] };
+    expect(readPageMessage(call)).toEqual(call);
+    expect(readPageMessage({ version: 2, type: "ready" })).toEqual({ version: 2, type: "ready" });
     for (const bad of [
-      { ...include, id: undefined },
-      { ...include, change: { op: "delete", finding: "2" } },
-      { ...include, change: { op: "text", finding: "2" } },
-      { version: 1, id: 3, type: "submit" },
-      { version: 1, id: 4, type: "run", command: "rm" },
+      { ...call, version: 1 },
+      { ...call, id: undefined },
+      { ...call, id: 1.5 },
+      { ...call, action: "" },
+      { ...call, args: ["r", 2] },
+      { ...call, run_id: "r" },
+      { version: 2, type: "ready", id: 1 },
+      { version: 2, type: "change-draft", id: 1, run_id: "r", change: { op: "include", finding: "2" } },
     ]) {
       expect(readPageMessage(bad)).toBeNull();
     }

@@ -1,11 +1,25 @@
-import type { Drafts, FindingsResult, QueueItem, Review, WhooperStatus } from "./protocol";
+import type { Cause, Drafts, FindingsResult, Shown, WhooperStatus } from "./protocol";
 
 // Invented reviews for the fake host: made-up repos, people, and code, never a real PR.
 
-/** The record of one review run, as the host reads it from the run's directory. */
-export interface ReviewRecord extends Omit<Review, "drafts"> {
+/** The record of one review run, as the fake host reads it from the run's directory. */
+export interface RunRecord {
+  run_id: string;
+  repo: string;
+  pr: number;
+  title: string | null;
+  author: string | null;
+  head_sha: string;
+  outcome: Shown["outcome"];
+  /** findings.json, null for a review that runs, waits, or failed without findings. */
+  findings: FindingsResult | null;
   /** drafts.json, when the user changed something; whooper-draft computes them otherwise. */
   drafts?: Drafts;
+  /** diff.patch, null for a review that waits. */
+  patch: string | null;
+  failure: string | null;
+  cause: Cause | null;
+  asks: Shown["asks"];
 }
 
 const PATCH_101 = `diff --git a/internal/cacheconfig/config.go b/internal/cacheconfig/config.go
@@ -174,7 +188,11 @@ const FINDINGS_107: FindingsResult = {
   ],
 };
 
-export function reviewRecords(): ReviewRecord[] {
+const DOCKER: Cause = { id: "docker_unavailable", summary: "Docker isn't running", scope: "all" };
+const NO_FINDINGS: Cause = { id: "agent_no_findings", summary: "The review agent left no usable findings", scope: "pr" };
+const NOTHING_ELSE = { failure: null, cause: null, asks: [] };
+
+export function reviewRecords(): RunRecord[] {
   return [
     {
       run_id: "20310727T010246Z-101",
@@ -182,8 +200,11 @@ export function reviewRecords(): ReviewRecord[] {
       pr: 101,
       title: "refactor(cache): separate the cache configuration",
       author: "alex",
+      head_sha: "4012ccf3a9d1",
+      outcome: "reviewed",
       findings: FINDINGS_101,
       patch: PATCH_101,
+      ...NOTHING_ELSE,
     },
     {
       run_id: "20310727T011502Z-107",
@@ -191,19 +212,53 @@ export function reviewRecords(): ReviewRecord[] {
       pr: 107,
       title: "fix(store): make writers honor version constraints",
       author: "jordan",
+      head_sha: "f1abd4c90b2e",
+      outcome: "reviewed",
       findings: FINDINGS_107,
       patch: PATCH_107,
+      ...NOTHING_ELSE,
     },
-  ];
-}
-
-export function queue(): QueueItem[] {
-  return [
-    { run_id: "20310727T010246Z-101", pr: "example-org/widgets#101", title: "refactor(cache): separate the cache configuration", state: "decide", verdict: "approve_once_ci_passes", findings: 2 },
-    { run_id: "20310727T011502Z-107", pr: "example-org/widgets#107", title: "fix(store): make writers honor version constraints", state: "decide", verdict: "look_first", findings: 2 },
-    { run_id: null, pr: "example-org/widgets#112", title: "add tag store methods", state: "reviewing", verdict: null, findings: 0 },
-    { run_id: "20310727T005510Z-109", pr: "sample-org/gadgets#109", title: "keep only shared types in domain", state: "failed", verdict: null, findings: 0 },
-    { run_id: "20310726T201133Z-99", pr: "example-org/widgets#99", title: "move the score projection to domain", state: "submitted", verdict: "approve_once_ci_passes", findings: 1 },
+    // The first review of #107, which the one above supersedes.
+    {
+      run_id: "20310726T120000Z-107",
+      repo: "example-org/widgets",
+      pr: 107,
+      title: "fix(store): make writers honor version constraints",
+      author: "jordan",
+      head_sha: "0b7e2d91aa40",
+      outcome: "reviewed",
+      findings: FINDINGS_107,
+      patch: PATCH_107,
+      ...NOTHING_ELSE,
+    },
+    {
+      run_id: "20310727T005510Z-109",
+      repo: "sample-org/gadgets",
+      pr: 109,
+      title: "keep only shared types in domain",
+      author: "riley",
+      head_sha: "9c2e71d04b5a",
+      outcome: "failed",
+      findings: null,
+      patch: "",
+      failure: "the review run exited 0 without findings; see its stderr.log\n",
+      cause: NO_FINDINGS,
+      asks: [{ question: "Why did this review fail?", finding: null, answer: "The agent stopped before it wrote **findings.json**." }],
+    },
+    {
+      run_id: "20310727T013000Z-115",
+      repo: "example-org/widgets",
+      pr: 115,
+      title: null,
+      author: null,
+      head_sha: "5d1c0a7e33b9",
+      outcome: "waiting",
+      findings: null,
+      patch: null,
+      failure: null,
+      cause: DOCKER,
+      asks: [],
+    },
   ];
 }
 
@@ -216,7 +271,7 @@ export function status(): WhooperStatus {
     loop: { running: true, pid: 4242 },
     paused: false,
     next_round: "2031-07-27T15:45:00-07:00",
-    round: { running: true, started_at: "2031-07-27T15:30:02-07:00", reviewing: "example-org/widgets#112" },
+    round: { running: false, started_at: null, reviewing: null },
     last_round: {
       started_at: "2031-07-27T15:15:01-07:00",
       ended_at: "2031-07-27T15:22:40-07:00",
@@ -224,17 +279,20 @@ export function status(): WhooperStatus {
       selected: 2,
       reviews: [
         { pr: "example-org/widgets#101", outcome: "reviewed" },
-        { pr: "example-org/widgets#107", outcome: "reviewed" },
+        { pr: "example-org/widgets#115", outcome: "waiting" },
       ],
     },
-    blocked: null,
-    // The runs the queue lists; #112's review has no run directory yet.
+    blocked: { ...DOCKER, scope: "all", since: "2031-07-27T15:22:40-07:00", waiting: 1 },
     reviews: [
+      { run_id: "20310727T013000Z-115", repo: "example-org/widgets", pr: 115, title: null, author: null, url: "https://github.com/example-org/widgets/pull/115",
+        started_at: "2031-07-26T18:30:00-07:00", ended_at: null, outcome: "waiting", verdict: null, skipped: false, findings: 0,
+        safe_to_approve: false, submitted: null, needs_you: false, cause: DOCKER, head_sha: "5d1c0a7e33b9",
+        pr_head_sha: "5d1c0a7e33b9", ...UNMARKED },
       { run_id: "20310727T011502Z-107", repo: "example-org/widgets", pr: 107, title: "fix(store): make writers honor version constraints",
         author: "jordan", url: "https://github.com/example-org/widgets/pull/107", started_at: "2031-07-26T18:15:02-07:00",
         ended_at: "2031-07-26T18:31:27-07:00", outcome: "reviewed", verdict: "look_first", skipped: false, findings: 2,
         safe_to_approve: false, submitted: null, needs_you: true, cause: null, head_sha: "f1abd4c90b2e",
-        pr_head_sha: "f1abd4c90b2e", ...UNMARKED },
+        pr_head_sha: "c83d20e7f6a1", ...UNMARKED },
       { run_id: "20310727T010246Z-101", repo: "example-org/widgets", pr: 101, title: "refactor(cache): separate the cache configuration",
         author: "alex", url: "https://github.com/example-org/widgets/pull/101", started_at: "2031-07-26T18:02:46-07:00",
         ended_at: "2031-07-26T18:14:58-07:00", outcome: "reviewed", verdict: "approve_once_ci_passes", skipped: false, findings: 2,
@@ -243,14 +301,12 @@ export function status(): WhooperStatus {
       { run_id: "20310727T005510Z-109", repo: "sample-org/gadgets", pr: 109, title: "keep only shared types in domain",
         author: "riley", url: "https://github.com/sample-org/gadgets/pull/109", started_at: "2031-07-26T17:55:10-07:00",
         ended_at: "2031-07-26T18:02:31-07:00", outcome: "failed", verdict: null, skipped: false, findings: 0, safe_to_approve: false,
-        submitted: null, needs_you: true,
-        cause: { id: "agent_no_findings", summary: "The review agent left no usable findings", scope: "pr" },
-        head_sha: "9c2e71d04b5a", pr_head_sha: "9c2e71d04b5a", ...UNMARKED },
-      { run_id: "20310726T201133Z-99", repo: "example-org/widgets", pr: 99, title: "move the score projection to domain",
-        author: "alex", url: "https://github.com/example-org/widgets/pull/99", started_at: "2031-07-26T13:11:33-07:00",
-        ended_at: "2031-07-26T13:29:40-07:00", outcome: "reviewed", verdict: "approve_once_ci_passes", skipped: false, findings: 1,
-        safe_to_approve: true, submitted: { event: "APPROVE", at: "2031-07-26T14:05:12-07:00" }, needs_you: false, cause: null,
-        head_sha: "77d0e5b1c3f2", pr_head_sha: "77d0e5b1c3f2", ...UNMARKED },
+        submitted: null, needs_you: true, cause: NO_FINDINGS, head_sha: "9c2e71d04b5a", pr_head_sha: "9c2e71d04b5a", ...UNMARKED },
+      { run_id: "20310726T120000Z-107", repo: "example-org/widgets", pr: 107, title: "fix(store): make writers honor version constraints",
+        author: "jordan", url: "https://github.com/example-org/widgets/pull/107", started_at: "2031-07-26T05:00:00-07:00",
+        ended_at: "2031-07-26T05:16:10-07:00", outcome: "reviewed", verdict: "look_first", skipped: false, findings: 2,
+        safe_to_approve: false, submitted: null, needs_you: false, cause: null, head_sha: "0b7e2d91aa40",
+        pr_head_sha: "c83d20e7f6a1", ...UNMARKED },
     ],
     rounds: [
       { started_at: "2031-07-27T15:15:01-07:00", ended_at: "2031-07-27T15:22:40-07:00", result: "done", selected: 2, reason: null },

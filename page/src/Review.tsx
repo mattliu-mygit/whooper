@@ -170,14 +170,12 @@ function SubmitBar(props: { store: PageStore }) {
   const [pendingEvent, setPendingEvent] = createSignal<"APPROVE" | "COMMENT" | null>(null);
   const event = () => pendingEvent() ?? drafts().event;
   const [busy, setBusy] = createSignal(false);
-  const [note, setNote] = createSignal("");
   const [error, setError] = createSignal("");
-  const locked = () => store.state.submitted !== null;
+  const locked = () => store.locked();
   const nothing = () => comments() === 0 && event() === "COMMENT";
 
   async function run(work: () => Promise<unknown>) {
     setBusy(true);
-    setNote("");
     try {
       await work();
       setError("");
@@ -194,12 +192,8 @@ function SubmitBar(props: { store: PageStore }) {
     setPendingEvent(null);
   }
 
-  async function submit() {
-    await run(async () => {
-      const result = await store.submit();
-      if (result.type === "submit-result" && !result.posted) setNote("Not submitted: you cancelled the confirmation.");
-    });
-  }
+  // Prompting Time confirms first; a cancelled confirmation comes back as the host's error.
+  const submit = () => run(() => store.submit());
 
   // What posts when the message stays empty (whooper-submit): an approval with comments says
   // "Pre-approving to unblock".
@@ -237,9 +231,6 @@ function SubmitBar(props: { store: PageStore }) {
         {busy() ? "Submitting…" : "Submit review"}
       </Button>
       <Show when={store.state.submitted}>{(text) => <p class="w-hint w-submit-line">Submitted. Whooper says: {text()}</p>}</Show>
-      <Show when={note()}>
-        <p class="w-hint w-submit-line">{note()}</p>
-      </Show>
       <Show when={error()}>
         <p class="w-error w-submit-line" role="alert">
           {error()}

@@ -36,3 +36,25 @@ export function CommentText(props: { text: string }) {
     </For>
   );
 }
+
+/** A commit as the review header shows it: its first 7 characters. */
+export function shortSha(sha: string | null): string | null {
+  return sha ? sha.slice(0, 7) : null;
+}
+
+/** A time from Whooper as the page shows it: "3:12 PM" today, "Nov 24" this year, "Nov 24, 2025" before. */
+export function shortDate(iso: string, now = new Date()): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  if (date.toDateString() === now.toDateString()) return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return date.toLocaleDateString([], {
+    month: "short",
+    day: "numeric",
+    ...(date.getFullYear() === now.getFullYear() ? {} : { year: "numeric" }),
+  });
+}
+
+/** "36 reviews waiting", "1 review waiting", or "no reviews waiting". */
+export function waitingText(count: number): string {
+  return count === 0 ? "no reviews waiting" : `${count} ${count === 1 ? "review" : "reviews"} waiting`;
+}

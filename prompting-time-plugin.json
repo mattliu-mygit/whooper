@@ -13,7 +13,7 @@
     { "command": "claude", "purpose": "Runs the jobs the settings give to Claude.", "only_when": { "setting": "jobs", "value": "claude" } },
     { "command": "devin", "purpose": "Runs the jobs the settings give to Devin.", "only_when": { "setting": "jobs", "value": "devin" } }
   ],
-  "page": { "entry": "page/dist/index.html", "protocol": 1 },
+  "page": { "entry": "page/dist/index.html", "protocol": 2 },
   "status": {
     "format": 2,
     "groups": [

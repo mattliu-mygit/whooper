@@ -427,16 +427,23 @@ checkout.
 
 ### Whooper's page
 
-`page/` is the page Prompting Time shows for one of Whooper's reviews: the review's diff with
-Whooper's findings as draft comments under their lines, Include in review, Edit, Ask about this,
-Discard, and one bar that submits the review. It is a Solid 2.0 app built on Prompting Time's shared
-UI library, `@prompting-time/ui`. Prompting Time shows it in an iframe sandboxed to scripts only, so
-the page reaches nothing but its host: it sends Prompting Time the messages in
-`page/src/protocol.ts`, which also says which Whooper command each one runs, and Prompting Time
-confirms a submit before `whooper-submit` posts. The page shows the review Prompting Time opens as
-soon as it arrives, and nothing before: Prompting Time's sidebar lists the reviews whooper-status
-lists, so the page has no list of its own, and whooper-show prints the review the page shows
-([See reviews](#see-reviews)).
+`page/` is the page Prompting Time shows for one of Whooper's reviews or blockers: a review's header,
+with its versions, Skip and Undo, Remove and Restore, Rerun review, and a banner for new commits since
+the review; then the review's diff with Whooper's findings as draft comments under their lines,
+Include in review, Edit, Ask about this, Discard, and one bar that submits the review. A review that
+runs, waits, or failed shows why instead, with whooper-review's reason, the answers to earlier
+questions, and Ask why, and a cause that stops every review lists the reviews it holds back, with
+Poll now. It is a Solid 2.0 app built on Prompting Time's shared UI library, `@prompting-time/ui`.
+Prompting Time shows it in an iframe sandboxed to scripts only, so the page reaches nothing but its
+host, through page protocol 2 in `page/src/protocol.ts`: it says `ready`, Prompting Time sends `open`
+with the route of the item or blocker the user opened, `/reviews/<run-id>` or `/causes/<cause-id>`
+([See reviews](#see-reviews)), and the page reads and changes everything with `call`s of the
+manifest's actions, such as `status`, `show-review`, `draft`, `ask`, `skip`, `retry`, and `submit`,
+which Prompting Time confirms before `whooper-submit` posts. When files in the state folder change,
+Prompting Time sends `changed` with their paths, and the page reads the status again, and the open
+review when one of its run's files changed: only its drafts when `drafts.json` alone did, which keeps
+the diff as it is. The page has no list of its own, since Prompting Time lists what whooper-status
+lists.
 
 The page needs Node 22.12 or later. In `page/`:
 
@@ -447,9 +454,9 @@ npm run dev     # http://localhost:5175/dev/ shows the page in a sandboxed ifram
 npm run build   # page/dist, which the repo does not track
 ```
 
-The fake host answers from invented reviews in `page/src/fixtures.ts` the way Whooper's commands
-would, and reaches no Whooper, GitHub, or model; `/dev/` opens the first of its reviews, and
-`/dev/?review=<run id>` another.
+The fake host runs the page's calls on invented reviews in `page/src/fixtures.ts` the way Whooper's
+commands would, and reaches no Whooper, GitHub, or model; `/dev/` opens the first of its reviews,
+`/dev/?review=<run id>` another, and `/dev/?route=/causes/docker_unavailable` a cause.
 Until `@prompting-time/ui`'s first npm release, the page installs it from a Prompting Time checkout
 beside this one, `../../repos/prompting-time-actions/packages/ui` from `page/`, which `npm ci`
 copies in; it then switches to a pinned npm version. The checkout must be on branch `solid-actions`,
