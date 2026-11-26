@@ -194,7 +194,17 @@ whooper-ask saves each answer in the run directory as `asks/<n>.json`, numbered 
 `[ask] timeout_minutes` (10 by default) is stopped with everything it started and, like a run that
 fails, saves no answer; its number is not used again.
 
-## Whooper's page in Prompting Time
+## Whooper in Prompting Time
+
+Prompting Time reads `prompting-time-plugin.json`, which fits `schemas/prompting-time-plugin.json`:
+Whooper's name and version, the command it starts (`bin/whooper-run`), the programs it checks for
+first (`gh`, slackdump, `jq`, uv, and the CLI of each agent the settings' `[jobs]` name), the page,
+the settings schema (`schemas/settings.json`), and the commands it runs as actions. An action with
+`confirm: true` waits for the user's yes in Prompting Time; only `submit` has it, since only
+whooper-submit writes outside this Mac. The tests check the manifest against the schema and the
+checkout.
+
+### Whooper's page
 
 `page/` is the page Prompting Time shows for Whooper: the queue of reviews and each review's diff
 with Whooper's findings as draft comments under their lines, Include in review, Edit, Ask about

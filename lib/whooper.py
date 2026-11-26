@@ -231,7 +231,8 @@ def fill(template, values):
 
 def check_schema(value, schema, where="the value"):
     """Raises ValueError at the first place value breaks schema. Covers the JSON Schema keywords
-    Whooper's schemas use: type, enum, minimum, properties, required, additionalProperties, and items."""
+    Whooper's schemas use: type, enum, minimum, pattern, properties, required, additionalProperties,
+    items, and minItems."""
     kind = schema.get("type")
     types = {"object": dict, "array": list, "string": str, "integer": int, "number": (int, float), "boolean": bool}
     # Python's True is also an int, but JSON's true is not a number.
@@ -241,6 +242,8 @@ def check_schema(value, schema, where="the value"):
         raise ValueError(f"{where} is {value!r}, not one of {schema['enum']}")
     if "minimum" in schema and isinstance(value, (int, float)) and not isinstance(value, bool) and value < schema["minimum"]:
         raise ValueError(f"{where} is below {schema['minimum']}")
+    if "pattern" in schema and isinstance(value, str) and not re.search(schema["pattern"], value):
+        raise ValueError(f"{where} is {value!r}, which does not match {schema['pattern']}")
     if isinstance(value, dict):
         properties = schema.get("properties", {})
         if missing := [key for key in schema.get("required", []) if key not in value]:
@@ -250,6 +253,8 @@ def check_schema(value, schema, where="the value"):
         for key, sub in properties.items():
             if key in value:
                 check_schema(value[key], sub, f"{where}.{key}")
+    if isinstance(value, list) and len(value) < schema.get("minItems", 0):
+        raise ValueError(f"{where} has fewer than {schema['minItems']} items")
     if isinstance(value, list) and "items" in schema:
         for i, item in enumerate(value):
             check_schema(item, schema["items"], f"{where}[{i}]")

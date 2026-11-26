@@ -6,13 +6,14 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import tempfile
 from time import monotonic, sleep
 from unittest import mock
 
-from whooper import (REVIEW_WORDING, bot_list, check_schema, claude_shell_calls, classify, conversation,
+from whooper import (REVIEW_WORDING, SETTINGS_SCHEMA, bot_list, check_schema, claude_shell_calls, classify, conversation,
                      devin_shell_calls, fill, main, next_round, pr_link, poll_items, read_asks, read_drafts,
                      read_schedule, select_work, skill_hashes, slack_posts, summary_text, write_record)
 
@@ -2901,6 +2902,56 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(bad.returncode, 1)
         self.assertIn("timeout_minutes is below 5", bad.stderr)
         self.assertEqual(path.read_text(), EXAMPLE)
+
+
+class ManifestTest(unittest.TestCase):
+    """prompting-time-plugin.json, which Prompting Time reads to install, check, start, and show
+    Whooper, against schemas/prompting-time-plugin.json and the checkout."""
+
+    MANIFEST = json.loads((ROOT / "prompting-time-plugin.json").read_text())
+    SCHEMA = json.loads((ROOT / "schemas" / "prompting-time-plugin.json").read_text())
+
+    def test_the_manifest_fits_its_schema(self):
+        check_schema(self.MANIFEST, self.SCHEMA, "manifest")
+
+    def test_the_schema_catches_each_break(self):
+        no_page = {key: value for key, value in self.MANIFEST.items() if key != "page"}
+        unflagged = [{key: value for key, value in a.items() if key != "confirm"} for a in self.MANIFEST["actions"]]
+        for name, changes in [
+            ("a name a pt-plugin:// address cannot hold", {"name": "Whooper Reviews"}),
+            ("a version that is not <major>.<minor>.<patch>", {"version": "v0.1"}),
+            ("an empty start command", {"start": []}),
+            ("actions without their confirm flag", {"actions": unflagged}),
+            ("a page protocol the format does not know", {"page": {"entry": "page/dist/index.html", "protocol": 2}}),
+            ("an unexpected key", {"socket": "whooper.sock"}),
+        ]:
+            with self.subTest(name), self.assertRaises(ValueError):
+                check_schema({**self.MANIFEST, **changes}, self.SCHEMA, "manifest")
+        with self.subTest("no page"), self.assertRaises(ValueError):
+            check_schema(no_page, self.SCHEMA, "manifest")
+
+    def test_each_command_and_file_it_names_is_in_the_checkout(self):
+        for command in [self.MANIFEST["start"]] + [a["command"] for a in self.MANIFEST["actions"]]:
+            with self.subTest(command[0]):
+                self.assertTrue(os.access(ROOT / command[0], os.X_OK), command)
+        # The form edits the settings whooper-settings checks and saves.
+        self.assertEqual(ROOT / self.MANIFEST["settings"], SETTINGS_SCHEMA)
+        # page/dist is built from page/, which speaks the protocol version the manifest names.
+        self.assertTrue((ROOT / "page" / "index.html").exists())
+        protocol = re.search(r"PROTOCOL_VERSION = (\d+);", (ROOT / "page" / "src" / "protocol.ts").read_text())
+        self.assertEqual(int(protocol[1]), self.MANIFEST["page"]["protocol"])
+
+    def test_only_submitting_a_review_waits_for_a_confirmation(self):
+        # As README.md's Approvals has it, only whooper-submit writes outside this Mac, to GitHub.
+        names = [a["name"] for a in self.MANIFEST["actions"]]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertEqual([a["name"] for a in self.MANIFEST["actions"] if a["confirm"]], ["submit"])
+
+    def test_each_agents_cli_is_needed_when_a_job_runs_on_it(self):
+        agents = {path.name for path in (ROOT / "agents").iterdir() if path.is_dir()}
+        conditional = {p["command"]: p["only_when"] for p in self.MANIFEST["prerequisites"] if "only_when" in p}
+        self.assertEqual(conditional, {agent: {"setting": "jobs", "value": agent} for agent in agents})
+        self.assertIn("jobs", json.loads(SETTINGS_SCHEMA.read_text())["properties"])
 
 
 class SkillHashesTest(unittest.TestCase):
