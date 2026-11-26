@@ -1914,16 +1914,28 @@ class RunTest(unittest.TestCase):
             sleep(0.1)
 
     def fake_one_review_request(self):
-        """Has gh report one review request, for example-org/example-repo#12, slackdump an ask channel
-        with no posts, and the Claude poll run no asks. The review then fails, since the cache holds no
-        clone of the repo."""
-        (self.fakes / "pr.json").write_text(json.dumps(pr(number=12, requested=[LOGIN])))
+        """Has gh report one review request, for example-org/example-repo#12, as fake_review_requests
+        does. The review then fails, since the cache holds no clone of the repo."""
+        self.fake_review_requests(pr(number=12, requested=[LOGIN]))
+
+    def fake_review_requests(self, *prs):
+        """Has gh report a review request for each of prs, PRs as queries/pr.graphql returns them, and
+        fail any other call, slackdump an ask channel with no posts, and the Claude poll run no asks."""
+        for p in prs:
+            path = p["url"].removeprefix("https://github.com/").replace("/", "-")
+            (self.fakes / f"{path}.json").write_text(json.dumps(p))
+            org = p["repository"]["nameWithOwner"].split("/")[0]
+            with (self.fakes / f"requested-{org}").open("a") as requested:
+                requested.write(p["url"] + "\n")
         self.script(self.fakes / "gh", "\n".join([
             'case "$*" in',
-            '  "search prs user-review-requested:sam-example --owner example-org "*)',
-            "    echo https://github.com/example-org/example-repo/pull/12 ;;",
+            '  "search prs user-review-requested:sam-example --owner "*)',
+            '    all="$*"; org="${all#*--owner }"; cat "${0%/*}/requested-${org%% *}" 2>/dev/null; exit 0 ;;',
             '  "search prs "*) ;;',
-            '  "api graphql "*) cat "${0%/*}/pr.json" ;;',
+            '  "api graphql "*)',
+            '    for arg; do case "$arg" in url=https://github.com/*)',
+            '      cat "${0%/*}/$(echo "${arg#url=https://github.com/}" | tr / -).json"; exit ;; esac; done',
+            "    exit 1 ;;",
             "  *) exit 1 ;;",
             "esac",
         ]))
@@ -2049,6 +2061,57 @@ class RunTest(unittest.TestCase):
         self.assertEqual(self.notifications.read_text(),
                          "Whooper: example-org/example-repo#12 review failed | See whooper-round's output.\n")
         self.assertFalse((self.state / "round.lock").exists())
+
+    def test_after_a_review_stops_at_a_cause_that_stops_every_review_the_rest_of_the_round_waits(self):
+        env, item, _ = self.pull_request()
+        head = json.loads(item.read_text())["head_sha"]
+        line = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"
+        self.setup_script(f"echo '{line}' >&2\nexit 1")
+        # Review requests for PRs 12 and 13 of sample-org/plain-repo, which the round reviews in that order.
+        plain = {"repository": {"nameWithOwner": "sample-org/plain-repo"}, "baseRefName": "main"}
+        self.fake_review_requests(*[{**pr(number=number, head=sha, requested=[LOGIN]), **plain,
+                                     "url": f"https://github.com/sample-org/plain-repo/pull/{number}"}
+                                    for number, sha in [(12, head), (13, "3" * 40)]])
+        result = self.command("whooper-round", env=env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("--- sample-org/plain-repo#13 first_review waits for the next round: Docker isn't running\n",
+                      result.stdout)
+        status = self.status()
+        self.assertEqual(status["last_round"]["reviews"], [{"pr": "sample-org/plain-repo#12", "outcome": "failed"},
+                                                           {"pr": "sample-org/plain-repo#13", "outcome": "waiting"}])
+        self.assertEqual(status["rounds"][0]["reason"], "Docker isn't running, so 1 review(s) wait for the next round")
+        # PR 13's review did not start: its run holds the work item and the cause it waits on, and needs no
+        # one. Only the failed review sent a notification.
+        waits, failed = status["reviews"]
+        self.assertEqual((failed["pr"], failed["outcome"], failed["cause"], failed["needs_you"]),
+                         (12, "failed", CAUSES["docker_unavailable"], True))
+        self.assertEqual({key: waits[key] for key in ["pr", "outcome", "cause", "needs_you", "ended_at", "findings"]},
+                         {"pr": 13, "outcome": "waiting", "cause": CAUSES["docker_unavailable"], "needs_you": False,
+                          "ended_at": None, "findings": 0})
+        work = json.loads((self.state / "items" / "sample-org-plain-repo-13-first_review.json").read_text())
+        run = self.state / "runs" / waits["run_id"]
+        self.assertEqual(json.loads((run / "run.json").read_text()), {**work, "run_id": run.name, "agent": "claude"})
+        self.assertEqual(json.loads((run / "waiting.json").read_text()), CAUSES["docker_unavailable"])
+        self.assertEqual(self.notifications.read_text(),
+                         "Whooper: sample-org/plain-repo#12 review failed | See whooper-round's output.\n")
+        # Whooper is blocked since the failure, with one review waiting.
+        self.assertEqual(status["blocked"], {**CAUSES["docker_unavailable"], "since": failed["ended_at"], "waiting": 1})
+        # The next round, with Docker still down, fails PR 12's review again, and PR 13 still waits in the
+        # same run.
+        self.assertEqual(self.command("whooper-round", env=env).returncode, 0)
+        status = self.status()
+        self.assertEqual([(r["pr"], r["outcome"]) for r in status["reviews"]],
+                         [(12, "failed"), (13, "waiting"), (12, "failed")])
+        self.assertEqual(status["reviews"][1]["run_id"], waits["run_id"])
+        self.assertEqual(status["blocked"], {**CAUSES["docker_unavailable"], "since": failed["ended_at"], "waiting": 1})
+        # The round after reviews both again, PR 13 from the recheck list even once the poll no longer
+        # lists it, as for a Slack ask, which a poll reads once.
+        [poll] = sorted((self.state / "poll").glob("*Z.json"))[-1:]
+        items = json.loads(poll.read_text())["items"]
+        poll.write_text(json.dumps({"items": [i for i in items if i["pr"] == 12]}))
+        select = self.command("whooper-select", env=env)
+        self.assertEqual([json.loads(line) for line in select.stdout.splitlines()],
+                         [i for i in items if i["pr"] == 12] + [work])
 
     def test_a_round_stopped_during_a_review_reports_that_review_as_interrupted(self):
         self.fake_one_review_request()
@@ -2269,7 +2332,9 @@ class RunTest(unittest.TestCase):
         [run] = (self.state / "runs").iterdir()
         clone = Path(self.tmp.name) / "cache" / "whooper" / "repos" / "example-org-example-repo"
         reason = f"no clone of example-org/example-repo at {clone}; see README.md"
-        self.assertEqual((result.returncode, result.stderr), (1, f"whooper-review: {reason}\n"))
+        # It prints the run directory as soon as it has one, whether or not the review then finishes.
+        self.assertEqual((result.returncode, result.stdout, result.stderr),
+                         (1, f"{run}\n", f"whooper-review: {reason}\n"))
         self.assertEqual((run / "failure.txt").read_text(), f"{reason}\n")
         self.assertEqual(json.loads((run / "failure.json").read_text()), CAUSES["repo_not_configured"])
         # Like any review that does not finish, it counts as a failure at its head.
@@ -2335,7 +2400,7 @@ class RunTest(unittest.TestCase):
     def test_status_reports_the_loop_pause_next_round_and_rounds_from_the_state_folder(self):
         nothing = {"version": 1, "loop": {"running": False, "pid": None}, "paused": False, "next_round": None,
                    "round": {"running": False, "started_at": None, "reviewing": None}, "last_round": None,
-                   "reviews": [], "rounds": []}
+                   "blocked": None, "reviews": [], "rounds": []}
         self.assertEqual(self.status(), nothing)
         # Unix times on 2031-07-30: the next round at 10:15:00 in Los Angeles, the running round's
         # start at 10:00:02, and the last round from 09:45:01 to 09:52:40.
@@ -2376,6 +2441,7 @@ class RunTest(unittest.TestCase):
             "round": {"running": True, "started_at": "2031-07-30T10:00:02-07:00",
                       "reviewing": "example-org/example-repo#12"},
             "last_round": last_round,
+            "blocked": None,
             "reviews": [],
             "rounds": rounds,
         })
@@ -3141,11 +3207,33 @@ class ReviewsTest(unittest.TestCase):
         (lock / "pid").write_text(f"{pid}\n")
         (lock / "run_id").write_text(f"{run.name}\n")
 
-    def reviews(self):
+    def stopped(self, ago, pr, cause):
+        """Makes a run of example-org/example-repo#<pr> that started ago before now and that whooper-review
+        stopped at cause 2 minutes later, and returns it."""
+        run = self.make_run(ago, pr=pr)
+        self.fetched(run)
+        self.write(run, "failure.txt", "the reason whooper-review gave\n", 2)
+        self.write(run, "failure.json", CAUSES[cause], 2)
+        return run
+
+    def waiting(self, ago, pr, cause="docker_unavailable"):
+        """Makes the run of example-org/example-repo#<pr> that whooper-round did not start, ago before now,
+        because an earlier review in its round stopped at cause, as wait_review leaves it, and returns it."""
+        run = self.make_run(ago, pr=pr, run_json=False)
+        (run / "run.json").write_text(json.dumps({
+            "kind": "first_review", "repo": "example-org/example-repo", "pr": pr, "head_sha": "h1", "base_ref": "master",
+            "source": "github_request", "slack": None, "reason": "r", "run_id": run.name, "agent": "claude"}))
+        (run / "waiting.json").write_text(json.dumps(CAUSES[cause]))
+        return run
+
+    def status(self):
         result = subprocess.run([str(ROOT / "bin" / "whooper-status"), "--json"], env=self.env, capture_output=True,
                                 text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
-        return json.loads(result.stdout)["reviews"]
+        return json.loads(result.stdout)
+
+    def reviews(self):
+        return self.status()["reviews"]
 
     def review(self, run, **fields):
         """What whooper-status lists for the run, given the fields that differ from a review that ended
@@ -3350,6 +3438,57 @@ class ReviewsTest(unittest.TestCase):
                     **{run.name: CAUSES[cause] for run, cause in older}}
         self.assertEqual({r["run_id"]: r["cause"] for r in self.reviews()}, expected)
         self.assertEqual({run_id: self.shown(self.state / "runs" / run_id)["cause"] for run_id in expected}, expected)
+
+    def test_a_review_that_waits_needs_no_one_and_names_the_cause_it_waits_on(self):
+        older = self.make_run(timedelta(hours=5), pr=13)
+        self.finish(older)
+        # A round's review of PR 12 could not reach Docker, so its review of PR 13 waits.
+        failed = self.stopped(timedelta(hours=2), 12, "docker_unavailable")
+        waits = self.waiting(timedelta(hours=2) - timedelta(minutes=3), 13)
+        self.assertEqual(self.reviews(), [
+            self.review(waits, outcome="waiting", cause=CAUSES["docker_unavailable"], needs_you=False, ended_at=None,
+                        verdict=None, title=None),
+            self.review(failed, outcome="failed", cause=CAUSES["docker_unavailable"], verdict=None,
+                        ended_at=self.local(self.started(failed) + timedelta(minutes=2))),
+            # PR 13's newer run supersedes this one, though it waits.
+            self.review(older, needs_you=False),
+        ])
+        # It has no findings, drafts, or diff yet, since its review has not fetched the merge base.
+        self.assertEqual(self.shown(waits), {
+            "version": 1, "run_id": waits.name, "run": json.loads((waits / "run.json").read_text()), "title": None,
+            "author": None, "outcome": "waiting", "findings": None, "drafts": None, "diff": None, "failure": None,
+            "asks": [], "submitted": None, "cause": CAUSES["docker_unavailable"]})
+        # An ask about it may read why it waits.
+        prompt = io.StringIO()
+        with redirect_stdout(prompt):
+            main("prompt", "ask", "claude", str(waits), "Why does this review wait?")
+        self.assertIn(f"- {waits / 'waiting.json'}: ", prompt.getvalue())
+
+    def test_whooper_is_blocked_from_a_failure_that_stops_every_review_until_a_review_does_not_stop_there(self):
+        self.assertIsNone(self.status()["blocked"])
+        self.finish(self.make_run(timedelta(hours=9), pr=11))
+        self.assertIsNone(self.status()["blocked"])
+        # A review whose setup script could not reach Docker blocks Whooper from when it stopped.
+        first = self.stopped(timedelta(hours=8), 12, "docker_unavailable")
+        since = self.local(self.started(first) + timedelta(minutes=2))
+        self.assertEqual(self.status()["blocked"], {**CAUSES["docker_unavailable"], "since": since, "waiting": 0})
+        # The rest of its round waits, the next round's review stops there again, and a review runs now,
+        # which has not shown yet whether Docker is back. Two PRs' newest reviews wait.
+        self.waiting(timedelta(hours=8) - timedelta(minutes=3), 13)
+        self.waiting(timedelta(hours=8) - timedelta(minutes=4), 14)
+        self.stopped(timedelta(hours=7), 12, "docker_unavailable")
+        self.hold(self.make_run(timedelta(minutes=5), pr=15), os.getpid())
+        self.assertEqual(self.status()["blocked"], {**CAUSES["docker_unavailable"], "since": since, "waiting": 2})
+        # A review that stops at a cause of its PR's own got past the setup script, so Docker runs again.
+        self.stopped(timedelta(hours=6), 16, "time_limit")
+        self.assertIsNone(self.status()["blocked"])
+        # Another cause that stops every review blocks Whooper again, from its own failure.
+        setup = self.stopped(timedelta(hours=5), 17, "setup_failed")
+        self.assertEqual(self.status()["blocked"], {**CAUSES["setup_failed"], "waiting": 2,
+                                                    "since": self.local(self.started(setup) + timedelta(minutes=2))})
+        # A review that succeeds ends it.
+        self.finish(self.make_run(timedelta(hours=4), pr=18))
+        self.assertIsNone(self.status()["blocked"])
 
     def test_show_prints_a_finished_review(self):
         run = self.make_run(timedelta(hours=1))

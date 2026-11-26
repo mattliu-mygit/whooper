@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Reviews one work item with a run of the agent the config's [jobs] review names, through its
 # launcher agents/<agent>/review, and prints the run's directory, <state>/runs/<run-id>/, where
-# <state> is $XDG_STATE_HOME/whooper (default ~/.local/state/whooper):
+# <state> is $XDG_STATE_HOME/whooper (default ~/.local/state/whooper), as soon as it makes it, so
+# a caller has it whether or not the review then finishes:
 #
 #   whooper-review <work-item.json> --dry-run [--as-of <ISO 8601 time with a zone>]
 #
@@ -130,8 +131,10 @@ cleanup() {
   if [[ -n "$watchdog_pid" ]]; then
     kill "$watchdog_pid" 2>/dev/null || true
   fi
+  # What the teardown script prints goes to the error output, so this script's output stays the run
+  # directory alone.
   if [[ -n "$WHOOPER_REPO_TEARDOWN" && -n "${WHOOPER_RUN_ID:-}" ]]; then
-    "$WHOOPER_REPO_TEARDOWN" || echo "whooper-review: $WHOOPER_REPO_TEARDOWN failed" >&2
+    "$WHOOPER_REPO_TEARDOWN" >&2 || echo "whooper-review: $WHOOPER_REPO_TEARDOWN failed" >&2
   fi
   for tree in head base; do
     if [[ -d "$run/$tree" ]]; then
@@ -150,6 +153,8 @@ trap cleanup EXIT
 trap 'stop_reason="the review was interrupted" step=interrupted step_log=""; exit 130' INT TERM HUP
 
 mkdir -p "$run/tmp"
+# whooper-round reads why a review that fails stopped from its run directory.
+echo "$run"
 failure="$run/failure.txt"
 "$root/lib/python" "$root/lib/whooper.py" record "$data" "$item" running
 
@@ -274,4 +279,3 @@ step=findings
   { mv "$run/findings.json" "$run/findings.invalid.json"; die "the review run's findings.json does not fit the schema"; }
 [[ -f "$run/log.md" ]] || echo "whooper-review: the run wrote no log.md" >&2
 finished=true
-echo "$run"

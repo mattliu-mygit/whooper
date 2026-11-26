@@ -25,6 +25,7 @@ from the user's config file (config_path), never from this code. The bin/ script
   whooper.py record <data dir> <work-item.json> running|failed                     -> writes the PR record
   whooper.py cause <run dir> <step> [<step's error output>]                         -> failure.json, the cause
   whooper.py retry <data dir> <run-id> <head now>                                  -> queues another review
+  whooper.py wait <data dir> <work-item.json> <failure.json>                      -> a waiting run, the recheck list
   whooper.py classify <data dir> <run dir>                                         -> verdicts, digest, record
   whooper.py post <data dir> <run dir> <head now> <review comments.json>          -> post.json, digest, record
   whooper.py draft <data dir> <run-id> [<change>]                                  -> the run's drafts JSON
@@ -181,8 +182,8 @@ def local_time(unix):
 def read_status(data):
     """Whooper's status for whooper-status --json, from the files under data, its state directory:
     whether whooper-run and a round are running, whether Whooper is paused, when the next scheduled
-    round starts, how the last round ended, the reviews of the last REVIEW_DAYS days (read_reviews),
-    and the last ROUNDS_KEPT rounds (add_round), newest first. Times are local, in ISO 8601 with the
+    round starts, how the last round ended, what blocks every review (read_blocked), the reviews of
+    the last REVIEW_DAYS days (read_reviews), and the last ROUNDS_KEPT rounds (add_round), newest first. Times are local, in ISO 8601 with the
     offset. It reads files, asks ps about the two
     lock holders, and checks that the process of each review's lock exists, and never calls GitHub,
     Slack, or a model."""
@@ -209,6 +210,7 @@ def read_status(data):
     record = json.loads(read(data / "round.lock" / "round.json") or "null") if current else None
     last = json.loads(read(data / "last-round.json") or "null")
     rounds = [json.loads(line) for line in (read(data / "rounds.jsonl") or "").splitlines()]
+    reviews = read_reviews(data, datetime.now(timezone.utc))
     return {
         "version": 1,
         "loop": {"running": bool(loop), "pid": loop},
@@ -218,11 +220,37 @@ def read_status(data):
                   "reviewing": record["reviewing"] if record else None},
         "last_round": {**last, "started_at": local_time(last["started_at"]), "ended_at": local_time(last["ended_at"])}
                       if last else None,
-        "reviews": read_reviews(data, datetime.now(timezone.utc)),
+        "blocked": read_blocked(reviews),
+        "reviews": reviews,
         "rounds": [{**r, "started_at": local_time(r["started_at"]),
                     "ended_at": local_time(r["ended_at"]) if r["ended_at"] is not None else None}
                    for r in reversed(rounds)],
     }
+
+
+def read_blocked(reviews):
+    """What stops every review, for whooper-status's blocked, from reviews, newest first, as
+    read_reviews lists them: while the newest review that ended or waits stopped, or waits, at a cause
+    whose scope is all, that cause; since, when the first of the reviews just before it that stopped
+    or wait at the same cause ended, or started for one that waits; and waiting, how many PRs' newest
+    review waits for the next round. None otherwise, as once a review succeeds, or stops at a cause of
+    its PR's own, which shows that the cause no longer holds. A review that runs has not shown either
+    yet, so it is passed over."""
+    ended = [r for r in reviews if r["outcome"] != "running"]
+    cause = ended[0]["cause"] if ended else None
+    if cause is None or cause["scope"] != "all":
+        return None
+    first = ended[0]
+    for review in ended:
+        if review["cause"] is None or review["cause"]["id"] != cause["id"]:
+            break
+        first = review
+    newest, waiting = set(), 0
+    for review in reviews:
+        if (review["repo"], review["pr"]) not in newest and review["outcome"] == "waiting":
+            waiting += 1
+        newest.add((review["repo"], review["pr"]))
+    return {**cause, "since": first["ended_at"] or first["started_at"], "waiting": waiting}
 
 
 # whooper-status lists the last 50 rounds, which is all rounds.jsonl keeps.
@@ -344,14 +372,15 @@ FAILURE_TEXTS = (
 
 
 def read_cause(run, outcome):
-    """What kept the review in run from finishing, as failure_cause gives it, for a failed review, and
-    None for any other outcome: the cause whooper-review saved in failure.json as it stopped the
-    review. Without that file, as for a review from before whooper-review saved it, failure.txt names
-    the step by its wording (FAILURE_TEXTS), and its text is the step's output, so a review with
-    neither, as after a kill -9, is unknown."""
-    if outcome != "failed":
+    """What kept the review in run from finishing, as failure_cause gives it, for a failed or waiting
+    review, and None for any other outcome: the cause whooper-review saved in failure.json as it
+    stopped the review, or for one that waits, the cause in waiting.json (wait_review). Without that
+    file, as for a review from before whooper-review saved it, failure.txt names the step by its
+    wording (FAILURE_TEXTS), and its text is the step's output, so a review with neither, as after a
+    kill -9, is unknown."""
+    if outcome not in ("failed", "waiting"):
         return None
-    saved = read_object(run / "failure.json") or {}
+    saved = read_object(run / ("waiting.json" if outcome == "waiting" else "failure.json")) or {}
     if isinstance(saved.get("id"), str) and isinstance(saved.get("summary"), str) and saved.get("scope") in ("all", "pr"):
         return {key: saved[key] for key in ("id", "summary", "scope")}
     try:
@@ -365,19 +394,23 @@ def read_cause(run, outcome):
 def read_review(run, running):
     """How the review in the run directory run went, as whooper-status and whooper-show report it:
     run.json's work item, the outcome, the findings, the review whooper-submit posted, and for a
-    failed review, the cause (read_cause). running holds the IDs of the runs a live whooper-review
-    still runs (running_runs). A file that is missing, empty, cut short, or does not fit reads as
+    failed or waiting review, the cause (read_cause). running holds the IDs of the runs a live
+    whooper-review still runs (running_runs). A file that is missing, empty, cut short, or does not fit reads as
     None, so a run directory Whooper cannot read gives a failed review rather than an error.
 
-    The outcome is running while a live whooper-review runs the review; reviewed once the review ended
-    with findings that fit FINDINGS_SCHEMA and without failure.txt, the reason whooper-review saves
-    when it stops a review; and failed otherwise. The findings are None while the review runs, since a
+    The outcome is running while a live whooper-review runs the review; waiting for a review
+    whooper-round did not start, because an earlier review in its round stopped at a cause that stops
+    every review (wait_review); reviewed once the review ended with findings that fit FINDINGS_SCHEMA
+    and without failure.txt, the reason whooper-review saves when it stops a review; and failed
+    otherwise. The findings are None while the review runs, since a
     Devin review writes findings.json itself and may change it until it ends, and when they do not
     fit, as whooper-draft then shows no drafts. The posted review is submit.json once it says posted;
     a submit.json that says posting may or may not be on GitHub, and whooper-submit asks the user to
     check the PR."""
     if run.name in running:
         outcome, result = "running", None
+    elif (run / "waiting.json").exists():
+        outcome, result = "waiting", None
     else:
         result = read_object(run / "findings.json")
         try:
@@ -404,8 +437,9 @@ def read_reviews(data, now):
     """The review runs under data/runs that started in the REVIEW_DAYS days before now, newest first, as
     whooper-status lists them. A review's PR number and start come from its run ID, its repo from
     run.json, its title from github.json, and the rest from read_review. Only the newest run of each PR
-    can need the user, since a newer run supersedes the older ones, even while it runs. A name in runs
-    that is not a run ID, such as Finder's .DS_Store, is no run."""
+    can need the user, since a newer run supersedes the older ones, even while it runs or waits, and
+    one that runs or waits needs no one yet. A name in runs that is not a run ID, such as Finder's
+    .DS_Store, is no run."""
     def modified(path):
         try:
             return local_time(path.stat().st_mtime)
@@ -446,7 +480,7 @@ def read_reviews(data, now):
             # whooper-submit renames submit.json saying posted into place once GitHub took the review.
             "submitted": {"event": submit["request"]["event"], "at": modified(run / "submit.json")}
                          if submit else None,
-            "needs_you": (repo, pr) not in newer and outcome != "running" and submit is None,
+            "needs_you": (repo, pr) not in newer and outcome not in ("running", "waiting") and submit is None,
             "cause": cause,
         })
         newer.add((repo, pr))
@@ -469,12 +503,12 @@ def repo_clone(repo):
 def rebuilt_diff(item):
     """The diff a review read, for a run from before whooper-review kept it as diff.patch: git diff
     between the merge base and the head that item, the run's run.json, records, in the repo's clone,
-    with whooper-review's PLAIN_DIFF flags, or None without run.json and when the clone lacks either
-    commit or one of their files. The clone has no checkout, so git reads .gitattributes from the head
+    with whooper-review's PLAIN_DIFF flags, or None without run.json or its merge base, as for a review
+    that waits, and when the clone lacks either commit or one of their files. The clone has no checkout, so git reads .gitattributes from the head
     commit, which whooper-review's diff read from the head worktree: a file marked -diff shows as
     binary. --no-lazy-fetch keeps git from fetching a file the partial clone lacks, so this only reads
     the clone."""
-    if item is None:
+    if item is None or not item.get("merge_base"):
         return None
     base, head = item["merge_base"], item["head_sha"]
     git = subprocess.run(["git", "--git-dir", str(repo_clone(item["repo"]) / ".git"), "--no-lazy-fetch",
@@ -999,6 +1033,42 @@ def retry(data, run_id, head_now, now):
             " bin/whooper-round runs that round now")
 
 
+def wait_review(data, item, cause, agent, now):
+    """Records, for whooper-round, that it did not start the review of item, a work item, because an
+    earlier review in its round stopped at cause, which stops every review: a run directory under
+    data/runs whose waiting.json holds the cause, and whose run.json is the item with its run ID and
+    agent, the agent [jobs] review names, which an ask about the run runs on. When the PR's newest run
+    already waits at the item's head and kind, as after an earlier round that waited too, it gets the
+    cause instead of another directory. The item goes on the recheck list unless the list holds the PR
+    already, so the next round reviews it even when the poll does not list it again, as for a Slack
+    ask, which a poll reads once. No record changes, so the item is work as it was. Returns the run
+    directory."""
+    runs = data / "runs"
+    if not recheck_path(data, item).exists():
+        list_again(data, item, item["head_sha"])
+    # Run IDs start with the time and end with the PR number, so the first of them whose run.json names
+    # the item's repo is the PR's newest run.
+    for run in sorted(runs.glob(f"*-{item['pr']}"), reverse=True):
+        ran = read_object(run / "run.json") if parse_run_id(run.name) else None
+        if ran is None or ran.get("repo") != item["repo"]:
+            continue
+        if (run / "waiting.json").exists() and (ran.get("head_sha"), ran.get("kind")) == (item["head_sha"], item["kind"]):
+            write_file(run / "waiting.json", json.dumps(cause))
+            return run
+        break
+    runs.mkdir(parents=True, exist_ok=True)
+    # Two items of one PR, of two kinds, can wait in the same second.
+    while (run := runs / f"{now:%Y%m%dT%H%M%SZ}-{item['pr']}").exists():
+        now += timedelta(seconds=1)
+    # The directory appears whole, through a rename, so whooper-status never lists it without its files,
+    # which would read as a failed review that needs the user.
+    staging = Path(tempfile.mkdtemp(dir=runs, prefix=f".{run.name}."))
+    (staging / "run.json").write_text(json.dumps({**item, "run_id": run.name, "agent": agent}, indent=2))
+    (staging / "waiting.json").write_text(json.dumps(cause))
+    staging.rename(run)
+    return run
+
+
 def recheck_path(data, item):
     """The recheck list's file for the item's PR: rechecks/<owner>-<repo>-<pr>.json under data."""
     return data / "rechecks" / f"{item['repo'].replace('/', '-')}-{item['pr']}.json"
@@ -1412,8 +1482,9 @@ def append_digest(data, run_dir, item, verdicts):
 
 # The files of a review run's record that an ask run's prompt lists, in this order, with what each
 # holds. A file the run directory lacks is left out: only a review whooper-review stopped leaves
-# failure.txt, a Claude review leaves transcript.jsonl and a Devin review transcript.json, and
-# drafts.json, submit.json, and summary.md come only from the user's choices or a Devin summary.
+# failure.txt, a Claude review leaves transcript.jsonl and a Devin review transcript.json,
+# drafts.json, submit.json, and summary.md come only from the user's choices or a Devin summary, and
+# waiting.json only from a review whooper-round did not start.
 # failure.txt is here rather than in ASK_FAILURE_RECORD because a Devin review writes findings.json
 # itself, and can pass its time limit after writing it.
 ASK_RECORD = {
@@ -1431,6 +1502,7 @@ ASK_RECORD = {
     "drafts.json": "the user's choices for the review: which comments go in, edited texts, approve or comment, and the message",
     "submit.json": "the review the user submitted to GitHub",
     "summary.md": "Whooper's summary of the review",
+    "waiting.json": "why the review has not run yet: the cause that stopped an earlier review in its round",
 }
 # The files an ask run's prompt also lists for a review that did not finish, one that left no
 # findings.json Whooper can read: its agent's output, which may say why, and the findings
@@ -1648,6 +1720,10 @@ def main(command, *args):
     elif command == "retry":
         data, run_id, head_now = args
         print(retry(Path(data), run_id, head_now, datetime.now(timezone.utc)))
+    elif command == "wait":
+        data, item, failure = Path(args[0]), load(args[1]), load(args[2])
+        cause = {key: failure[key] for key in ("id", "summary", "scope")}
+        wait_review(data, item, cause, load_config()["jobs"]["review"], datetime.now(timezone.utc))
     elif command == "classify":
         # Not resolve(): the run's commands name its directory as whooper-review printed it, and on
         # macOS a directory under $TMPDIR resolves to another path through /private.

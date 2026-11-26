@@ -47,9 +47,11 @@ steps below: fetch, poll, and select, then for each selected item a dry-run revi
 once, but only between `start` and `end` on the listed `days`, and otherwise whooper-run waits for
 the next start. The defaults are 15 minutes, 10:00 to 18:00, Monday to Friday. When a review
 finishes or fails, whooper-round runs `[schedule] notify`, if the config names one, as
-`<notify> <title> <message>`. Only one copy runs at a time: whooper-run holds the lock
-`<state>/run.lock` and refuses to start while another whooper-run holds it. To run it in the
-background with a log:
+`<notify> <title> <message>`. When a review stops at a cause that stops every review, such as a
+setup script that cannot reach Docker ([See reviews](#see-reviews)), the round starts none of its
+other reviews: each waits for the next round, which reviews it again. Only one copy runs at a time:
+whooper-run holds the lock `<state>/run.lock` and refuses to start while another whooper-run holds
+it. To run it in the background with a log:
 
 ```sh
 bin/whooper-run >> ~/.local/state/whooper/run.log 2>&1 &
@@ -139,14 +141,17 @@ runs it as the manifest's `show-review` action, which puts `--json` before the r
 works. The headers of both commands list each field.
 
 A review's outcome is `running` while a live whooper-review holds the PR's lock for the run, the
-rule whooper-ask follows; `reviewed` once the review left findings that fit `schemas/findings.json`
-and no `failure.txt`; and `failed` otherwise, as for a run directory Whooper cannot read. Only
+rule whooper-ask follows; `waiting` for a review whooper-round did not start, because an earlier
+review in its round stopped at a cause that stops every review; `reviewed` once the review left
+findings that fit `schemas/findings.json` and no `failure.txt`; and `failed` otherwise, as for a run
+directory Whooper cannot read. Only
 `run.json` names the repo, so the repo is null for a review whooper-review stopped before that file
 was whole, such as when its fetch failed, and in a review's first seconds, before it writes the
 file; the PR number and start come from the run ID. The title and author come from `github.json`,
 the PR conversation the review read, since `run.json` has neither, and are null when the review's
 GitHub fetch failed or the file cannot be read. A review needs you once it ends, reviewed or failed,
-until whooper-submit posts it or a newer review of the same PR starts, which supersedes it. A
+until whooper-submit posts it or a newer review of the same PR starts, which supersedes it, even one
+that waits; a review that waits needs no one. A
 `submit.json` that still says `posting` does not count as posted, since its review may or may not be
 on GitHub; whooper-submit then asks you to check the PR. The verdict, the findings, and the drafts
 come only from findings that fit the schema, and none while the review runs, since a Devin review
@@ -170,6 +175,15 @@ the cause stops every review until you fix it, and `pr` when it stops only this 
 whooper-review saves the cause in `failure.json` as it stops the review. A review from before then
 gets the cause its `failure.txt` names by the wording whooper-review gave each step, and `unknown`
 when it names none or the review has no `failure.txt`, as after a `kill -9`.
+
+After a review stops at a cause whose scope is `all`, whooper-round starts none of the round's other
+reviews: each gets a run directory of its own, outcome `waiting`, with that cause as its `cause`, and
+goes on the recheck list, so the next round reviews it again whatever brought it in. A later round
+that waits again reuses the run of a PR whose newest review already waits at the same head. While
+the newest review that ended or waits stopped, or waits, at such a cause, whooper-status's `blocked`
+names it, with `since`, when the first of the reviews in a row at that cause ended, and `waiting`, how
+many PRs' newest review waits. It is null once a review succeeds, or stops at a cause of its PR's own,
+which shows that the cause no longer holds; a review that runs has shown neither yet.
 
 ## Submit a review
 
@@ -335,7 +349,9 @@ nothing and puts the PR on the recheck list. The next round's whooper-select add
 the new head, with the kind and source it had, so the new commits get a review even when only a
 Slack ask brought the PR in, which a poll reads once. Like a re-check, it waits for the next day
 once the PR has 3 records of its kind for other heads started today. `bin/whooper-retry` puts a PR
-on the list too, and no limit holds that review back ([Retry a review](#retry-a-review)).
+on the list too, and no limit holds that review back ([Retry a review](#retry-a-review)). So does
+whooper-round, for a review that waits for the next round after another review in the round stopped
+at a cause that stops every review, unless the list holds the PR already.
 
 A PENDING review or a thread reply does not count as reviewing. Slack text is untrusted: an ask
 must name a post or thread reply slackdump read, and only plain
@@ -462,8 +478,9 @@ same way too.
   list for the next day. Of these, only the missing table drops an item whose record says retry.
 - `rechecks/<owner>-<repo>-<pr>.json`: the recheck list: a PR whose head whooper-post or
   whooper-submit found moved since its review, as the work item for the new head, or whose review
-  you asked for again with whooper-retry, as the run's work item at the head the PR has now, with the
-  kind, source, and Slack ask it had. A later mark of the PR replaces it. whooper-select deletes it once
+  you asked for again with whooper-retry, as the run's work item at the head the PR has now, or whose
+  review waits for the next round, as its work item, with the kind, source, and Slack ask it had. A
+  later mark of the PR replaces it. whooper-select deletes it once
   the newest poll lists the PR, which then comes with the head the PR has now, or once the record at
   the listed head is done or has failed 3 times.
 - `locks/<owner>-<repo>-<pr>/`: the lock of the review that holds the PR, with its process ID in
@@ -479,10 +496,11 @@ same way too.
 - `round.lock/`: the running whooper-round's lock, with its process ID in `pid` and the same stale
   rule as `run.lock/`. `round.json` holds the round's start as a Unix time, how many items it
   selected, the PR it is reviewing as `<owner>/<repo>#<number>`, and each finished review's PR and
-  outcome: `reviewed` or `failed`.
+  outcome: `reviewed`, `failed`, or `waiting`.
 - `last-round.json`: the last round that ended: its start and end as Unix times, its result
   (`done`, `poll_failed`, or `interrupted`), how many items it selected, and each review's PR and
-  outcome, where a review the round stopped in is `interrupted`.
+  outcome, where a review the round stopped in is `interrupted`, and one it did not start after
+  another stopped at a cause that stops every review is `waiting`.
 - `rounds.jsonl`: the last 50 rounds, oldest first, one JSON object a line, which whooper-round adds
   as each round ends and whooper-run as it skips one while paused: the round's start and end as Unix
   times, the end null for a skipped round; its result (`done`, `poll_failed`, `interrupted`, or
@@ -509,5 +527,7 @@ same way too.
   posted: the request and GitHub's `response`, with `status` `posted`, or `posting` while gh posts.
   `asks/` holds whooper-ask's answers, `<n>.json`, each beside its run's `<n>.prompt.md`,
   transcript, and `<n>.stderr.log`, and for Devin `<n>.devin-config.json`.
-  The worktrees `head/` and `base/` exist only while the run does.
+  The worktrees `head/` and `base/` exist only while the run does. The run of a review that waits
+  holds only `run.json`, the work item with the run ID and the agent `[jobs] review` names, and
+  `waiting.json`, the cause it waits on.
 - `digest.jsonl`: one line per finding that waits for the user, with its run.

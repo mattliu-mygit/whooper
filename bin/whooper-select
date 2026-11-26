@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Prints the work items to start, one JSON object per line: the newest poll's, and the recheck
 # list's in <state>/rechecks, PRs whose head whooper-post or whooper-submit found moved since their
-# review, or whose review the user asked for again with bin/whooper-retry. It drops the items a record
+# review, whose review the user asked for again with bin/whooper-retry, or whose review waited in a
+# round after another stopped at a cause that stops every review. It drops the items a record
 # under <state>/prs marks as handled, printing each with its reason on stderr, but not an item whose
 # record says retry, and deletes the recheck list's entries that no longer wait: the poll lists the
 # PR, or the review at the listed head is done or has failed 3 times.

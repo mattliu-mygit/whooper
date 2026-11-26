@@ -5,14 +5,19 @@
 # finishes or fails. Nothing posts to GitHub or Slack. whooper-run runs it on the config's
 # [schedule]; run by hand, it runs a round even while Whooper is paused.
 #
+# When a review stops at a cause that stops every review, such as a setup script that cannot reach
+# Docker (its failure.json, lib/whooper.py's failure_cause), the round starts none of its remaining
+# reviews: each waits, with that cause, in a run directory of its own, and goes on the recheck list,
+# so the next round reviews it again (lib/whooper.py's wait_review).
+#
 # Only one round runs at a time: whooper-round holds the lock <state>/round.lock, with its process
 # ID in round.lock/pid, where <state> is $XDG_STATE_HOME/whooper (default ~/.local/state/whooper),
 # and exits 1 with "a round is already running" while another whooper-round holds it. While the
 # round runs, round.lock/round.json holds when it started and the PR it is reviewing. When the round
 # ends, done, failed, or stopped, it writes <state>/last-round.json, which bin/whooper-status reads,
 # and adds the round to <state>/rounds.jsonl, the history of the last 50 rounds, with a reason: which
-# poll step failed, or null. It exits 0 when the poll steps succeeded, whether or not each review
-# did, and 1 when one failed.
+# poll step failed, the cause reviews wait on and how many wait, or null. It exits 0 when the poll
+# steps succeeded, whether or not each review did, and 1 when one failed.
 #
 # No set -e: a review that fails must not end the round, and the next item still gets its review.
 set -uo pipefail
@@ -82,10 +87,19 @@ fi
 selected="$(grep -c . "$items/selected.jsonl")"
 echo "selected: $selected item(s)"
 save "$record" jq --argjson selected "$selected" '.selected = $selected' "$record"
+# The failure.json of the review that stopped at a cause that stops every review, once one has.
+blocked="" waited=0
 while IFS= read -r item <&3; do
   pr="$(jq -r '"\(.repo)#\(.pr)"' <<<"$item")"
   file="$items/$(jq -r '"\(.repo | sub("/"; "-"))-\(.pr)-\(.kind)"' <<<"$item").json"
   save "$file" printf '%s\n' "$item"
+  if [[ -n "$blocked" ]]; then
+    echo "--- $pr $(jq -r .kind <<<"$item") waits for the next round: $(jq -r .summary "$blocked")"
+    "$root/lib/python" "$root/lib/whooper.py" wait "$WHOOPER_STATE" "$file" "$blocked"
+    save "$record" jq --arg pr "$pr" '.reviews += [{pr: $pr, outcome: "waiting"}]' "$record"
+    waited=$((waited + 1))
+    continue
+  fi
   echo "--- review $pr $(jq -r .kind <<<"$item")"
   save "$record" jq --arg pr "$pr" '.reviewing = $pr' "$record"
   if run="$("$root/bin/whooper-review" "$file" --dry-run < /dev/null)"; then
@@ -98,7 +112,14 @@ while IFS= read -r item <&3; do
     echo "review failed"
     notify "Whooper: $pr review failed" "See whooper-round's output."
     outcome=failed
+    # whooper-review prints its run directory once it has one, and saves there what stopped the review.
+    if [[ -n "$run" ]] && jq -e '.scope == "all"' "$run/failure.json" > /dev/null 2>&1; then
+      blocked="$run/failure.json"
+    fi
   fi
   save "$record" jq --arg outcome "$outcome" '.reviews += [{pr: .reviewing, outcome: $outcome}] | .reviewing = null' "$record"
 done 3< "$items/selected.jsonl"
 result=done
+if ((waited)); then
+  reason="$(jq -r .summary "$blocked"), so $waited review(s) wait for the next round"
+fi
