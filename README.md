@@ -462,7 +462,11 @@ and what the run checked and did not. As soon as the run ends, whooper-review ch
 hunk of a file the diff changes, counted in the head, or for a deleted file at the merge base, and
 each file the diff shows lines of is in exactly one layer; a file whose diff shows no lines, such as
 a binary file, is in none. An `overview.json` that cannot be read, is not JSON, or breaks a rule
-moves to `overview.invalid.json`, with why there and on whooper-review's error output. The overview
+moves to `overview.invalid.json`, with why there and on whooper-review's error output. A run that
+writes its overview inside `findings.json` instead, where `schemas/findings.json` has no room for
+it, would fail the review, so whooper-review first moves that overview from `findings.json` to
+`overview.json`, which it then checks, or discards it when the run wrote `overview.json` too, and
+says which on its error output. The overview
 never changes how a review ends: without one, or with one whooper-review drops, the review goes on
 as it would anyway. A run that passes
 `[review] timeout_minutes` is stopped, and when whooper-review exits it stops the run and every

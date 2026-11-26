@@ -18,11 +18,13 @@
 # needs, such as dependencies or databases (examples/setup.example.sh). The run itself has no
 # GitHub login, and its launcher denies the Slack writes, so it can post nothing. Its findings.json
 # must fit schemas/findings.json, and a run that passes [review] timeout_minutes is stopped. The run
-# also writes its overview of the PR as overview.json. As soon as the run ends, an overview.json that
-# cannot be read, is not JSON, or breaks a rule of prompts/review.md's overview, such as lines outside
-# the diff's hunks, moves to overview.invalid.json, with why there and on this script's error output
-# (lib/whooper.py's read_overview). Whatever the overview, the review goes on as it would without one.
-# bin/whooper-classify <run dir> then applies rule v1 to its findings.
+# also writes its overview of the PR as overview.json. As soon as the run ends, an overview the run
+# wrote inside findings.json instead, which the schema has no room for, leaves findings.json and moves
+# to overview.json, unless the run wrote overview.json too, which then stays as it is. Then an
+# overview.json that cannot be read, is not JSON, or breaks a rule of prompts/review.md's overview,
+# such as lines outside the diff's hunks, moves to overview.invalid.json, with why there and on this
+# script's error output (lib/whooper.py's read_overview). Whatever the overview, the review goes on as
+# it would without one. bin/whooper-classify <run dir> then applies rule v1 to its findings.
 #
 # While it runs, this script holds the PR's lock, <state>/locks/<owner>-<repo>-<pr>/, with its
 # process ID in pid and the run ID in run_id. On exit, finished or not, the repo's teardown script
@@ -271,8 +273,9 @@ wait "$agent_group" || agent_exit=$?
 kill "$watchdog_pid" 2>/dev/null || true
 watchdog_pid=""
 
-# The overview is checked as soon as the run ends, even one past its time limit. Whatever the check
-# finds, and even if it fails, the review goes on as it would without an overview.
+# The overview is checked as soon as the run ends, even one past its time limit, after an overview the
+# run wrote inside findings.json leaves that file, so it cannot fail the findings' check below.
+# Whatever the check finds, and even if it fails, the review goes on as it would without an overview.
 "$root/lib/python" "$root/lib/whooper.py" overview "$run" || true
 
 # Each check names its own step, which failure.json names the cause by.

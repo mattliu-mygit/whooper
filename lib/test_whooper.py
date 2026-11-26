@@ -2818,6 +2818,79 @@ class RunTest(unittest.TestCase):
                 self.assertEqual({key: json.loads(shown.stdout)[key] for key in ["outcome", "findings", "overview"]},
                                  {"outcome": "reviewed", "findings": findings, "overview": kept})
 
+    def test_an_overview_the_run_wrote_in_findings_json_moves_to_overview_json_and_cannot_fail_the_review(self):
+        env, item, _ = self.pull_request()
+        config = Path(env["WHOOPER_CONFIG"])
+        config.write_text(re.sub(r'(?m)^review = "\w+"$', 'review = "devin"', config.read_text()))
+        findings = {"status": "reviewed", "skip_reason": "", "findings": [],
+                    "approval": {"verdict": "approve_once_ci_passes", "reason": "Read the diff."}}
+        # A Devin run that writes its overview inside findings.json, where schemas/findings.json has no room for
+        # it, and overview.json too when the test leaves one beside it. cp -p keeps the time the test gives
+        # findings.json, as the time the run wrote it. A second call, devin rm, deletes the run's session.
+        self.script(self.fakes / "devin", "\n".join([
+            'if [ "$1" = rm ]; then exit 0; fi',
+            'while [ $# -gt 1 ]; do [ "$1" = --export ] && export="$2"; shift; done',
+            'fakes="${0%/*}"',
+            'cp -p "$fakes/findings.json" "$WHOOPER_RUN/"',
+            'if [ -f "$fakes/overview.json" ]; then cp "$fakes/overview.json" "$WHOOPER_RUN/"; fi',
+            """echo '{"session_id": "session-7", "steps": []}' > "$export\"""",
+        ]))
+
+        def review(stray, own=None):
+            """Reviews PR 12 with the run writing stray as the overview in findings.json, and own, text, as
+            overview.json unless it is None, and returns whooper-review's error output, the run's directory, and
+            what whooper-show gives of the review. findings.json keeps the time the run wrote it, here a minute
+            before the review, which whooper-status gives as when the review ended. A run ID names its start to
+            the second, so each review starts in a second of its own."""
+            sleep(1 - datetime.now().microsecond / 1e6)
+            (self.fakes / "findings.json").write_text(json.dumps({**findings, "overview": stray}))
+            written = int(datetime.now().timestamp()) - 60
+            os.utime(self.fakes / "findings.json", (written, written))
+            (self.fakes / "overview.json").unlink(missing_ok=True)
+            if own is not None:
+                (self.fakes / "overview.json").write_text(own)
+            result = self.command("whooper-review", str(item), "--dry-run", env=env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            run = Path(result.stdout.strip())
+            self.assertEqual((run / "findings.json").stat().st_mtime, written)
+            shown = self.command("whooper-show", run.name, "--json", env=env)
+            self.assertEqual(shown.returncode, 0, shown.stderr)
+            keys = ["outcome", "findings", "safe_to_approve", "drafts", "failure", "cause", "overview"]
+            return result.stderr, run, {key: json.loads(shown.stdout)[key] for key in keys}
+
+        # Each review goes on as one whose run wrote only the findings, which lose only the overview.
+        reviewed = {"outcome": "reviewed", "findings": findings, "safe_to_approve": True,
+                    "drafts": {"event": "APPROVE", "message": "", "findings": {}}, "failure": None, "cause": None}
+        moved = "whooper-review: moved the overview in the run's findings.json to overview.json\n"
+        kept = self.overview_of_the_pr()
+        with self.subTest("an overview that keeps every rule moves to overview.json, and whooper-show gives it"):
+            err, run, shown = review(kept)
+            self.assertIn(moved, err)
+            self.assertEqual(json.loads((run / "findings.json").read_text()), findings)
+            self.assertEqual(json.loads((run / "overview.json").read_text()), kept)
+            self.assertFalse((run / "overview.invalid.json").exists())
+            self.assertEqual(shown, {**reviewed, "overview": kept})
+        with self.subTest("one that breaks a rule moves to overview.json, and then aside to overview.invalid.json"):
+            broken = self.overview_of_the_pr(places=[{**kept["places"][0], "start_line": 3, "end_line": 3}])
+            reason = "overview.places[0], lines 3 to 3 of app.txt, is not inside one hunk of the diff"
+            err, run, shown = review(broken)
+            self.assertIn(f"{moved}whooper-review: dropped the run's overview: {reason}\n", err)
+            self.assertEqual(json.loads((run / "findings.json").read_text()), findings)
+            self.assertFalse((run / "overview.json").exists())
+            self.assertEqual(json.loads((run / "overview.invalid.json").read_text()),
+                             {"reason": reason, "overview": broken})
+            self.assertEqual(shown, {**reviewed, "overview": None})
+        with self.subTest("an overview.json the run also wrote stays as it is, and the one in findings.json goes"):
+            own = json.dumps(kept)
+            err, run, shown = review(self.overview_of_the_pr(summary="Another summary."), own)
+            self.assertIn("whooper-review: discarded the overview in the run's findings.json, since the run also wrote"
+                          " overview.json\n", err)
+            self.assertNotIn(moved, err)
+            self.assertEqual(json.loads((run / "findings.json").read_text()), findings)
+            self.assertEqual((run / "overview.json").read_text(), own)
+            self.assertFalse((run / "overview.invalid.json").exists())
+            self.assertEqual(shown, {**reviewed, "overview": kept})
+
     def test_show_gives_the_commits_since_the_review_and_the_files_that_change_with_the_prs_from_the_clone(self):
         env = {**self.git_env(), "TZ": "America/Los_Angeles"}
         tmp = Path(self.tmp.name)

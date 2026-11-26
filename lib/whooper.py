@@ -24,7 +24,9 @@ from the user's config file (config_path), never from this code. The bin/ script
   whooper.py conversation <conversation.graphql result> [<as-of time>]             -> a run's github.json
   whooper.py record <data dir> <work-item.json> running|failed                     -> writes the PR record
   whooper.py cause <run dir> <step> [<step's error output>]                         -> failure.json, the cause
-  whooper.py overview <run dir>                                                    -> overview.invalid.json, for an
+  whooper.py overview <run dir>                                                    -> overview.json, for an overview
+                                                                                      findings.json holds, and
+                                                                                      overview.invalid.json, for an
                                                                                       overview.json read_overview drops
   whooper.py retry <data dir> <run-id> <head now>                                  -> queues another review
   whooper.py wait <data dir> <work-item.json> <failure.json>                      -> a waiting run, the recheck list
@@ -2154,6 +2156,26 @@ def main(command, *args):
         # whooper-review runs this as soon as the run ends, and the review then goes on as it would without
         # an overview.json, whatever this finds.
         run = Path(args[0])
+        # A run that writes its overview inside findings.json, though prompts/review.md asks for overview.json,
+        # would fail the findings' schema check, since schemas/findings.json has no overview. So the overview
+        # leaves findings.json and moves to overview.json, for the check below, unless the run wrote that file
+        # too, which then stays as it is. findings.json is rewritten first, so a failed write of overview.json
+        # loses the overview rather than failing the review. It keeps the time the run wrote it, which
+        # whooper-status gives as when the review ended.
+        path = run / "findings.json"
+        findings = read_object(path)
+        if findings is not None and "overview" in findings:
+            stray = findings.pop("overview")
+            written = path.stat()
+            write_file(path, json.dumps(findings, indent=2))
+            os.utime(path, ns=(written.st_atime_ns, written.st_mtime_ns))
+            try:
+                write_file(run / "overview.json", json.dumps(stray, indent=2), exclusive=True)
+            except FileExistsError:
+                print("whooper-review: discarded the overview in the run's findings.json, since the run also wrote"
+                      " overview.json", file=sys.stderr)
+            else:
+                print("whooper-review: moved the overview in the run's findings.json to overview.json", file=sys.stderr)
         overview, dropped = read_overview(run, (run / "diff.patch").read_text(errors="replace"))
         if dropped:
             write_file(run / "overview.invalid.json", json.dumps({"reason": dropped, "overview": overview}, indent=2))
