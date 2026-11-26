@@ -10,8 +10,9 @@
 # round's whooper-select then starts the review whatever earlier reviews at that head did: the user
 # asked for it, so neither the limit of 3 failures at a head nor the limit of 3 re-checks a day holds
 # it. Once the review starts, its own record counts as usual, and as the PR's newest run it
-# supersedes this one, which then no longer needs the user. It prints what it queued; bin/whooper-round
-# runs that round now. It posts nothing.
+# supersedes this one, which then no longer needs the user. It unmarks the run if the user removed it
+# with bin/whooper-remove, since the user wants its review back. It prints what it did;
+# bin/whooper-round runs that round now. It posts nothing.
 #
 # It refuses a run ID that names no run directory, a review still running, which a live whooper-review
 # holds the PR's lock for, and a run whose run.json it cannot read, since only run.json names the

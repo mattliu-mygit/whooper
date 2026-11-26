@@ -3,9 +3,11 @@
 # list's in <state>/rechecks, PRs whose head whooper-post or whooper-submit found moved since their
 # review, whose review the user asked for again with bin/whooper-retry, or whose review waited in a
 # round after another stopped at a cause that stops every review. It drops the items a record
-# under <state>/prs marks as handled, printing each with its reason on stderr, but not an item whose
-# record says retry, and deletes the recheck list's entries that no longer wait: the poll lists the
-# PR, or the review at the listed head is done or has failed 3 times.
+# under <state>/prs marks as handled, and those that ask again for a review the user removed with
+# bin/whooper-remove while it is its PR's newest run, printing each with its reason on stderr, but not
+# an item whose record says retry. It deletes the recheck list's entries that no longer wait: the
+# poll lists the PR, the review at the listed head is done or has failed 3 times, or the entry asks
+# again for a review the user removed.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"

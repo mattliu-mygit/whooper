@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Marks a review run as removed by the user, out of their lists, or unmarks it:
+#
+#   whooper-remove <run-id> [--undo]
+#
+# The mark is the empty file removed-by-user in the run's directory, <state>/runs/<run-id>/, where
+# <state> is $XDG_STATE_HOME/whooper (default ~/.local/state/whooper), and --undo deletes it. While
+# the mark is there, bin/whooper-status lists the review with removed_by_user true and needs_you
+# false, bin/whooper-show gives removed_by_user true, and Whooper does not retry the review on its
+# own: while the run is its PR's newest, bin/whooper-select drops what asks for the same review again,
+# the PR's standing GitHub review request at the same head included, and takes the PR off the recheck
+# list. A new review request for the PR, such as a new Slack ask or new commits, brings it back, and so
+# does bin/whooper-retry, which unmarks the run it retries. The run's files and the records stay.
+# --undo puts a review that waits back on the recheck list when bin/whooper-select took it off. It
+# prints what it did, and when the mark was already so, says that and changes nothing.
+#
+# It refuses a run ID that names no run directory and a review still running, which a live
+# whooper-review holds the PR's lock for. Prompting Time runs it as the manifest's remove action,
+# adding the run ID, and --undo after it; either order works.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+usage="usage: whooper-remove <run-id> [--undo]"
+run_id="" undo=""
+while (($#)); do
+  case "$1" in
+    --undo)
+      [[ -z "$undo" ]] || { echo "$usage" >&2; exit 1; }
+      undo=--undo
+      ;;
+    *)
+      [[ -z "$run_id" ]] || { echo "$usage" >&2; exit 1; }
+      run_id="$1"
+      ;;
+  esac
+  shift
+done
+[[ -n "$run_id" ]] || { echo "$usage" >&2; exit 1; }
+eval "$("$root/lib/python" "$root/lib/whooper.py" env)"
+exec "$root/lib/python" "$root/lib/whooper.py" remove "$WHOOPER_STATE" "$run_id" ${undo:+"$undo"}

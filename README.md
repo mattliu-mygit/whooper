@@ -150,8 +150,9 @@ was whole, such as when its fetch failed, and in a review's first seconds, befor
 file; the PR number and start come from the run ID. The title and author come from `github.json`,
 the PR conversation the review read, since `run.json` has neither, and are null when the review's
 GitHub fetch failed or the file cannot be read. A review needs you once it ends, reviewed or failed,
-until whooper-submit posts it, you skip it ([Skip a review](#skip-a-review)), or a newer review of
-the same PR starts, which supersedes it, even one that waits; a review that waits needs no one. A
+until whooper-submit posts it, you skip it ([Skip a review](#skip-a-review)) or remove it
+([Remove a review](#remove-a-review)), or a newer review of the same PR starts, which supersedes it,
+even one that waits; a review that waits needs no one. A
 `submit.json` that still says `posting` does not count as posted, since its review may or may not be
 on GitHub; whooper-submit then asks you to check the PR. The verdict, the findings, and the drafts
 come only from findings that fit the schema, and none while the review runs, since a Devin review
@@ -184,11 +185,12 @@ when it names none or the review has no `failure.txt`, as after a `kill -9`.
 After a review stops at a cause whose scope is `all`, whooper-round starts none of the round's other
 reviews: each gets a run directory of its own, outcome `waiting`, with that cause as its `cause`, and
 goes on the recheck list, so the next round reviews it again whatever brought it in. A later round
-that waits again reuses the run of a PR whose newest review already waits at the same head. While
-the newest review that ended or waits stopped, or waits, at such a cause, whooper-status's `blocked`
-names it, with `since`, when the first of the reviews in a row at that cause ended, and `waiting`, how
-many PRs' newest review waits. It is null once a review succeeds, or stops at a cause of its PR's own,
-which shows that the cause no longer holds; a review that runs has shown neither yet.
+that waits again reuses the run of a PR whose newest review already waits at the same head, unless
+you removed that review. While the newest review that ended or waits stopped, or waits, at such a
+cause, whooper-status's `blocked` names it, with `since`, when the first of the reviews in a row at
+that cause ended, and `waiting`, how many PRs' newest review waits, leaving out one you removed,
+which the next round does not review. It is null once a review succeeds, or stops at a cause of its
+PR's own, which shows that the cause no longer holds; a review that runs has shown neither yet.
 
 ## Submit a review
 
@@ -252,6 +254,30 @@ and the drafts and records stay, so a skipped review can still be submitted. It 
 names no run directory and a review that is still running. Prompting Time runs it as the manifest's
 `skip` action, adding the run ID, and `--undo` after it to undo.
 
+## Remove a review
+
+`bin/whooper-remove <run-id>` takes a review out of your lists, and prints what it did: it leaves the
+empty file `removed-by-user` in the run directory, so whooper-status still lists the review, with
+`removed_by_user` true and `needs_you` false, and whooper-show gives `removed_by_user` true. The run's
+files and the records stay. `bin/whooper-remove <run-id> --undo` deletes the file.
+
+Whooper does not retry a removed review on its own. While the run is its PR's newest, whooper-select
+drops each item that asks for the same review again, saying `removed by the user`, and takes the PR
+off the recheck list, so a review that waits or failed is not reviewed again. The same review means
+the run's head and kind, and no Slack ask but the run's own. A new review request brings the PR back:
+a new Slack post that asks for it, new commits, or another kind of work, as when you reviewed the PR
+and are requested again. For example, after you remove a failed review of #12 at head `abc1234` that
+a GitHub review request brought in, every poll still lists #12 at `abc1234` while the request stands,
+and whooper-select drops it; once the author pushes `def5678`, the poll lists #12 at the new head and
+the round reviews it. A request on GitHub made again at the same head reads like the one before, so
+it does not count; `bin/whooper-retry` brings the PR back whatever brought it in, and unmarks the run
+it retries. A new request that waits for the next round gets a run of its own rather than the
+removed run that waits. `--undo` puts a review that waits back on the recheck list when whooper-select
+took it off, so the next round reviews it again.
+
+It refuses a run ID that names no run directory and a review that is still running. Prompting Time
+runs it as the manifest's `remove` action, adding the run ID, and `--undo` after it to undo.
+
 ## Ask about a review
 
 `bin/whooper-ask <run-id> '<question>' [--finding <finding-id>]` answers a question about a review
@@ -292,9 +318,10 @@ neither the limit of 3 failures at a head nor the limit of 3 re-checks a day hol
 `bin/whooper-round` runs that round now. When the poll lists the PR at that head, as while its
 review request stands, the round reviews the poll's item instead, once. Once the new review starts,
 its record counts toward both limits as usual, and as the PR's newest run it supersedes the run you
-retried, which no longer needs you. whooper-retry refuses a run ID that names no run directory, a
-review that is still running, and a run whose `run.json` it cannot read, since only that file names
-the PR's repo. Prompting Time runs it as the manifest's `retry` action.
+retried, which no longer needs you. It unmarks a run you removed ([Remove a review](#remove-a-review)).
+whooper-retry refuses a run ID that names no run directory, a review that is still running, and a run
+whose `run.json` it cannot read, since only that file names the PR's repo. Prompting Time runs it as
+the manifest's `retry` action.
 
 ## Whooper in Prompting Time
 
@@ -366,7 +393,9 @@ Slack ask brought the PR in, which a poll reads once. Like a re-check, it waits 
 once the PR has 3 records of its kind for other heads started today. `bin/whooper-retry` puts a PR
 on the list too, and no limit holds that review back ([Retry a review](#retry-a-review)). So does
 whooper-round, for a review that waits for the next round after another review in the round stopped
-at a cause that stops every review, unless the list holds the PR already.
+at a cause that stops every review, unless the list holds the PR already. Once you remove a PR's
+newest review, whooper-select takes the PR off the list and leaves it out of the work until a new
+request for it comes in ([Remove a review](#remove-a-review)).
 
 A PENDING review or a thread reply does not count as reviewing. Slack text is untrusted: an ask
 must name a post or thread reply slackdump read, and only plain
@@ -471,8 +500,8 @@ whooper-submit refuses that run until you check the PR on GitHub and delete the 
 whooper-run and whooper-round write each of their files through a temporary file and a rename, so a
 program watching the directory never reads half of one, whooper-draft and whooper-submit write a
 run's `drafts.json`, `submit-request.json`, and `submit.json` the same way, whooper-ask its
-`asks/<n>.json`, and whooper-post, whooper-submit, and whooper-retry write the recheck list's files the
-same way too.
+`asks/<n>.json`, and whooper-post, whooper-submit, whooper-retry, and whooper-remove write the recheck
+list's files the same way too.
 
 - `poll/github.json`: whooper-fetch's latest output, one entry per PR as `queries/pr.graphql`
   returns it.
@@ -487,17 +516,18 @@ same way too.
   whooper-submit write stale when the head moved, and whooper-retry writes retry, keeping the
   count, at the head the PR has now.
   whooper-select drops an item in a repo the config has no `[repos."<owner>/<repo>"]` table for,
-  an item whose record is done or running or has failed 3 times, and a re-check of a PR that
-  already has 3 re-check records for other heads started today (local time). A recheck-list item
-  counts under that limit too, by the records of its own kind; dropped for it, the item stays on the
-  list for the next day. Of these, only the missing table drops an item whose record says retry.
+  an item whose record is done or running or has failed 3 times, a re-check of a PR that already
+  has 3 re-check records for other heads started today (local time), and an item that asks again for
+  a review you removed ([Remove a review](#remove-a-review)). A recheck-list item counts under that
+  limit too, by the records of its own kind; dropped for it, the item stays on the list for the next
+  day. Of these, only the missing table drops an item whose record says retry.
 - `rechecks/<owner>-<repo>-<pr>.json`: the recheck list: a PR whose head whooper-post or
   whooper-submit found moved since its review, as the work item for the new head, or whose review
   you asked for again with whooper-retry, as the run's work item at the head the PR has now, or whose
   review waits for the next round, as its work item, with the kind, source, and Slack ask it had. A
   later mark of the PR replaces it. whooper-select deletes it once
-  the newest poll lists the PR, which then comes with the head the PR has now, or once the record at
-  the listed head is done or has failed 3 times.
+  the newest poll lists the PR, which then comes with the head the PR has now, once the record at
+  the listed head is done or has failed 3 times, or once it asks again for a review you removed.
 - `locks/<owner>-<repo>-<pr>/`: the lock of the review that holds the PR, with its process ID in
   `pid` and its run ID in `run_id`. A lock whose process is gone is stale: the next review takes
   it, and whooper-ask, whooper-status, and whooper-show no longer count its review as running.
@@ -542,7 +572,8 @@ same way too.
   posted: the request and GitHub's `response`, with `status` `posted`, or `posting` while gh posts.
   `asks/` holds whooper-ask's answers, `<n>.json`, each beside its run's `<n>.prompt.md`,
   transcript, and `<n>.stderr.log`, and for Devin `<n>.devin-config.json`.
-  `skipped-by-user` is the empty file whooper-skip leaves when you skip the review.
+  `skipped-by-user` is the empty file whooper-skip leaves when you skip the review, and
+  `removed-by-user` the one whooper-remove leaves when you remove it.
   The worktrees `head/` and `base/` exist only while the run does. The run of a review that waits
   holds only `run.json`, the work item with the run ID and the agent `[jobs] review` names, and
   `waiting.json`, the cause it waits on.

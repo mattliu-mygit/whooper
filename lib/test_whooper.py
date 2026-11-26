@@ -17,7 +17,8 @@ from zoneinfo import ZoneInfo
 
 from whooper import (REVIEW_WORDING, SETTINGS_SCHEMA, bot_list, check_schema, claude_shell_calls, classify, conversation,
                      devin_shell_calls, failure_cause, fill, main, next_round, pr_link, poll_items, read_asks,
-                     read_drafts, read_schedule, select_work, skill_hashes, slack_posts, summary_text, write_record)
+                     read_drafts, read_schedule, select_work, skill_hashes, slack_posts, summary_text, wait_review,
+                     write_record)
 
 LOGIN = "sam-example"
 # Every test runs on this made-up config, never on the user's own.
@@ -579,7 +580,7 @@ class SelectWorkTest(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.prs = Path(tmp.name)
+        self.prs, self.runs = Path(tmp.name) / "prs", Path(tmp.name) / "runs"
 
     def record(self, name, status, failures=0, started_at="2031-08-01T16:00:00Z", pr_dir="example-org-example-repo-12"):
         path = self.prs / pr_dir / name
@@ -598,6 +599,16 @@ class SelectWorkTest(unittest.TestCase):
                  "permalink": "https://example.slack.com/archives/C0000000001/p1943194837000100"}
         return {**work_item(kind="first_review", head=head), "source": "slack_ask", "slack": slack,
                 "reason": "Alex asked for a review."}
+
+    def make_run(self, run_id, item, removed=False):
+        """Makes the review run run_id of item, whose run.json is item with the run's own fields, and marks it
+        removed by the user, as bin/whooper-remove does, when removed is true; returns its directory."""
+        run = self.runs / run_id
+        run.mkdir(parents=True)
+        (run / "run.json").write_text(json.dumps({**item, "run_id": run_id, "agent": "claude"}))
+        if removed:
+            (run / "removed-by-user").touch()
+        return run
 
     def test_no_record_is_work(self):
         self.assertTrue(self.selected(work_item()))
@@ -697,6 +708,45 @@ class SelectWorkTest(unittest.TestCase):
         self.record("head3.first_review.json", "failed", failures=4)
         self.assertEqual(select_work([], self.prs, self.now, REPOS, [listed]),
                          ([], [(listed, "failed 4 times at this head")], [listed]))
+
+    def test_a_removed_review_holds_back_the_request_it_had_until_a_new_one(self):
+        # The PR's review of head3, which a Slack ask brought in, failed once, and the user removed it.
+        listed = self.listed_again()
+        removed = self.make_run("20310801T150000Z-12", listed, removed=True)
+        self.record("head3.first_review.json", "failed", failures=1)
+        standing = {**work_item(kind="first_review"), "source": "github_request"}
+        new_ask = {**listed, "slack": {**listed["slack"], "ts": "1943198437.000200"}}
+        cases = [
+            # (what the poll lists, selected)
+            # A GitHub review request reads the same in every poll while it stands, and a Slack post the
+            # poll reads again, as after an edit, is the same ask.
+            (standing, False),
+            (listed, False),
+            # A new Slack post asks again, the PR has new commits, or the user, who has reviewed it since,
+            # is requested again.
+            (new_ask, True),
+            ({**standing, "head_sha": "head4"}, True),
+            ({**standing, "kind": "recheck"}, True),
+        ]
+        for item, want in cases:
+            with self.subTest(item=item):
+                self.assertEqual(select_work([item], self.prs, self.now, REPOS, runs_dir=self.runs),
+                                 ([item], [], []) if want else ([], [(item, "removed by the user")], []))
+        # The recheck list's item for the PR leaves the list.
+        self.assertEqual(select_work([], self.prs, self.now, REPOS, [listed], runs_dir=self.runs),
+                         ([], [(listed, "removed by the user")], [listed]))
+        # bin/whooper-retry marks the record at the head retry: the user asked for the review.
+        self.record("head3.first_review.json", "retry", failures=1)
+        self.assertEqual(select_work([standing], self.prs, self.now, REPOS, runs_dir=self.runs), ([standing], [], []))
+        self.record("head3.first_review.json", "failed", failures=1)
+        # Only the PR's newest run counts, and a PR of another repo with the same number is another PR.
+        self.make_run("20310801T170000Z-12", {**listed, "repo": "sample-org/plain-repo"}, removed=True)
+        newer = self.make_run("20310801T160000Z-12", standing)
+        self.assertEqual(select_work([standing], self.prs, self.now, REPOS, runs_dir=self.runs), ([standing], [], []))
+        # Unmarked, as bin/whooper-remove --undo leaves it, the newest run holds nothing back either.
+        shutil.rmtree(newer)
+        (removed / "removed-by-user").unlink()
+        self.assertEqual(select_work([standing], self.prs, self.now, REPOS, runs_dir=self.runs), ([standing], [], []))
 
 
 class WriteRecordTest(unittest.TestCase):
@@ -3251,7 +3301,8 @@ class ReviewsTest(unittest.TestCase):
                 "url": f"https://github.com/example-org/example-repo/pull/{pr}", "started_at": self.local(started),
                 "ended_at": self.local(started + timedelta(minutes=20)), "outcome": "reviewed",
                 "verdict": "look_first", "skipped": False, "findings": 0, "submitted": None, "needs_you": True,
-                "cause": None, "head_sha": "h1", "pr_head_sha": None, "skipped_by_user": False, **fields}
+                "cause": None, "head_sha": "h1", "pr_head_sha": None, "skipped_by_user": False,
+                "removed_by_user": False, **fields}
 
     def show(self, *args):
         return subprocess.run([str(ROOT / "bin" / "whooper-show"), *args], env=self.env, capture_output=True,
@@ -3467,7 +3518,7 @@ class ReviewsTest(unittest.TestCase):
             "version": 1, "run_id": waits.name, "run": json.loads((waits / "run.json").read_text()), "title": None,
             "author": None, "outcome": "waiting", "findings": None, "drafts": None, "diff": None, "failure": None,
             "asks": [], "submitted": None, "cause": CAUSES["docker_unavailable"], "head_sha": "h1",
-            "skipped_by_user": False})
+            "skipped_by_user": False, "removed_by_user": False})
         # An ask about it may read why it waits.
         prompt = io.StringIO()
         with redirect_stdout(prompt):
@@ -3543,7 +3594,7 @@ class ReviewsTest(unittest.TestCase):
             # and includes nothing.
             "drafts": {"event": "COMMENT", "message": "", "findings": {}},
             "diff": self.DIFF, "failure": None, "asks": [], "submitted": None, "cause": None, "head_sha": "h1",
-            "skipped_by_user": False,
+            "skipped_by_user": False, "removed_by_user": False,
         })
         drafts = subprocess.run([str(ROOT / "bin" / "whooper-draft"), run.name], env=self.env, capture_output=True,
                                 text=True, timeout=60)
@@ -3565,7 +3616,7 @@ class ReviewsTest(unittest.TestCase):
         self.assertEqual(self.shown(failed), {
             **nothing, "run_id": failed.name, "run": json.loads((failed / "run.json").read_text()),
             "title": self.TITLE, "author": "alice", "outcome": "failed", "diff": self.DIFF, "failure": reason,
-            "cause": CAUSES["time_limit"], "head_sha": "h1", "skipped_by_user": False,
+            "cause": CAUSES["time_limit"], "head_sha": "h1", "skipped_by_user": False, "removed_by_user": False,
         })
         # A Devin review that wrote findings that fit before its time limit has them and whooper-draft's
         # drafts, though it failed.
@@ -3579,7 +3630,7 @@ class ReviewsTest(unittest.TestCase):
         self.assertEqual(self.shown(stopped), {
             **nothing, "run_id": stopped.name, "run": None, "title": None, "author": None, "outcome": "failed",
             "diff": None, "failure": "the review stopped at an unexpected error\n", "cause": CAUSES["unknown"],
-            "head_sha": None, "skipped_by_user": False,
+            "head_sha": None, "skipped_by_user": False, "removed_by_user": False,
         })
         # A Devin review that is still running may still change the findings.json it wrote, so it shows
         # no findings yet.
@@ -3590,7 +3641,7 @@ class ReviewsTest(unittest.TestCase):
         self.assertEqual(self.shown(running), {
             **nothing, "run_id": running.name, "run": json.loads((running / "run.json").read_text()),
             "title": self.TITLE, "author": "alice", "outcome": "running", "diff": self.DIFF, "failure": None,
-            "cause": None, "head_sha": "h1", "skipped_by_user": False,
+            "cause": None, "head_sha": "h1", "skipped_by_user": False, "removed_by_user": False,
         })
 
     def test_show_prints_the_drafts_and_the_review_whooper_submit_posted(self):
@@ -3683,6 +3734,74 @@ class ReviewsTest(unittest.TestCase):
                                  (1, "", "usage: whooper-skip <run-id> [--undo]\n"))
         self.assertEqual(list(run.glob("skipped*")), [])
 
+    def remove(self, *args):
+        """Runs the manifest's remove action, to which Prompting Time adds the run ID and, to undo, --undo."""
+        [action] = [a for a in json.loads((ROOT / "prompting-time-plugin.json").read_text())["actions"]
+                    if a["name"] == "remove"]
+        self.assertFalse(action["confirm"])
+        command = action["command"]
+        return subprocess.run([str(ROOT / command[0]), *command[1:], *args], env=self.env, capture_output=True,
+                              text=True, timeout=60)
+
+    def test_removing_a_review_takes_it_out_of_the_lists_until_undone(self):
+        run = self.make_run(timedelta(hours=1))
+        self.finish(run, findings=[finding()])
+        files = sorted(run.iterdir())
+        name = f"{run.name} (example-org/example-repo#12)"
+        removed = self.remove(run.name)
+        self.assertEqual((removed.returncode, removed.stdout, removed.stderr), (
+            0, f"marked {name} as removed; its files stay, and bin/whooper-remove {run.name} --undo unmarks it\n", ""))
+        # whooper-status still lists it, marked removed, and it needs no one.
+        self.assertEqual(self.reviews(), [self.review(run, findings=1, removed_by_user=True, needs_you=False)])
+        self.assertEqual(self.shown(run)["removed_by_user"], True)
+        # Its files stay, beside the empty mark.
+        self.assertEqual(sorted(run.iterdir()), sorted([*files, run / "removed-by-user"]))
+        self.assertEqual((run / "removed-by-user").read_text(), "")
+        self.assertEqual(self.remove(run.name).stdout, f"{name} is already marked as removed\n")
+        # Prompting Time adds --undo after the run ID.
+        undone = self.remove(run.name, "--undo")
+        self.assertEqual((undone.returncode, undone.stdout), (0, f"unmarked {name} as removed\n"))
+        self.assertEqual(self.reviews(), [self.review(run, findings=1)])
+        self.assertEqual(self.remove("--undo", run.name).stdout, f"{name} is not marked as removed\n")
+        # A review whooper-review stopped before it wrote run.json, which names the PR, can be removed too.
+        stopped = self.make_run(timedelta(hours=2), pr=13, run_json=False)
+        self.write(stopped, "failure.txt", "the review stopped at an unexpected error\n", 1)
+        self.assertEqual(self.remove(stopped.name).stdout, f"marked {stopped.name} as removed; its files stay, and"
+                                                           f" bin/whooper-remove {stopped.name} --undo unmarks it\n")
+        self.assertEqual({r["run_id"]: (r["removed_by_user"], r["needs_you"]) for r in self.reviews()},
+                         {run.name: (False, True), stopped.name: (True, False)})
+
+    def test_remove_refuses_an_unknown_run_and_a_review_still_running(self):
+        run = self.make_run(timedelta(minutes=5))
+        self.fetched(run)
+        for run_id in ["20310101T000000Z-1", "..", "../whooper", f"../runs/{run.name}"]:
+            with self.subTest(run_id):
+                result = self.remove(run_id)
+                self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                 (1, "", f"whooper-remove: no run {run_id} in {self.state / 'runs'}\n"))
+        # A live whooper-review holds the PR's lock for the run; the lock's process is this test.
+        self.hold(run, os.getpid())
+        for args in [[run.name], [run.name, "--undo"]]:
+            with self.subTest(args=args):
+                result = self.remove(*args)
+                self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                 (1, "", "whooper-remove: the review is still running; remove it once it ends\n"))
+        for args in [[], ["--undo"], [run.name, run.name], [run.name, "--undo", "--undo"]]:
+            with self.subTest(args=args):
+                result = self.remove(*args)
+                self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                 (1, "", "usage: whooper-remove <run-id> [--undo]\n"))
+        self.assertEqual(list(run.glob("removed*")), [])
+
+    def test_a_removed_review_that_waits_no_longer_counts_as_waiting(self):
+        failed = self.stopped(timedelta(hours=2), 12, "docker_unavailable")
+        waits = [self.waiting(timedelta(hours=2) - timedelta(minutes=m), pr) for m, pr in [(3, 13), (4, 14)]]
+        blocked = {**CAUSES["docker_unavailable"], "since": self.local(self.started(failed) + timedelta(minutes=2))}
+        self.assertEqual(self.status()["blocked"], {**blocked, "waiting": 2})
+        # The next round does not review a removed review, so it no longer waits, though Docker is still down.
+        self.assertEqual(self.remove(waits[0].name).returncode, 0)
+        self.assertEqual(self.status()["blocked"], {**blocked, "waiting": 1})
+
     def test_show_refuses_an_unknown_run(self):
         run = self.make_run(timedelta(hours=1))
         self.finish(run)
@@ -3700,10 +3819,10 @@ class ReviewsTest(unittest.TestCase):
 
 
 class RetryTest(unittest.TestCase):
-    """bin/whooper-retry, run as the manifest's retry action, and bin/whooper-select after it, on review
-    runs of example-org/example-repo#12 in a throwaway state folder. gh is a fake that reports the PR's
-    head from the file head and fails any other call, and slackdump, claude, and devin fail, so no test
-    can reach GitHub, Slack, or a model."""
+    """bin/whooper-retry and bin/whooper-remove, run as the manifest's retry and remove actions, and
+    bin/whooper-select after them, on review runs of example-org/example-repo#12 and #13 in a throwaway
+    state folder. gh is a fake that reports PR 12's head from the file head and fails any other call,
+    and slackdump, claude, and devin fail, so no test can reach GitHub, Slack, or a model."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -3735,6 +3854,14 @@ class RetryTest(unittest.TestCase):
         self.record("h1").write_text(json.dumps(self.failed))
         # The newest poll lists the PR at h1, since its review request stands.
         self.poll([self.work])
+        # A tagged Slack ask for PR 13 at h7, which a poll reads once, and a later post that asks again.
+        slack = {"ts": "1943194837.000100", "tagged_user": True,
+                 "permalink": "https://example.slack.com/archives/C0000000001/p1943194837000100"}
+        self.ask = {**self.work, "pr": 13, "head_sha": "h7", "source": "slack_ask", "slack": slack,
+                    "reason": "Alex asked for a review."}
+        again = "1943198437.000200"
+        self.asked_again = {**self.ask, "slack": {
+            **slack, "ts": again, "permalink": f"https://example.slack.com/archives/C0000000001/p{again.replace('.', '')}"}}
 
     def write_run(self, work):
         """Writes the run's run.json: the work item the review got, with the run's own fields."""
@@ -3764,6 +3891,19 @@ class RetryTest(unittest.TestCase):
                                 timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
         return [json.loads(line) for line in result.stdout.splitlines()]
+
+    def remove(self, *args):
+        """Runs the manifest's remove action, to which Prompting Time adds the run ID and, to undo, --undo."""
+        [action] = [a for a in json.loads((ROOT / "prompting-time-plugin.json").read_text())["actions"]
+                    if a["name"] == "remove"]
+        command = action["command"]
+        return subprocess.run([str(ROOT / command[0]), *command[1:], *args], env=self.env, capture_output=True,
+                              text=True, timeout=60)
+
+    def wait(self, item):
+        """Leaves item waiting for the next round, as whooper-round does after an earlier review in its round
+        could not reach Docker, and returns the run directory that waits."""
+        return wait_review(self.state, item, CAUSES["docker_unavailable"], "claude", datetime.now(timezone.utc))
 
     def test_a_review_that_failed_three_times_is_reviewed_again_in_the_next_round(self):
         # Three failures at h1 stop the rounds from reviewing h1 again on their own.
@@ -3833,6 +3973,70 @@ class RetryTest(unittest.TestCase):
         # Nothing was queued.
         self.assertFalse((self.state / "rechecks").exists())
         self.assertEqual(json.loads(self.record("h1").read_text()), self.failed)
+
+    def test_a_removed_review_that_failed_or_waits_is_not_reviewed_again_until_a_new_request_for_its_pr(self):
+        # PR 12's review at h1 failed once, and its review request stands, so every poll lists the PR, and
+        # each round would review it again until it failed 3 times. PR 13's review waits for the next round
+        # on the recheck list.
+        self.record("h1").write_text(json.dumps({**self.failed, "failures": 1}))
+        waits = self.wait(self.ask)
+        self.assertEqual(self.select(), [self.work, self.ask])
+        for run in [self.run, waits]:
+            self.assertEqual(self.remove(run.name).returncode, 0)
+        result = subprocess.run([str(ROOT / "bin" / "whooper-select")], env=self.env, capture_output=True, text=True,
+                                timeout=60)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (
+            0, "", "whooper-select: dropped example-org/example-repo#12 first_review: removed by the user\n"
+                   "whooper-select: dropped example-org/example-repo#13 first_review: removed by the user\n"))
+        # PR 13 left the recheck list, and the files of both runs stay.
+        self.assertFalse((self.state / "rechecks" / "example-org-example-repo-13.json").exists())
+        self.assertTrue((self.run / "failure.txt").exists() and (waits / "waiting.json").exists())
+        self.assertEqual(self.select(), [])
+        # A new Slack post asks for PR 13 again, and PR 12 gets new commits: the next round reviews both.
+        moved = {**self.work, "head_sha": "h2"}
+        self.poll([moved, self.asked_again])
+        self.assertEqual(self.select(), [moved, self.asked_again])
+
+    def test_retrying_a_removed_review_unmarks_it(self):
+        self.assertEqual(self.remove(self.run.name).returncode, 0)
+        result = self.retry(self.run.name)
+        self.assertEqual((result.returncode, result.stdout),
+                         (0, f"unmarked {self.run.name} as removed, and queued another review of"
+                             " example-org/example-repo#12 at h1 for the next round; bin/whooper-round runs that"
+                             " round now\n"), result.stderr)
+        self.assertFalse((self.run / "removed-by-user").exists())
+        self.assertEqual(self.select(), [self.work])
+
+    def test_undoing_the_removal_of_a_review_that_waits_puts_it_back_on_the_recheck_list(self):
+        self.poll([])
+        waits = self.wait(self.ask)
+        listed = self.state / "rechecks" / "example-org-example-repo-13.json"
+        # Undone before a round's selection, the review is still on the list.
+        self.assertEqual(self.remove(waits.name).returncode, 0)
+        self.assertEqual(self.remove(waits.name, "--undo").stdout,
+                         f"unmarked {waits.name} (example-org/example-repo#13) as removed\n")
+        self.assertEqual(json.loads(listed.read_text()), self.ask)
+        # Undone after a round's selection took it off the list, the review goes back on it.
+        self.assertEqual(self.remove(waits.name).returncode, 0)
+        self.assertEqual(self.select(), [])
+        self.assertFalse(listed.exists())
+        self.assertEqual(self.remove(waits.name, "--undo").stdout,
+                         f"unmarked {waits.name} (example-org/example-repo#13) as removed, and put it back on the"
+                         " recheck list for the next round\n")
+        self.assertEqual(self.select(), [self.ask])
+
+    def test_a_new_request_for_a_removed_review_that_waits_waits_in_a_run_of_its_own(self):
+        waits = self.wait(self.ask)
+        self.assertEqual(self.remove(waits.name).returncode, 0)
+        # A new Slack post asks for PR 13 again, and its round stops at Docker as well.
+        self.poll([self.asked_again])
+        self.assertEqual(self.select(), [self.asked_again])
+        again = self.wait(self.asked_again)
+        self.assertNotEqual(again, waits)
+        self.assertEqual(json.loads((again / "run.json").read_text())["slack"], self.asked_again["slack"])
+        self.assertTrue((waits / "removed-by-user").exists())
+        # The new run is not removed, so a round that waits again reuses it.
+        self.assertEqual(self.wait(self.asked_again), again)
 
 
 class SettingsTest(unittest.TestCase):
