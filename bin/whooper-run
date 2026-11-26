@@ -41,14 +41,35 @@ nap=""
 trap '[[ "$(cat "$lock/pid" 2>/dev/null)" != "$$" ]] || rm -rf "$lock"; [[ -z "$nap" ]] || kill "$nap" 2>/dev/null || true' EXIT
 trap 'exit 130' INT TERM HUP
 take() { (trap '' INT TERM HUP; mkdir "$lock" 2>/dev/null && save "$lock/pid" echo "$$"); }
+# Two copies can find the same stale lock. Had each deleted it, the slower could delete the lock the
+# faster had just taken, and both would run. take_over <pid> instead renames the lock aside, to a
+# name with this process's ID; a rename is atomic, so of two copies only one renames the stale lock.
+# It deletes the renamed lock only when its pid is still <pid>, the one found stale, and puts back,
+# and fails, when it renamed the lock another copy had taken meanwhile. Then it takes the lock, which
+# fails when another copy took it first. It ignores INT, TERM, and HUP as take does, so no such
+# signal leaves a lock renamed aside. A third copy that ran take in the instant a lock was aside
+# would get it too; if callers ever start three copies at once, lock with flock instead
+# (lib/whooper.py's folder_lock).
+take_over() {
+  (
+    trap '' INT TERM HUP
+    if mv "$lock" "$lock.stale.$$" 2>/dev/null; then
+      if [[ "$(cat "$lock.stale.$$/pid" 2>/dev/null)" != "$1" ]]; then
+        mv "$lock.stale.$$" "$lock"
+        exit 1
+      fi
+      rm -rf "$lock.stale.$$"
+    fi
+    take
+  )
+}
 if ! take; then
   holder="$(cat "$lock/pid" 2>/dev/null || true)"
   if [[ -n "$holder" ]] && ps -o command= -p "$holder" 2>/dev/null | grep -q whooper-run; then
     echo "whooper-run: process $holder is already running Whooper; see $lock/pid" >&2
     exit 1
   fi
-  rm -rf "$lock"
-  if ! take; then
+  if ! take_over "$holder"; then
     echo "whooper-run: another copy took $lock first" >&2
     exit 1
   fi

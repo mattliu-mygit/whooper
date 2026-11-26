@@ -152,17 +152,30 @@ trap cleanup EXIT
 trap 'stop_reason="the review was interrupted" step=interrupted step_log=""; exit 130' INT TERM HUP
 
 # A lock whose process is gone is stale, and this review takes it over. As in whooper-run, the traps
-# come before the lock, and take makes the lock and writes its pid in a subshell that ignores INT,
-# TERM, and HUP, so no such signal leaves the lock behind.
+# come before the lock, take makes the lock and writes its pid in a subshell that ignores INT, TERM,
+# and HUP, so no such signal leaves the lock behind, and take_over renames a stale lock aside before
+# it deletes it, so of two reviews that find the same stale lock only one takes it over.
 mkdir -p "$data/locks"
-take() { (trap '' INT TERM HUP; mkdir "$lock" && echo "$$" > "$lock/pid"); }
-if ! take 2>/dev/null; then
+take() { (trap '' INT TERM HUP; mkdir "$lock" 2>/dev/null && echo "$$" > "$lock/pid"); }
+take_over() {
+  (
+    trap '' INT TERM HUP
+    if mv "$lock" "$lock.stale.$$" 2>/dev/null; then
+      if [[ "$(cat "$lock.stale.$$/pid" 2>/dev/null)" != "$1" ]]; then
+        mv "$lock.stale.$$" "$lock"
+        exit 1
+      fi
+      rm -rf "$lock.stale.$$"
+    fi
+    take
+  )
+}
+if ! take; then
   holder="$(cat "$lock/pid" 2>/dev/null || true)"
   if [[ -n "$holder" ]] && kill -0 "$holder" 2>/dev/null; then
     die "process $holder is already reviewing $repo#$pr"
   fi
-  rm -rf "$lock"
-  take
+  take_over "$holder" || die "another review of $repo#$pr took $lock first"
 fi
 # The lock names the run, so whooper-ask refuses an ask about this review, and not about an earlier
 # review of the PR, while this script runs.

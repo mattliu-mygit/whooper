@@ -2476,6 +2476,58 @@ class RunTest(unittest.TestCase):
                 result = self.command(name, *args, env=env)
                 self.assertEqual((result.returncode, lock.exists()), (130, False), result.stderr)
 
+    def test_of_two_copies_that_find_the_same_stale_lock_one_takes_it_over_and_the_other_refuses(self):
+        # Two copies of each command find a lock whose process is gone. The first stops in the cat that
+        # reads the lock's process ID, as if it lost the processor there, until the second has taken the
+        # lock over. The second then waits in its GitHub fetch, or its round's, so it holds the lock until
+        # the test stops it.
+        env, item, _ = self.pull_request()
+        gone = subprocess.Popen(["true"])
+        gone.wait()
+        cat = shutil.which("cat")
+        self.script(self.fakes / "gh", "exec sleep 30")
+
+        def start(name, args):
+            process = subprocess.Popen([str(ROOT / "bin" / name), *args], env=env, stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.PIPE, text=True, start_new_session=True)
+            self.addCleanup(self.stop, process)
+            return process
+
+        round_lock, review_lock = self.state / "round.lock", self.state / "locks" / "sample-org-plain-repo-12"
+        for name, args, lock, refusal in [
+                ("whooper-run", [], self.lock, f"whooper-run: another copy took {self.lock} first"),
+                ("whooper-round", [], round_lock,
+                 f"whooper-round: a round is already running; another copy took {round_lock} first"),
+                ("whooper-review", [str(item), "--dry-run"], review_lock,
+                 f"whooper-review: another review of sample-org/plain-repo#12 took {review_lock} first")]:
+            with self.subTest(name):
+                paused = Path(self.tmp.name) / f"{name}.paused"
+                self.hold(lock, gone.pid)
+                self.script(self.fakes / "cat", "\n".join([
+                    f'if [ "$*" = "{lock}/pid" ] && mkdir "{paused}" 2>/dev/null; then',
+                    f'  {cat} "$@" > "{paused}/pid"',
+                    f'  touch "{paused}/read"',
+                    f'  until [ -e "{paused}/go" ]; do sleep 0.1; done',
+                    f'  exec {cat} "{paused}/pid"',
+                    "fi",
+                    f'exec {cat} "$@"',
+                ]))
+                first = start(name, args)
+                self.wait_for((paused / "read").exists, f"the first {name} to find the lock stale")
+                second = start(name, args)
+                self.wait_for(lambda: self.read(lock / "pid") == f"{second.pid}\n",
+                              f"the second {name} to take the lock")
+                (paused / "go").touch()
+                self.wait_for(lambda: first.poll() is not None or self.read(lock / "pid") == f"{first.pid}\n",
+                              f"the first {name} to stop or take the lock")
+                holder = self.read(lock / "pid")
+                self.stop(first)
+                self.stop(second)
+                second.communicate()
+                # The first copy refused, and the lock still names the second.
+                self.assertEqual((first.returncode, first.communicate()[1], holder),
+                                 (1, f"{refusal}\n", f"{second.pid}\n"))
+
     def test_a_round_refuses_to_start_while_another_round_runs(self):
         holder = self.holder("whooper-round")
         self.hold(self.state / "round.lock", holder)
