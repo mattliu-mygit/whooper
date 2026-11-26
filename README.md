@@ -62,12 +62,13 @@ directory for changes:
 bin/whooper-round          # runs a round now, even while paused
 bin/whooper-pause          # whooper-run skips each round it comes to, and logs that it did
 bin/whooper-resume         # ends the pause
-bin/whooper-status --json  # what runs, whether Whooper is paused, the next round, and the last round
+bin/whooper-status --json  # what runs, whether Whooper is paused, the next and last rounds, and the reviews
 ```
 
 Only one round runs at a time: whooper-round holds the lock `<state>/round.lock`, and another
 whooper-round prints "a round is already running" and exits 1. whooper-status makes no network
-calls, and its header lists the fields it prints.
+calls, and its header lists the fields it prints. [See reviews](#see-reviews) says how it lists the
+reviews.
 
 To run the steps by hand:
 
@@ -111,6 +112,27 @@ Whooper's defaults for what the config leaves out. They are the ones a settings 
 the values against the schema, and the config as it would be saved with the checks Whooper runs
 when it starts, and only then rewrites the lines of those keys, keeping the file's comments. On a
 failure it prints why and leaves the file as it was. A change applies from the next round.
+
+## See reviews
+
+`bin/whooper-status --json` lists, as `reviews`, the review runs in `<state>/runs` that started in
+the last 30 days, newest first: each one's PR, title, and times, how it went, its verdict and number
+of findings, what whooper-submit posted, and whether it needs you. Prompting Time builds its "Needs
+you" list and its history of past reviews from them. whooper-status's header lists each field.
+
+A review's outcome is `running` while a live whooper-review holds the PR's lock for the run, the
+rule whooper-ask follows; `reviewed` once the review left findings that fit `schemas/findings.json`
+and no `failure.txt`; and `failed` otherwise, as for a run directory Whooper cannot read. Only
+`run.json` names the repo, so the repo is null for a review whooper-review stopped before that file
+was whole, such as when its fetch failed, and in a review's first seconds, before it writes the
+file; the PR number and start come from the run ID. A review needs you once it ends, reviewed or
+failed, until whooper-submit posts it. A `submit.json` that still says `posting` does not count as
+posted, since its review may or may not be on GitHub; whooper-submit then asks you to check the PR.
+The verdict and the findings come only from findings that fit the schema, and none while the review
+runs, since a Devin review writes `findings.json` itself and may still change it. Nothing records
+when a review ended, so its end is when whooper-review saved `failure.txt`, or else when the run
+wrote `findings.json`, and a posted review's time is when whooper-submit wrote GitHub's answer to
+`submit.json`.
 
 ## Submit a review
 
@@ -212,8 +234,8 @@ this, Discard, and one bar that submits the review. It is a Solid 2.0 app built 
 shared UI library, `@prompting-time/ui`. Prompting Time shows it in an iframe sandboxed to scripts
 only, so the page reaches nothing but its host: it sends Prompting Time the messages in
 `page/src/protocol.ts`, which also says which Whooper command each one runs, and Prompting Time
-confirms a submit before `whooper-submit` posts. whooper-status does not list reviews yet, so the
-host builds the queue's reviews.
+confirms a submit before `whooper-submit` posts. Prompting Time builds the queue from the reviews
+whooper-status lists ([See reviews](#see-reviews)).
 
 The page needs Node 22.12 or later. In `page/`:
 
@@ -386,7 +408,7 @@ run's `drafts.json`, `submit-request.json`, and `submit.json` the same way, whoo
   the listed head is done or has failed 3 times.
 - `locks/<owner>-<repo>-<pr>/`: the lock of the review that holds the PR, with its process ID in
   `pid` and its run ID in `run_id`. A lock whose process is gone is stale: the next review takes
-  it, and whooper-ask no longer counts its review as running.
+  it, and whooper-ask and whooper-status no longer count its review as running.
 - `run.lock/`: the running whooper-run's lock, with its process ID in `pid`. A lock whose process is
   gone, or is now some other program, is stale, and the next whooper-run takes it over.
 - `next-round`: the Unix time of the round whooper-run waits for, written before each wait and

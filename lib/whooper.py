@@ -169,11 +169,18 @@ def next_round(schedule, earliest):
             return max(earliest, datetime.combine(day, schedule["start"]))
 
 
+def local_time(unix):
+    """A Unix time as whooper-status prints times: local, in ISO 8601 with the offset."""
+    return datetime.fromtimestamp(unix, timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
 def read_status(data):
     """Whooper's status for whooper-status --json, from the files under data, its state directory:
     whether whooper-run and a round are running, whether Whooper is paused, when the next scheduled
-    round starts, and how the last round ended. Times are local, in ISO 8601 with the offset. It
-    reads files and asks ps about the two lock holders, and never calls GitHub, Slack, or a model."""
+    round starts, how the last round ended, and the reviews of the last REVIEW_DAYS days
+    (read_reviews). Times are local, in ISO 8601 with the offset. It reads files, asks ps about the two
+    lock holders, and checks that the process of each review's lock exists, and never calls GitHub,
+    Slack, or a model."""
     def read(path):
         # Whooper renames each of these files into place, so a read gets a whole file or none.
         try:
@@ -191,9 +198,6 @@ def read_status(data):
         ps = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True)
         return pid if name in ps.stdout else None
 
-    def local(unix):
-        return datetime.fromtimestamp(unix, timezone.utc).astimezone().isoformat(timespec="seconds")
-
     loop, current = holder(data / "run.lock", "whooper-run"), holder(data / "round.lock", "whooper-round")
     # whooper-run writes next-round before each wait and deletes it when the round is due.
     next_round = read(data / "next-round") if loop else None
@@ -203,12 +207,134 @@ def read_status(data):
         "version": 1,
         "loop": {"running": bool(loop), "pid": loop},
         "paused": (data / "paused").exists(),
-        "next_round": local(int(next_round)) if next_round else None,
-        "round": {"running": bool(current), "started_at": local(record["started_at"]) if record else None,
+        "next_round": local_time(int(next_round)) if next_round else None,
+        "round": {"running": bool(current), "started_at": local_time(record["started_at"]) if record else None,
                   "reviewing": record["reviewing"] if record else None},
-        "last_round": {**last, "started_at": local(last["started_at"]), "ended_at": local(last["ended_at"])}
+        "last_round": {**last, "started_at": local_time(last["started_at"]), "ended_at": local_time(last["ended_at"])}
                       if last else None,
+        "reviews": read_reviews(data, datetime.now(timezone.utc)),
     }
+
+
+# whooper-status lists the review runs that started in the last 30 days.
+REVIEW_DAYS = 30
+
+
+def parse_run_id(run_id):
+    """The UTC start time and the PR number in a review run's ID, which whooper-review makes of the
+    two, as in 20310727T010246Z-12, or None for a name that is not a run ID."""
+    m = re.fullmatch(r"([0-9]{8}T[0-9]{6}Z)-([0-9]+)", run_id)
+    if not m:
+        return None
+    try:
+        started = datetime.strptime(m[1], "%Y%m%dT%H%M%SZ")
+    except ValueError:
+        # Digits that make no date, such as month 13.
+        return None
+    return started.replace(tzinfo=timezone.utc), int(m[2])
+
+
+def running_runs(data):
+    """The IDs of the review runs that a live whooper-review still runs, by whooper-ask's rule: the PR's
+    lock under data/locks names the run in run_id, and the process in its pid exists. A lock whose
+    process is gone, as after a kill -9, is stale. The locks are read for the runs they name, so a
+    review counts as running before it writes run.json, which names its PR and so its lock."""
+    running = set()
+    for lock in (data / "locks").glob("*"):
+        try:
+            pid, run_id = int((lock / "pid").read_text()), (lock / "run_id").read_text().strip()
+            # Signal 0 only checks that the process exists, as whooper-ask's kill -0 does.
+            os.kill(pid, 0)
+        except (OSError, ValueError):
+            continue
+        running.add(run_id)
+    return running
+
+
+def read_object(path):
+    """The JSON object in the file at path, or None when the file is missing or holds no JSON object,
+    such as a run.json that whooper-review left empty or one cut short."""
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def read_review(run, running):
+    """How the review in the run directory run went, as whooper-status reports it: run.json's work
+    item, the outcome, the findings, and the review whooper-submit posted. running holds the IDs of
+    the runs a live whooper-review still runs (running_runs). A file that is missing, empty, cut
+    short, or does not fit reads as None, so a run directory Whooper cannot read gives a failed
+    review rather than an error.
+
+    The outcome is running while a live whooper-review runs the review; reviewed once the review ended
+    with findings that fit FINDINGS_SCHEMA and without failure.txt, the reason whooper-review saves
+    when it stops a review; and failed otherwise. The findings are None while the review runs, since a
+    Devin review writes findings.json itself and may change it until it ends, and when they do not
+    fit, as whooper-draft then shows no drafts. The posted review is submit.json once it says posted;
+    a submit.json that says posting may or may not be on GitHub, and whooper-submit asks the user to
+    check the PR."""
+    if run.name in running:
+        outcome, result = "running", None
+    else:
+        result = read_object(run / "findings.json")
+        try:
+            # A findings.json that is missing or holds no object reads as None, which does not fit either.
+            check_schema(result, json.loads(FINDINGS_SCHEMA.read_text()))
+        except ValueError:
+            result = None
+        outcome = "reviewed" if result is not None and not (run / "failure.txt").exists() else "failed"
+    submit = read_object(run / "submit.json")
+    posted = submit if submit and submit.get("status") == "posted" else None
+    return read_object(run / "run.json"), outcome, result, posted
+
+
+def read_reviews(data, now):
+    """The review runs under data/runs that started in the REVIEW_DAYS days before now, newest first, as
+    whooper-status lists them. A review's PR number and start come from its run ID, its repo from
+    run.json, its title from github.json, and the rest from read_review. A name in runs that is not a
+    run ID, such as Finder's .DS_Store, is no run."""
+    def modified(path):
+        try:
+            return local_time(path.stat().st_mtime)
+        except OSError:
+            return None
+
+    runs = []
+    for run in sorted((data / "runs").glob("*"), reverse=True):
+        parsed = parse_run_id(run.name)
+        if parsed and parsed[0] >= now - timedelta(days=REVIEW_DAYS) and run.is_dir():
+            runs.append((run, *parsed))
+    # whooper-review takes the PR's lock before it makes the run directory, so the locks, read after
+    # the runs are listed, name every listed run whose review still runs.
+    running = running_runs(data)
+    reviews = []
+    for run, started, pr in runs:
+        item, outcome, result, submit = read_review(run, running)
+        github = read_object(run / "github.json")
+        repo = item["repo"] if item else None
+        # No file records when a review ended, so it ended when whooper-review saved failure.txt as it
+        # stopped the review, or else when the run wrote findings.json as it ended.
+        ended = None if outcome == "running" else modified(run / "failure.txt") or modified(run / "findings.json")
+        reviews.append({
+            "run_id": run.name,
+            "repo": repo,
+            "pr": pr,
+            "title": github["pr"]["title"] if github else None,
+            "url": f"https://github.com/{repo}/pull/{pr}" if repo else None,
+            "started_at": local_time(started.timestamp()),
+            "ended_at": ended,
+            "outcome": outcome,
+            "verdict": result["approval"]["verdict"] if result else None,
+            "skipped": result is not None and result["status"] == "skipped",
+            "findings": len(result["findings"]) if result else 0,
+            # whooper-submit renames submit.json saying posted into place once GitHub took the review.
+            "submitted": {"event": submit["request"]["event"], "at": modified(run / "submit.json")}
+                         if submit else None,
+            "needs_you": outcome != "running" and submit is None,
+        })
+    return reviews
 
 
 def pr_link(orgs):
@@ -1325,8 +1451,7 @@ def main(command, *args):
             (run / "post.json").write_text(json.dumps({"status": "stale", "head_now": head_now, "posted": [], "held": []}))
             print(f"stale: the PR's head is now {head_now}, so nothing posts; the next round reviews the new commits")
             return
-        # A run ID is the run's UTC start time and the PR number.
-        started = datetime.strptime(item["run_id"].split("-")[0], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+        started, _ = parse_run_id(item["run_id"])
         posts, held = hold_back(load(run / "verdicts.json"), comments, started, load_config()["github"]["orgs"])
         append_digest(data, run, item, held)
         request_file = run / "post-request.json"

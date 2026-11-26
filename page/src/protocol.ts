@@ -51,7 +51,7 @@ export interface WhooperStatus {
 /**
  * One review in Whooper's queue. decide: the review finished and waits for the user; reviewing: a
  * review runs now; failed: the review stopped without findings; submitted: the user submitted it.
- * whooper-status does not list reviews yet, so the host builds these (see README.md).
+ * The host builds these from the reviews `bin/whooper-status --json` lists (see README.md).
  */
 export interface QueueItem {
   /** The review's run, null while no run directory holds its record yet. */

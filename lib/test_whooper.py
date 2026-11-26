@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 from time import monotonic, sleep
 from unittest import mock
+from zoneinfo import ZoneInfo
 
 from whooper import (REVIEW_WORDING, SETTINGS_SCHEMA, bot_list, check_schema, claude_shell_calls, classify, conversation,
                      devin_shell_calls, fill, main, next_round, pr_link, poll_items, read_asks, read_drafts,
@@ -2066,6 +2067,8 @@ class RunTest(unittest.TestCase):
 
         self.addCleanup(stop_agent)
         [run] = (self.state / "runs").iterdir()
+        # whooper-status applies the same rule to the review's lock.
+        self.assertEqual([(r["run_id"], r["outcome"]) for r in self.status()["reviews"]], [(run.name, "running")])
         refused = self.command("whooper-ask", run.name, "Why did this review fail?", env=env)
         self.assertEqual((refused.returncode, refused.stdout), (1, ""))
         self.assertIn("the review is still running", refused.stderr)
@@ -2085,12 +2088,14 @@ class RunTest(unittest.TestCase):
         stop_agent()
         lock = self.state / "locks" / "sample-org-plain-repo-12"
         self.assertEqual(((lock / "pid").read_text(), (run / "tmp").is_dir()), (f"{review.pid}\n", True))
+        self.assertEqual({r["run_id"]: r["outcome"] for r in self.status()["reviews"]}[run.name], "failed")
         answered = self.command("whooper-ask", run.name, "Why did this review fail?", env=env)
         self.assertEqual((answered.returncode, answered.stdout), (0, "It stopped.\n"), answered.stderr)
 
     def test_status_reports_the_loop_pause_next_round_and_rounds_from_the_state_folder(self):
         nothing = {"version": 1, "loop": {"running": False, "pid": None}, "paused": False, "next_round": None,
-                   "round": {"running": False, "started_at": None, "reviewing": None}, "last_round": None}
+                   "round": {"running": False, "started_at": None, "reviewing": None}, "last_round": None,
+                   "reviews": []}
         self.assertEqual(self.status(), nothing)
         # Unix times on 2031-07-30: the next round at 10:15:00 in Los Angeles, the running round's
         # start at 10:00:02, and the last round from 09:45:01 to 09:52:40.
@@ -2114,6 +2119,7 @@ class RunTest(unittest.TestCase):
             "round": {"running": True, "started_at": "2031-07-30T10:00:02-07:00",
                       "reviewing": "example-org/example-repo#12"},
             "last_round": last_round,
+            "reviews": [],
         })
         # Locks left by a whooper-run that is gone and by a round whose process ID now belongs to this
         # test: nothing runs, so no round is next either.
@@ -2760,6 +2766,204 @@ class AskLauncherTest(unittest.TestCase):
         self.assertTrue(prompt.startswith(self.prompt.read_text()))
         self.assertIn("answer.md in the working directory with your file-writing tool", prompt)
         self.assertEqual(self.recorded("removed"), ["rm session-7 --force"])
+
+
+class ReviewsTest(unittest.TestCase):
+    """The reviews bin/whooper-status --json lists, read from review runs of example-org/example-repo in
+    a throwaway state folder, with times in Los Angeles. It reads files only, and gh, slackdump, claude,
+    and devin are fakes that fail, so no test can reach GitHub, Slack, or a model."""
+
+    LA = ZoneInfo("America/Los_Angeles")
+    TITLE = "Return 422 for bad order JSON"
+    NIT = finding(id="2", kind="nit", nit_kind="wording", path="README.md", line=3, title="Old flag name",
+                  draft="**nit:** This line still names the old --fast flag.")
+    DIFF = "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -3 +3 @@\n-fast\n+quick\n"
+    REQUEST = {"commit_id": "h1", "event": "APPROVE", "body": "", "comments": []}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        tmp = Path(self.tmp.name)
+        for name in ["gh", "slackdump", "claude", "devin"]:
+            fake(tmp / "bin" / name, "exit 1")
+        self.env = {**os.environ, "PATH": f"{tmp / 'bin'}:{os.environ['PATH']}", "XDG_STATE_HOME": str(tmp),
+                    "XDG_CACHE_HOME": str(tmp / "cache"), "TZ": "America/Los_Angeles"}
+        self.state = tmp / "whooper"
+        # A run ID holds its run's start time to the second.
+        self.now = datetime.now(timezone.utc).replace(microsecond=0)
+
+    def local(self, when):
+        """A time as whooper-status prints it here: in Los Angeles, in ISO 8601 with the offset."""
+        return when.astimezone(self.LA).isoformat(timespec="seconds")
+
+    def started(self, run):
+        """When the run started, which its ID says."""
+        return datetime.strptime(run.name.split("-")[0], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+
+    def make_run(self, ago, pr=12, run_json=True):
+        """Makes the directory of a review run of example-org/example-repo#<pr> that started ago before
+        now, with the run.json whooper-review writes unless run_json is False, and returns it."""
+        started = self.now - ago
+        run = self.state / "runs" / f"{started:%Y%m%dT%H%M%SZ}-{pr}"
+        run.mkdir(parents=True)
+        if run_json:
+            (run / "run.json").write_text(json.dumps({
+                "kind": "first_review", "repo": "example-org/example-repo", "pr": pr, "head_sha": "h1",
+                "base_ref": "master", "source": "github_request", "slack": None, "reason": "r", "run_id": run.name,
+                "merge_base": "m1", "as_of": None, "dry_run": True, "agent": "claude", "skills": {}}))
+        return run
+
+    def write(self, run, name, content, minutes):
+        """Writes the run's file name, content as JSON unless it is a string, as written minutes after the
+        run started."""
+        path = run / name
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(content if isinstance(content, str) else json.dumps(content))
+        when = (self.started(run) + timedelta(minutes=minutes)).timestamp()
+        os.utime(path, (when, when))
+
+    def fetched(self, run):
+        """Gives the run the diff and the PR's conversation whooper-review saves before the review starts."""
+        pr = int(run.name.split("-")[1])
+        self.write(run, "diff.patch", self.DIFF, 1)
+        self.write(run, "github.json", {"pr": {"url": f"https://github.com/example-org/example-repo/pull/{pr}",
+                                               "number": pr, "title": self.TITLE, "author": "alice", "body": ""},
+                                        "as_of": None, "reviews": [], "comments": []}, 1)
+
+    def findings(self, verdict="look_first", findings=(), skip_reason=""):
+        """A findings.json that fits schemas/findings.json. With a skip_reason, the review skipped the PR,
+        as it does a large PR from an untagged ask."""
+        return {"status": "skipped" if skip_reason else "reviewed", "skip_reason": skip_reason,
+                "approval": {"verdict": verdict, "reason": "Ran the orders tests."}, "findings": list(findings)}
+
+    def finish(self, run, *args, **kwargs):
+        """Fetches the run and ends it as a review that wrote its findings 20 minutes after it started."""
+        self.fetched(run)
+        self.write(run, "findings.json", self.findings(*args, **kwargs), 20)
+
+    def hold(self, run, pid):
+        """Has the lock of the run's PR name the run and the process pid, as whooper-review's lock does
+        while it reviews."""
+        lock = self.state / "locks" / f"example-org-example-repo-{run.name.split('-')[1]}"
+        lock.mkdir(parents=True)
+        (lock / "pid").write_text(f"{pid}\n")
+        (lock / "run_id").write_text(f"{run.name}\n")
+
+    def reviews(self):
+        result = subprocess.run([str(ROOT / "bin" / "whooper-status"), "--json"], env=self.env, capture_output=True,
+                                text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)["reviews"]
+
+    def review(self, run, **fields):
+        """What whooper-status lists for the run, given the fields that differ from a review that ended
+        with a look_first verdict and no findings 20 minutes after it started, read its PR's title, and
+        waits for the user."""
+        started, pr = self.started(run), int(run.name.split("-")[1])
+        return {"run_id": run.name, "repo": "example-org/example-repo", "pr": pr, "title": self.TITLE,
+                "url": f"https://github.com/example-org/example-repo/pull/{pr}", "started_at": self.local(started),
+                "ended_at": self.local(started + timedelta(minutes=20)), "outcome": "reviewed",
+                "verdict": "look_first", "skipped": False, "findings": 0, "submitted": None, "needs_you": True,
+                **fields}
+
+    def test_status_lists_the_reviews_of_the_last_30_days_newest_first(self):
+        reviewed = self.make_run(timedelta(hours=1))
+        self.finish(reviewed, findings=[finding(), self.NIT])
+        submitted = self.make_run(timedelta(hours=3), pr=13)
+        self.finish(submitted, "approve_once_ci_passes", [self.NIT])
+        self.write(submitted, "submit.json", {"status": "posted", "request": self.REQUEST,
+                                              "response": {"id": 7001}}, 30)
+        # A submit stopped while gh posted leaves submit.json saying posting. Its review may or may not be
+        # on GitHub, so it is not submitted, and whooper-submit asks the user to check the PR.
+        posting = self.make_run(timedelta(hours=4), pr=19)
+        self.finish(posting, "approve_once_ci_passes", [self.NIT])
+        self.write(posting, "submit.json", {"status": "posting", "request": self.REQUEST}, 30)
+        skipped = self.make_run(timedelta(hours=5), pr=14)
+        self.finish(skipped, skip_reason="Not small or mechanical.")
+        # Its findings did not fit the schema, so whooper-review set them aside and saved why.
+        failed = self.make_run(timedelta(hours=7), pr=15)
+        self.fetched(failed)
+        self.write(failed, "findings.invalid.json", {"findings": [finding()]}, 20)
+        self.write(failed, "failure.txt", "the review run's findings.json does not fit the schema\n", 21)
+        # A Devin review writes findings.json itself, so it can pass its time limit after writing findings
+        # that fit. whooper-review counts it as failed, and the findings stay for the user to read.
+        timed_out = self.make_run(timedelta(hours=9), pr=18)
+        self.finish(timed_out, findings=[finding()])
+        self.write(timed_out, "failure.txt", "the review run passed its 45-minute limit\n", 45)
+        month = self.make_run(timedelta(days=29), pr=16)
+        self.finish(month)
+        self.finish(self.make_run(timedelta(days=31), pr=17))
+        self.assertEqual(self.reviews(), [
+            self.review(reviewed, findings=2),
+            self.review(submitted, verdict="approve_once_ci_passes", findings=1, needs_you=False, submitted={
+                "event": "APPROVE", "at": self.local(self.started(submitted) + timedelta(minutes=30))}),
+            self.review(posting, verdict="approve_once_ci_passes", findings=1),
+            self.review(skipped, skipped=True),
+            self.review(failed, outcome="failed", verdict=None,
+                        ended_at=self.local(self.started(failed) + timedelta(minutes=21))),
+            self.review(timed_out, outcome="failed", findings=1,
+                        ended_at=self.local(self.started(timed_out) + timedelta(minutes=45))),
+            self.review(month),
+        ])
+
+    def test_a_review_runs_while_a_live_whooper_review_holds_its_prs_lock_for_it(self):
+        earlier = self.make_run(timedelta(hours=2))
+        self.finish(earlier)
+        # A Devin review writes findings.json itself, and may change it until it ends, so its findings do
+        # not count yet. The lock's process is alive: it is this test.
+        current = self.make_run(timedelta(minutes=30))
+        self.fetched(current)
+        self.write(current, "findings.json", self.findings(findings=[finding()]), 25)
+        self.hold(current, os.getpid())
+        # whooper-review takes the lock before it makes the run directory, and writes run.json, which
+        # names the repo, after it fetches.
+        fetching = self.make_run(timedelta(minutes=1), pr=20, run_json=False)
+        self.hold(fetching, os.getpid())
+        # A whooper-review killed with kill -9 leaves its lock, whose process is gone, and no failure.txt.
+        gone = subprocess.Popen(["true"])
+        gone.wait()
+        killed = self.make_run(timedelta(hours=3), pr=21)
+        self.fetched(killed)
+        self.hold(killed, gone.pid)
+        running = {"outcome": "running", "ended_at": None, "verdict": None, "needs_you": False}
+        self.assertEqual(self.reviews(), [
+            self.review(fetching, **running, repo=None, url=None, title=None),
+            self.review(current, **running),
+            self.review(earlier),
+            self.review(killed, outcome="failed", verdict=None, ended_at=None),
+        ])
+
+    def test_a_run_directory_whooper_cannot_read_lists_as_a_failed_review(self):
+        # whooper-review stopped these before run.json was whole: its fetch failed, so it wrote none, or
+        # the skills could not be hashed, which leaves the file empty. One cut short stands for any
+        # run.json that does not read as JSON. Nothing names their repo.
+        unreadable = []
+        for hours, run_json in [(1, None), (2, ""), (3, '{"repo": "example-org/exa')]:
+            run = self.make_run(timedelta(hours=hours), pr=30 + hours, run_json=False)
+            if run_json is not None:
+                (run / "run.json").write_text(run_json)
+            self.write(run, "failure.txt",
+                       "the review stopped at an unexpected error; see whooper-review's error output\n", 1)
+            unreadable.append(run)
+        # The review run exited with findings.json empty.
+        empty = self.make_run(timedelta(hours=4), pr=40)
+        self.fetched(empty)
+        self.write(empty, "findings.json", "", 20)
+        self.write(empty, "failure.txt", "the review run exited 0 without findings; see its stderr.log\n", 21)
+        # A Devin review killed with kill -9 while it wrote findings.json left one that does not fit.
+        unfit = self.make_run(timedelta(hours=5), pr=41)
+        self.fetched(unfit)
+        self.write(unfit, "findings.json", {"findings": [finding()]}, 20)
+        # Finder's .DS_Store, and a folder not named as whooper-review names runs, are not runs.
+        (self.state / "runs" / ".DS_Store").write_text("")
+        (self.state / "runs" / "notes").mkdir()
+        failed = {"outcome": "failed", "verdict": None}
+        self.assertEqual(self.reviews(), [
+            *[self.review(run, **failed, repo=None, url=None, title=None,
+                          ended_at=self.local(self.started(run) + timedelta(minutes=1))) for run in unreadable],
+            self.review(empty, **failed, ended_at=self.local(self.started(empty) + timedelta(minutes=21))),
+            self.review(unfit, **failed),
+        ])
 
 
 class SettingsTest(unittest.TestCase):

@@ -13,10 +13,32 @@
 #               is reviewing, or null
 #   last_round  null until a round ends, then its started_at, ended_at, result (done, poll_failed,
 #               or interrupted), selected (how many items it selected, or null when it ended before
-#               selecting), and reviews: [{pr, outcome}], where outcome is reviewed, failed, or
-#               interrupted
+#               selecting), and reviews: [{pr, outcome}], where pr reads <owner>/<repo>#<number> and
+#               outcome is reviewed, failed, or interrupted
+#   reviews     the review runs in <state>/runs that started in the last 30 days, newest first, each
+#               {run_id, repo, pr, title, url, started_at, ended_at, outcome, verdict, skipped,
+#               findings, submitted, needs_you}:
+#     repo        <owner>/<repo>, from run.json, or null when run.json cannot be read, as when
+#                 whooper-review stopped before it wrote the file
+#     pr          the PR's number, from the run ID, <UTC start time>-<PR number>
+#     title       the PR's title in github.json, or null when the review's GitHub fetch failed
+#     url         the PR's address, or null without the repo
+#     started_at  when the run started, from its ID
+#     ended_at    when whooper-review saved failure.txt as it stopped the review, or else when the
+#                 run wrote findings.json; null while the review runs, and when neither file exists
+#     outcome     running while a live whooper-review holds the PR's lock for the run, the rule
+#                 whooper-ask follows; reviewed once the review left findings that fit
+#                 schemas/findings.json and no failure.txt; failed otherwise
+#     verdict     approve_once_ci_passes or look_first, from findings that fit, or null
+#     skipped     whether the review skipped the PR, as it does a large PR from an untagged ask
+#     findings    how many findings it has, 0 when findings.json is missing or does not fit; a
+#                 review that runs counts none yet, since a Devin review may still change the file
+#     submitted   null, or {event, at} once whooper-submit posted the review: APPROVE or COMMENT, and
+#                 when submit.json recorded it; a submit.json that says posting counts as null, since
+#                 its review may or may not be on GitHub
+#     needs_you   true for a review that ended, reviewed or failed, and is not submitted
 #
-# A PR reads <owner>/<repo>#<number>, and times are local, in ISO 8601 with the offset.
+# Times are local, in ISO 8601 with the offset.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
