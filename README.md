@@ -15,6 +15,8 @@ config's `[jobs]` names logged in (`devin auth login`; `claude`, whose summary u
 Slack connector), `jq`, `git`, `docker`, and [uv](https://docs.astral.sh/uv/). The scripts run Python
 through `lib/python`, which has uv supply Python 3.11 or later and the packages `lib/whooper.py`
 names, at the versions `lib/whooper.py.lock` pins; the first run downloads what is missing.
+[gopls](https://go.dev/gopls/) is optional: with it, a review links changed Go code to its callers with
+Go's own tools rather than by name search ([How a review run works](#how-a-review-run-works)).
 
 1. Copy `examples/config.example.toml` to `~/.config/whooper/config.toml` and fill it in. Everything
    that identifies you, your company, or your repos lives there: your GitHub login and name, the
@@ -183,6 +185,17 @@ least 3, in the 90 days before the review started, from the history the merge ba
 out: each with the PR's file as `partner`, that share as `ratio`, and how many as `commits`, at most
 5, highest ratio first. For example, a file that changed in 7 of `load.go`'s 9 commits lists as ratio
 0.78 and commits 7. It is `[]` without the diff, the merge base, or the clone.
+
+`connections` is the `connections.json` whooper-review saved ([How a review run works](#how-a-review-run-works)):
+`nodes`, each with its `id`, `name`, `kind` (`func`, `method`, `type`, `var`, or `const`), `path` and
+`line`, in the head, or for removed code at the merge base, `change` (`added`, `changed`, `removed`, or
+`unchanged`, for a caller the diff leaves alone), and `lines_changed`; `edges` from the code that calls
+or uses a node to it, by node ID, each with `kind` (`calls` or `uses`) and `found_by` (`gopls` or
+`name_search`); and `limits`. For example, a PR that changes `Total` in `prices/prices.go`, which
+`Report` in `shop/report.go` calls, has the nodes `prices/prices.go:Total`, changed, and
+`shop/report.go:Report`, unchanged, and an edge from Report to Total that calls, found by gopls. It is
+null while the review runs and when the file is missing or cannot be read, as for a review from before
+whooper-review saved it.
 
 `safe_to_approve` is true exactly when whooper-submit would approve a review without
 `--approve-anyway` ([Submit a review](#submit-a-review)): its outcome is `reviewed`, its verdict is
@@ -468,7 +481,24 @@ it, would fail the review, so whooper-review first moves that overview from `fin
 `overview.json`, which it then checks, or discards it when the run wrote `overview.json` too, and
 says which on its error output. The overview
 never changes how a review ends: without one, or with one whooper-review drops, the review goes on
-as it would anyway. A run that passes
+as it would anyway.
+
+Then, while the worktrees still exist, whooper-review saves `connections.json` in the run directory, how
+the code the diff changes connects, for the review screen: the declarations the diff adds, changes, or
+removes, such as functions, methods, types, variables, and constants, each found in the head, or a
+removed one at the merge base, and the code that calls or uses each of them, one level up, found on the
+same side. For Go files it asks gopls, Go's language server, when Whooper finds it on PATH or where
+`go install` puts it (`go env GOBIN`, or `GOPATH/bin`). For any other file, and for Go files without
+gopls, it uses name search: the definitions a pattern per language finds, in Go, Python, JavaScript, and
+TypeScript, and `git grep`'s whole-word matches of each name. Each link names which of the two found it,
+and `limits` says in plain words what the graph can miss, such as calls through an interface, which gopls
+leaves out, or code that only shares a name, which name search links. Both read the reviewed commits, not
+the edits or probes the run left in the worktrees, and gopls downloads nothing (`GOPROXY=off`). The graph
+keeps at most 40 nodes, the changed code first, and the step stops looking after 2 minutes, and says so in
+`limits`. Like the overview, it never changes how a review ends: when it fails, the review has no
+`connections.json`.
+
+A run that passes
 `[review] timeout_minutes` is stopped, and when whooper-review exits it stops the run and every
 process the run started. When whooper-review stops a review for a reason it names, such as the time
 limit, a failed setup script, or findings that do not fit the schema, it saves that reason in the
@@ -615,7 +645,8 @@ the recheck list while the commands above write to it.
   The transcript (`transcript.jsonl` for Claude, the ATIF export `transcript.json` for Devin, with
   `devin-config.json` and `stdout.log`) and `stderr.log` are the run, `findings.json` its result
   (`findings.invalid.json` when it did not fit the schema), `overview.json` its overview of the PR
-  (`overview.invalid.json`, with why, when whooper-review dropped it), `failure.txt` the reason
+  (`overview.invalid.json`, with why, when whooper-review dropped it), `connections.json` how the
+  code the diff changes connects, `failure.txt` the reason
   whooper-review gave when it stopped the run and `failure.json` its cause, `log.md` its evidence
   for each finding and the candidates it dropped,
   `verdicts.json` whooper-classify's output, and `post.json` and `post-request.json` whooper-post's.

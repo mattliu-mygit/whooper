@@ -1313,17 +1313,22 @@ class OverviewTest(unittest.TestCase):
 
     def test_names_each_file_and_its_hunks_as_the_page_does(self):
         # Each file by its path in the head, or a deleted file's at the merge base, with its path at the merge
-        # base, and the first and last line of each hunk, counted in the head, or a deleted file's at the merge
-        # base. The binary file and the pure rename show no lines.
+        # base, the first and last line of each hunk, counted in the head, or a deleted file's at the merge base,
+        # and the lines the patch adds, counted in the head, and removes, counted at the merge base. The binary
+        # file and the pure rename show no lines.
         self.assertEqual(diff_files(OVERVIEW_PATCH), [
-            ("api/runs.go", "api/runs.go", [(10, 17), (41, 47)]),
-            ("api/cursor.go", None, [(1, 3)]),
-            ("api/old.go", "api/old.go", [(1, 2)]),
-            ("web/logo.png", "web/logo.png", []),
-            ("docs/b.md", "docs/a.md", []),
-            ("docs/café.md", "docs/café.md", [(1, 1)]),
-            ("docs/read me.md", "docs/read me.md", [(3, 3)]),
+            ("api/runs.go", "api/runs.go", [(10, 17), (41, 47)], {13, 14, 44}, {13}),
+            ("api/cursor.go", None, [(1, 3)], {1, 2, 3}, set()),
+            ("api/old.go", "api/old.go", [(1, 2)], set(), {1, 2}),
+            ("web/logo.png", "web/logo.png", [], set(), set()),
+            ("docs/b.md", "docs/a.md", [], set(), set()),
+            ("docs/café.md", "docs/café.md", [(1, 1)], {1}, {1}),
+            ("docs/read me.md", "docs/read me.md", [(3, 3)], {3}, set()),
         ])
+        # A form feed in a line of code ends no line, and "\ No newline at end of file" is none of the file's.
+        patch = ("diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1,3 +1,3 @@\n a\n-b\x0cc\n+b\n d\n"
+                 "\\ No newline at end of file\n")
+        self.assertEqual(diff_files(patch), [("x.py", "x.py", [(1, 3)], {2}, {2})])
 
     def test_the_overview_command_keeps_an_overview_that_keeps_every_rule_and_moves_any_other_aside(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1404,6 +1409,265 @@ class CoChangeTest(unittest.TestCase):
             {"path": "e1", "partner": "lib", "ratio": 0.75, "commits": 3},
             {"path": "c3", "partner": "app", "ratio": 0.6, "commits": 3},
         ])
+
+
+# PR 12 of a shop: in its Go module, Total changes, Discount goes away, and Checkout, which called both at the
+# merge base, now calls only Total; in its Python tools, summarize changes. Report calls Total, main calls
+# summarize, and neither changes, and count names summarize only in a comment.
+SHOP = {
+    "go.mod": "module example.com/shop\n\ngo 1.21\n",
+    "prices/prices.go": ("package prices\n\n// Total adds up the prices.\nfunc Total(prices []int) int {\n\tsum := 0\n"
+                         "\tfor _, p := range prices {\n\t\tsum += p\n\t}\n\treturn sum\n}\n\n"
+                         "// Discount takes a tenth off.\nfunc Discount(total int) int {\n\treturn total - total/10\n}\n"),
+    "shop/shop.go": ('package shop\n\nimport "example.com/shop/prices"\n\n// Checkout charges for the cart.\n'
+                     "func Checkout(cart []int) int {\n\treturn prices.Discount(prices.Total(cart))\n}\n"),
+    "shop/report.go": ('package shop\n\nimport (\n\t"fmt"\n\n\t"example.com/shop/prices"\n)\n\n'
+                       "// Report prints the cart's total.\nfunc Report(cart []int) string {\n"
+                       "\treturn fmt.Sprint(prices.Total(cart))\n}\n"),
+    "tools/report.py": "def summarize(rows):\n    return len(rows)\n",
+    "tools/cli.py": ("from report import summarize\n\n\ndef main(rows):\n    print(summarize(rows))\n\n\n"
+                     "def count(rows):\n    # Unlike summarize, this counts empty rows too.\n    return len(rows)\n"),
+}
+SHOP_PR = {
+    **SHOP,
+    "prices/prices.go": ("package prices\n\n// Total adds up the prices, leaving out refunds.\n"
+                         "func Total(prices []int) int {\n\tsum := 0\n\tfor _, p := range prices {\n\t\tif p > 0 {\n"
+                         "\t\t\tsum += p\n\t\t}\n\t}\n\treturn sum\n}\n"),
+    "shop/shop.go": SHOP["shop/shop.go"].replace("prices.Discount(prices.Total(cart))", "prices.Total(cart)"),
+    "tools/report.py": "def summarize(rows):\n    return len([row for row in rows if row])\n",
+}
+# The limits connections.json can give in plain words.
+ONE_LEVEL = "Callers are one level up only: the code that calls those callers is not shown."
+NO_GOPLS = ("Whooper found no gopls on PATH or where go install puts it, go env GOBIN or GOPATH/bin, so the Go links"
+            " come from name search.")
+GOPLS_MISSES = "gopls leaves out dynamic calls, such as calls through an interface, a function value, or reflection."
+NAME_SEARCH = ("Name search links every whole-word match of a name, so a link can join code that only shares the name,"
+               " and it misses calls that do not spell the name out.")
+PATTERNS = ("Where gopls did not read a file, Whooper finds its definitions by a pattern per language and counts each"
+            " changed line toward the nearest definition above it, so a change between two definitions can count"
+            " toward the wrong one.")
+REMOVED = "Removed code shows the callers it had at the merge base."
+
+
+def shop_connections(found_by):
+    """The connections.json of SHOP's PR 12, with its Go links found by found_by, gopls or name_search. gopls
+    spans Total from its comment to its closing brace, and name search to the line before Discount's comment,
+    a removed blank line, so it counts one more of Total's changed lines. Discount is where it was at the merge
+    base, and its caller is the Checkout of the merge base. Report, Total's first caller, comes before main,
+    summarize's, as each changed declaration's first caller comes before any one's second."""
+    def node(path, name, line, change, lines_changed):
+        return {"id": f"{path}:{name}", "name": name, "kind": "func", "path": path, "line": line, "change": change,
+                "lines_changed": lines_changed}
+
+    def link(caller, called, by=found_by):
+        return {"from": caller, "to": called, "kind": "calls", "found_by": by}
+
+    return {
+        "nodes": [node("prices/prices.go", "Total", 4, "changed", 6 if found_by == "gopls" else 7),
+                  node("prices/prices.go", "Discount", 13, "removed", 4),
+                  node("shop/shop.go", "Checkout", 6, "changed", 2),
+                  node("tools/report.py", "summarize", 1, "changed", 2),
+                  node("shop/report.go", "Report", 10, "unchanged", 0),
+                  node("tools/cli.py", "main", 4, "unchanged", 0)],
+        "edges": [link("shop/report.go:Report", "prices/prices.go:Total"),
+                  link("shop/shop.go:Checkout", "prices/prices.go:Total"),
+                  link("shop/shop.go:Checkout", "prices/prices.go:Discount"),
+                  link("tools/cli.py:main", "tools/report.py:summarize", "name_search")],
+        "limits": [ONE_LEVEL, GOPLS_MISSES if found_by == "gopls" else NO_GOPLS, NAME_SEARCH, PATTERNS, REMOVED],
+    }
+
+
+def commit_pr(origin, env, base, head):
+    """Makes origin a repo whose branch main holds base's files, by path, and whose branch pr-12 changes them to
+    head's, and returns the merge base and the head."""
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=origin, env=env, check=True, capture_output=True,
+                              text=True).stdout.strip()
+
+    def write(files):
+        for path in set(base) | set(head):
+            (origin / path).unlink(missing_ok=True)
+        for path, content in files.items():
+            (origin / path).parent.mkdir(parents=True, exist_ok=True)
+            (origin / path).write_text(content)
+        git("add", "--all")
+
+    origin.mkdir()
+    git("init", "--quiet", "--initial-branch=main")
+    write(base)
+    git("commit", "--quiet", "-m", "base")
+    git("checkout", "--quiet", "-b", "pr-12")
+    write(head)
+    git("commit", "--quiet", "-m", "the PR")
+    return git("rev-parse", "main"), git("rev-parse", "HEAD")
+
+
+def without_gopls(env, gobin):
+    """env with no gopls Whooper can find: none of PATH's folders holds one, and go install puts tools in gobin."""
+    path = os.pathsep.join(folder for folder in env["PATH"].split(os.pathsep)
+                           if not os.access(Path(folder) / "gopls", os.X_OK))
+    return {**env, "PATH": path, "GOBIN": str(gobin)}
+
+
+class ConnectionsTest(unittest.TestCase):
+    """connections, the step whooper-review runs as soon as a review run ends, run here on a throwaway origin's
+    PR and a run directory with its head and base worktrees, with HOME in a throwaway folder, so git reads only
+    the config a test writes there, and go and gopls keep their caches there."""
+
+    @classmethod
+    def setUpClass(cls):
+        # Found in the user's own environment, before a test moves HOME.
+        cls.gopls, _ = whooper.find_gopls()
+
+    def setUp(self):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        home = self.tmp / "home"
+        home.mkdir()
+        # git config that changes what git grep prints, which name search must read all the same.
+        (home / ".gitconfig").write_text("[grep]\n\tcolumn = true\n\tpatternType = perl\n[color]\n\tui = always\n")
+        self.env = {**os.environ, "HOME": str(home), "GIT_CONFIG_GLOBAL": str(home / ".gitconfig"),
+                    "GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "Sam", "GIT_AUTHOR_EMAIL": "sam@example.com",
+                    "GIT_COMMITTER_NAME": "Sam", "GIT_COMMITTER_EMAIL": "sam@example.com"}
+
+    def run_dir(self, base, head):
+        """A review run's directory for the PR that changes base's files, by path, to head's, as whooper-review
+        leaves it when the run ends: run.json, diff.patch, and the worktrees head and base."""
+        merge_base, head_sha = commit_pr(self.tmp / "origin", self.env, base, head)
+        run = self.tmp / "run"
+        for tree, commit in [("head", head_sha), ("base", merge_base)]:
+            subprocess.run(["git", "worktree", "add", "--quiet", "--detach", str(run / tree), commit],
+                           cwd=self.tmp / "origin", env=self.env, check=True)
+        (run / "run.json").write_text(json.dumps({"head_sha": head_sha, "merge_base": merge_base}))
+        (run / "diff.patch").write_text(subprocess.run(["git", "diff", *whooper.PLAIN_DIFF, merge_base, "HEAD"],
+                                                       cwd=run / "head", env=self.env, check=True, capture_output=True,
+                                                       text=True).stdout)
+        return run
+
+    def connections(self, run, env, **options):
+        """What connections writes for run in the environment env, given options such as seconds."""
+        with mock.patch.dict(os.environ, env, clear=True):
+            whooper.connections(run, **options)
+        return json.loads((run / "connections.json").read_text())
+
+    def test_go_files_link_by_gopls_and_other_files_by_name_search(self):
+        if not self.gopls:
+            self.skipTest("gopls is not installed; go install golang.org/x/tools/gopls@latest to run this test")
+        run = self.run_dir(SHOP, SHOP_PR)
+        # The review run left a probe's test in each worktree that calls the code it probes, and lines it added
+        # to report.go, which the diff does not change. gopls reads neither, so Report is where report.go has it.
+        (run / "head" / "shop" / "probe_test.go").write_text(
+            'package shop\n\nimport "example.com/shop/prices"\n\nfunc Probe() int { return prices.Total(nil) }\n')
+        (run / "base" / "shop" / "probe_test.go").write_text(
+            'package shop\n\nimport "example.com/shop/prices"\n\nfunc Probe() int { return prices.Discount(1) }\n')
+        report = run / "head" / "shop" / "report.go"
+        report.write_text("// probe\n\n\n" + report.read_text())
+        env = {**self.env, "PATH": f"{Path(self.gopls).parent}{os.pathsep}{self.env['PATH']}"}
+        self.assertEqual(self.connections(run, env), shop_connections("gopls"))
+
+    def test_without_gopls_go_files_link_by_name_search_too(self):
+        run = self.run_dir(SHOP, SHOP_PR)
+        (self.tmp / "gobin").mkdir()
+        self.assertEqual(self.connections(run, without_gopls(self.env, self.tmp / "gobin")),
+                         shop_connections("name_search"))
+
+    def test_moved_code_is_removed_and_added_and_code_the_diff_leaves_alone_shows_where_it_is_in_the_head(self):
+        (self.tmp / "gobin").mkdir()
+        # move goes from a.py to b.py, and x, which calls it, moves down 2 lines as w above it grows.
+        base = {"a.py": "def move():\n    return 2\n\n\ndef keep():\n    return 1\n",
+                "c.py": "def w():\n    return 1\n\n\ndef x():\n    return move()\n"}
+        head = {"a.py": "def keep():\n    return 1\n", "b.py": "def move():\n    return 2\n",
+                "c.py": "def w():\n    total = 1\n    total += 1\n    return total\n\n\ndef x():\n    return move()\n"}
+        graph = self.connections(self.run_dir(base, head), without_gopls(self.env, self.tmp / "gobin"))
+        self.assertEqual(graph, {
+            "nodes": [
+                {"id": "a.py:move", "name": "move", "kind": "func", "path": "a.py", "line": 1, "change": "removed",
+                 "lines_changed": 4},
+                {"id": "b.py:move", "name": "move", "kind": "func", "path": "b.py", "line": 1, "change": "added",
+                 "lines_changed": 2},
+                {"id": "c.py:w", "name": "w", "kind": "func", "path": "c.py", "line": 1, "change": "changed",
+                 "lines_changed": 4},
+                # Found at the merge base, where it is on line 5, calling the removed move.
+                {"id": "c.py:x", "name": "x", "kind": "func", "path": "c.py", "line": 7, "change": "unchanged",
+                 "lines_changed": 0},
+            ],
+            "edges": [{"from": "c.py:x", "to": "a.py:move", "kind": "calls", "found_by": "name_search"},
+                      {"from": "c.py:x", "to": "b.py:move", "kind": "calls", "found_by": "name_search"}],
+            "limits": [ONE_LEVEL, NAME_SEARCH, PATTERNS, REMOVED],
+        })
+
+    def test_patterns_find_each_languages_definitions(self):
+        definitions = whooper.definitions
+        go = ("package p\n\n// A counts.\nvar A = 1\n\nconst (\n\tB = iota\n\tC\n)\n\ntype (\n\tD int\n)\n\n"
+              "func (l *List[T]) Push(v T) {\n\tvar local int\n}\n\nfunc E() {}\n")
+        self.assertEqual([(d["name"], d["kind"], d["line"], d["start"], d["end"]) for d in definitions(go, "go")], [
+            ("A", "var", 4, 3, 6), ("B", "const", 7, 7, 7), ("C", "const", 8, 8, 11), ("D", "type", 12, 12, 14),
+            ("(*List[T]).Push", "method", 15, 15, 18), ("E", "func", 19, 19, 20)])
+        python = ("LIMIT = 3\n\n\nclass Cart:\n    @property\n    def total(self):\n        def inner():\n"
+                  "            pass\n\n\nasync def load():\n    else_ = 1\nelse: x = 2\n")
+        self.assertEqual([(d["name"], d["kind"], d["line"], d["start"]) for d in definitions(python, "python")], [
+            ("LIMIT", "const", 1, 1), ("Cart", "type", 4, 4), ("Cart.total", "method", 6, 5), ("inner", "func", 7, 7),
+            ("load", "func", 11, 11)])
+        script = ("export const LIMIT = 3\nlet count = 0\n/** Totals. */\nexport async function total() {}\n"
+                  "export const Row = ({a}) => a\nconst handler = async (e) => {}\nexport default class Cart {\n"
+                  "  add(item) {\n  }\n}\nexport interface Props {}\ntype Id = string\n")
+        self.assertEqual([(d["name"], d["kind"], d["line"], d["start"]) for d in definitions(script, "javascript")], [
+            ("LIMIT", "const", 1, 1), ("count", "var", 2, 2), ("total", "func", 4, 3), ("Row", "func", 5, 5),
+            ("handler", "func", 6, 6), ("Cart", "type", 7, 7), ("Props", "type", 11, 11), ("Id", "type", 12, 12)])
+
+    def test_the_graph_holds_at_most_40_nodes_the_changed_code_first_then_each_ones_callers_in_turn(self):
+        (self.tmp / "gobin").mkdir()
+        env = without_gopls(self.env, self.tmp / "gobin")
+        # a has 50 callers and b 2. After a and b come a's first caller, b's first, a's second, b's second, and
+        # then a's next ones, up to 40 nodes. Name search stops at a's 40th caller, so a has more than it lists.
+        callers = "".join(f"def use_a_{i}():\n    return a()\n\n\n" for i in range(50))
+        callers += "def use_b_0():\n    return b()\n\n\ndef use_b_1():\n    return b()\n"
+        base = {"lib.py": "def a():\n    return 1\n\n\ndef b():\n    return 2\n", "users.py": callers}
+        head = {**base, "lib.py": "def a():\n    return 10\n\n\ndef b():\n    return 20\n"}
+        graph = self.connections(self.run_dir(base, head), env)
+        ids = [node["id"] for node in graph["nodes"]]
+        self.assertEqual(ids[:6], ["lib.py:a", "lib.py:b", "users.py:use_a_0", "users.py:use_b_0", "users.py:use_a_1",
+                                   "users.py:use_b_1"])
+        self.assertEqual(ids[6:], [f"users.py:use_a_{i}" for i in range(2, 36)])
+        self.assertTrue(all(edge["from"] in ids and edge["to"] in ids for edge in graph["edges"]))
+        self.assertEqual(len(graph["edges"]), 38)
+        self.assertIn("Whooper shows 40 of the 44 or more declarations it found, the changed code first, and leaves"
+                      " out the rest and their links.", graph["limits"])
+
+    def test_more_than_40_changed_declarations_show_the_first_40_without_callers(self):
+        (self.tmp / "gobin").mkdir()
+        head = {"lib.py": "".join(f"def f{i}():\n    return {i}\n\n\n" for i in range(45)),
+                "users.py": "def use():\n    return f0()\n"}
+        graph = self.connections(self.run_dir({"users.py": head["users.py"]}, head),
+                                 without_gopls(self.env, self.tmp / "gobin"))
+        self.assertEqual([node["id"] for node in graph["nodes"]], [f"lib.py:f{i}" for i in range(40)])
+        self.assertEqual({node["change"] for node in graph["nodes"]}, {"added"})
+        self.assertEqual(graph["edges"], [])
+        self.assertIn("Whooper shows 40 of the 46 declarations it found, the changed code first, and leaves out the"
+                      " rest and their links.", graph["limits"])
+
+    def test_the_step_stops_at_its_time_limit_and_keeps_what_it_found(self):
+        # A gopls that never answers. report.py comes first in the diff, so the step reads it before it waits
+        # for gopls.
+        fakes = self.tmp / "fakes"
+        fake(fakes / "gopls", f"echo $$ > '{self.tmp}/gopls.pid'\nexec sleep 30")
+        base = {"a/report.py": "def summarize(rows):\n    return len(rows)\n",
+                "b/total.go": "package b\n\nfunc Total() int {\n\treturn 1\n}\n"}
+        head = {"a/report.py": "def summarize(rows):\n    return 0\n",
+                "b/total.go": "package b\n\nfunc Total() int {\n\treturn 2\n}\n"}
+        run = self.run_dir(base, head)
+        started = monotonic()
+        graph = self.connections(run, {**self.env, "PATH": f"{fakes}{os.pathsep}{self.env['PATH']}"}, seconds=1)
+        self.assertLess(monotonic() - started, 10)
+        self.assertEqual(graph, {
+            "nodes": [{"id": "a/report.py:summarize", "name": "summarize", "kind": "func", "path": "a/report.py",
+                       "line": 1, "change": "changed", "lines_changed": 2}],
+            "edges": [],
+            "limits": [ONE_LEVEL, PATTERNS, "Whooper stopped looking at its 1-second limit, so changed code and"
+                       " callers may be missing."],
+        })
+        # The step stopped the gopls it started.
+        with self.assertRaises(ProcessLookupError):
+            os.kill(int((self.tmp / "gopls.pid").read_text()), 0)
 
 
 def review_comment(path="services/orders/internal/api/orders.go", line=88, start_line=None, side="RIGHT",
@@ -3215,6 +3479,58 @@ class RunTest(unittest.TestCase):
             self.assertFalse((run / "overview.invalid.json").exists())
             self.assertEqual(shown, {**reviewed, "overview": kept})
 
+    def shop_pull_request(self):
+        """Makes PR 12 of sample-org/plain-repo SHOP's PR in a local origin, the cache's clone of it, and its work
+        item, has claude's review run find nothing, and returns the environment for git and the review
+        (git_env), with no gopls Whooper can find, and the work item's path."""
+        tmp = Path(self.tmp.name)
+        env = self.git_env()
+        _, head = commit_pr(tmp / "origin", env, SHOP, SHOP_PR)
+        subprocess.run(["git", "clone", "--quiet", "--no-checkout", str(tmp / "origin"),
+                        str(tmp / "cache" / "whooper" / "repos" / "sample-org-plain-repo")], env=env, check=True)
+        item = tmp / "item.json"
+        item.write_text(json.dumps({"kind": "first_review", "repo": "sample-org/plain-repo", "pr": 12, "head_sha": head,
+                                    "base_ref": "main", "source": "github_request", "slack": None, "reason": "r"}))
+        (self.fakes / "result.json").write_text(json.dumps({
+            "type": "result", "subtype": "success", "total_cost_usd": 0, "duration_ms": 0, "num_turns": 1,
+            "structured_output": {"status": "reviewed", "skip_reason": "", "findings": [],
+                                  "approval": {"verdict": "approve_once_ci_passes", "reason": "Read the diff."}}}))
+        self.script(self.fakes / "claude", 'cat "${0%/*}/result.json"')
+        (tmp / "gobin").mkdir()
+        return without_gopls(env, tmp / "gobin"), item
+
+    def test_a_review_saves_how_the_changed_code_connects_before_its_worktrees_go_and_show_prints_it(self):
+        env, item = self.shop_pull_request()
+        gopls, _ = whooper.find_gopls()
+        # Without gopls, and with it when it is installed. A run ID names its start to the second, so each review
+        # starts in a second of its own.
+        for found_by, path in [("name_search", env["PATH"]),
+                               *([("gopls", f"{Path(gopls).parent}{os.pathsep}{env['PATH']}")] if gopls else [])]:
+            with self.subTest(found_by):
+                sleep(1 - datetime.now().microsecond / 1e6)
+                result = self.command("whooper-review", str(item), "--dry-run", env={**env, "PATH": path})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                run = Path(result.stdout.strip())
+                self.assertEqual(json.loads((run / "connections.json").read_text()), shop_connections(found_by))
+                self.assertFalse((run / "head").exists() or (run / "base").exists())
+                shown = self.command("whooper-show", run.name, "--json", env=env)
+                self.assertEqual(shown.returncode, 0, shown.stderr)
+                self.assertEqual({key: json.loads(shown.stdout)[key] for key in ["outcome", "connections"]},
+                                 {"outcome": "reviewed", "connections": shop_connections(found_by)})
+
+    def test_a_review_goes_on_when_the_connections_step_fails(self):
+        env, item = self.shop_pull_request()
+        # A directory named connections.json, which the step cannot replace with its file, makes the step fail.
+        self.script(self.fakes / "claude", 'mkdir "$WHOOPER_RUN/connections.json"\ncat "${0%/*}/result.json"')
+        result = self.command("whooper-review", str(item), "--dry-run", env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("whooper-review: the connections step failed, so the review has no connections.json\n",
+                      result.stderr)
+        shown = self.command("whooper-show", Path(result.stdout.strip()).name, "--json", env=env)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertEqual({key: json.loads(shown.stdout)[key] for key in ["outcome", "failure", "connections"]},
+                         {"outcome": "reviewed", "failure": None, "connections": None})
+
     def test_show_gives_the_commits_since_the_review_and_the_files_that_change_with_the_prs_from_the_clone(self):
         env = {**self.git_env(), "TZ": "America/Los_Angeles"}
         tmp = Path(self.tmp.name)
@@ -4569,7 +4885,7 @@ class ReviewsTest(unittest.TestCase):
             "author": None, "outcome": "waiting", "findings": None, "safe_to_approve": False, "drafts": None,
             "diff": None, "failure": None, "asks": [], "submitted": None, "cause": CAUSES["docker_unavailable"],
             "head_sha": "h1", "skipped_by_user": False, "removed_by_user": False, "overview": None,
-            "commits_since_review": None, "co_change": []})
+            "commits_since_review": None, "co_change": [], "connections": None})
         # An ask about it may read why it waits.
         prompt = io.StringIO()
         with redirect_stdout(prompt):
@@ -4673,8 +4989,9 @@ class ReviewsTest(unittest.TestCase):
             "safe_to_approve": False, "drafts": {"event": "COMMENT", "message": "", "findings": {}},
             "diff": self.DIFF, "failure": None, "asks": [], "submitted": None, "cause": None, "head_sha": "h1",
             "skipped_by_user": False, "removed_by_user": False,
-            # The run wrote no overview, nothing names a newer head of the PR, and the cache has no clone.
-            "overview": None, "commits_since_review": None, "co_change": [],
+            # The run wrote no overview, nothing names a newer head of the PR, the cache has no clone, and the
+            # review kept no connections.json.
+            "overview": None, "commits_since_review": None, "co_change": [], "connections": None,
         })
         drafts = subprocess.run([str(ROOT / "bin" / "whooper-draft"), run.name], env=self.env, capture_output=True,
                                 text=True, timeout=60)
@@ -4693,7 +5010,8 @@ class ReviewsTest(unittest.TestCase):
         reason = f"the review run passed its 45-minute limit; see {failed}/stderr.log and the transcript in {failed}\n"
         self.write(failed, "failure.txt", reason, 45)
         nothing = {"version": 1, "findings": None, "safe_to_approve": False, "drafts": None, "asks": [],
-                   "submitted": None, "overview": None, "commits_since_review": None, "co_change": []}
+                   "submitted": None, "overview": None, "commits_since_review": None, "co_change": [],
+                   "connections": None}
         self.assertEqual(self.shown(failed), {
             **nothing, "run_id": failed.name, "run": json.loads((failed / "run.json").read_text()),
             "title": self.TITLE, "author": "alice", "outcome": "failed", "diff": self.DIFF, "failure": reason,
@@ -4752,6 +5070,24 @@ class ReviewsTest(unittest.TestCase):
         self.hold(running, os.getpid())
         self.assertEqual({key: self.shown(running)[key] for key in ["outcome", "overview"]},
                          {"outcome": "running", "overview": None})
+
+    def test_show_gives_connections_json_once_the_review_ended(self):
+        graph = {"nodes": [{"id": "README.md:x", "name": "x", "kind": "var", "path": "README.md", "line": 3,
+                            "change": "changed", "lines_changed": 2}], "edges": [], "limits": [ONE_LEVEL]}
+        run = self.make_run(timedelta(hours=1))
+        self.finish(run)
+        self.write(run, "connections.json", graph, 19)
+        self.assertEqual(self.shown(run)["connections"], graph)
+        # One that is not JSON, which whooper-review's step never leaves, since it writes the file whole, shows none.
+        self.write(run, "connections.json", '{"nodes": [', 19)
+        self.assertEqual(self.shown(run)["connections"], None)
+        # While the review runs, whooper-show shows none, as it shows no overview.
+        running = self.make_run(timedelta(minutes=5), pr=14)
+        self.fetched(running)
+        self.write(running, "connections.json", graph, 4)
+        self.hold(running, os.getpid())
+        self.assertEqual({key: self.shown(running)[key] for key in ["outcome", "connections"]},
+                         {"outcome": "running", "connections": None})
 
     def test_show_prints_the_drafts_and_the_review_whooper_submit_posted(self):
         run = self.make_run(timedelta(hours=1))

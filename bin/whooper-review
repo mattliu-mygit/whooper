@@ -24,7 +24,12 @@
 # overview.json that cannot be read, is not JSON, or breaks a rule of prompts/review.md's overview,
 # such as lines outside the diff's hunks, moves to overview.invalid.json, with why there and on this
 # script's error output (lib/whooper.py's read_overview). Whatever the overview, the review goes on as
-# it would without one. bin/whooper-classify <run dir> then applies rule v1 to its findings.
+# it would without one. Then, before the worktrees go, a step of at most 2 minutes saves
+# connections.json, how the code the diff changes connects: the declarations it adds, changes, or
+# removes, the code that calls them, one level up, and how each link was found, by gopls for Go files
+# and name search for the rest (lib/whooper.py's connections). Whatever it finds, and even if it fails,
+# the review goes on as it would without it. bin/whooper-classify <run dir> then applies rule v1 to its
+# findings.
 #
 # While it runs, this script holds the PR's lock, <state>/locks/<owner>-<repo>-<pr>/, with its
 # process ID in pid and the run ID in run_id. On exit, finished or not, the repo's teardown script
@@ -105,7 +110,7 @@ finished=false
 # What failure.txt says when the review stops without die's reason: a command failed under set -e,
 # unless the trap below records that a signal stopped the review.
 stop_reason="the review stopped at an unexpected error; see whooper-review's error output"
-work="" agent_group="" watchdog_pid=""
+work="" agent_group="" watchdog_pid="" connections_group=""
 cleanup() {
   local status=$?
   # bash 3.2, macOS's /bin/bash, runs this with $? at 0 when set -u stops the script on an unset
@@ -126,11 +131,13 @@ cleanup() {
     save_failure "$stop_reason" || true
   fi
   # The run and everything it started share one process group, so this also stops a server a
-  # probe left running.
-  if [[ -n "$agent_group" ]]; then
-    kill -TERM -- "-$agent_group" 2>/dev/null || true
-    wait "$agent_group" 2>/dev/null || true
-  fi
+  # probe left running. The connections step has a group of its own too.
+  for group in "$agent_group" "$connections_group"; do
+    if [[ -n "$group" ]]; then
+      kill -TERM -- "-$group" 2>/dev/null || true
+      wait "$group" 2>/dev/null || true
+    fi
+  done
   if [[ -n "$watchdog_pid" ]]; then
     kill "$watchdog_pid" 2>/dev/null || true
   fi
@@ -302,6 +309,21 @@ watchdog_pid=""
 # run wrote inside findings.json leaves that file, so it cannot fail the findings' check below.
 # Whatever the check finds, and even if it fails, the review goes on as it would without an overview.
 "$root/lib/python" "$root/lib/whooper.py" overview "$run" || true
+
+# Then, while the worktrees exist, the connections step writes connections.json: how the code the diff
+# changes connects, from gopls for Go files and name search for the rest (lib/whooper.py's connections).
+# It stops looking at its own time limit, and it runs in a process group of its own, as the run does, so
+# an interrupt reaches the cleanup at once and the cleanup stops everything the step started. Its output
+# goes to the error output, so this script's output stays the run directory alone. Whatever it finds,
+# and even if it fails, the review goes on as it would without it.
+(
+  exec "$root/lib/python" -c 'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
+    "$root/lib/python" "$root/lib/whooper.py" connections "$run" < /dev/null >&2
+) &
+connections_group=$!
+wait "$connections_group" || echo "whooper-review: the connections step failed, so the review has no connections.json" >&2
+kill -TERM -- "-$connections_group" 2>/dev/null || true
+connections_group=""
 
 # Each check names its own step, which failure.json names the cause by.
 step=time-limit

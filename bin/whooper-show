@@ -51,6 +51,15 @@
 #              ratio, commits}, where partner is the PR's file, ratio the share of its commits, and
 #              commits how many; at most 5, highest ratio first, and [] without the diff, the merge
 #              base, or the clone
+#   connections  connections.json, how the code the diff changes connects, which whooper-review saves
+#              before the worktrees go; null while the review runs, and when the file is missing or cannot
+#              be read, as for a review from before whooper-review saved it, or one stopped before then:
+#              nodes, the declarations the diff adds, changes, or removes and the code that calls or uses
+#              them, one level up, each as {id, name, kind (func, method, type, var, or const), path, line,
+#              change (added, changed, removed, or unchanged), lines_changed}, where a removed one's path
+#              and line are at the merge base and any other's in the head; edges, each as {from, to, kind
+#              (calls or uses), found_by (gopls or name_search)}, from caller to called by node ID; and
+#              limits, what the graph can miss, in plain words, such as that it stops at 40 nodes
 #
 # A run ID that names no run directory gets "no run <run-id>" and exit 1. Prompting Time runs this
 # as the manifest's show-review action, whose fixed argument --json comes before the run ID; either

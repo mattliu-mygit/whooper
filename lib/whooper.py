@@ -28,6 +28,8 @@ from the user's config file (config_path), never from this code. The bin/ script
                                                                                       findings.json holds, and
                                                                                       overview.invalid.json, for an
                                                                                       overview.json read_overview drops
+  whooper.py connections <run dir>                                                 -> connections.json, how the code
+                                                                                      the diff changes connects
   whooper.py retry <data dir> <run-id> <head now>                                  -> queues another review
   whooper.py wait <data dir> <work-item.json> <failure.json>                      -> a waiting run, the recheck list
   whooper.py skip <data dir> <run-id> [--undo]                                    -> marks the run skipped, or not
@@ -50,16 +52,20 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import fcntl
 import hashlib
+from itertools import zip_longest
 import json
+import keyword
 import os
 from pathlib import Path
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import tomllib
+import urllib.parse
 
 import tomlkit
 
@@ -632,26 +638,39 @@ def diff_path(text, prefix=""):
 
 def diff_files(patch):
     """The files a patch git diff wrote changes, such as a run's diff.patch, as Whooper's page reads
-    them: each as (path, old path, lines), where path is the file's path in the head, or for a deleted
-    file at the merge base, old path its path at the merge base, None for an added file, and lines the
-    first and last line of each hunk, counted in the head, or for a deleted file at the merge base. A
-    file whose diff shows no lines, such as a binary file, a pure rename, or a mode change, has none.
-    The ---, +++, rename, and copy lines name a file's paths; the first line names them only for a file
-    without those, since a path with a space and " b/" in it reads two ways there."""
+    them: each as (path, old path, lines, added, removed), where path is the file's path in the head, or
+    for a deleted file at the merge base, old path its path at the merge base, None for an added file,
+    lines the first and last line of each hunk, counted in the head, or for a deleted file at the merge
+    base, added the numbers of the lines the patch adds, counted in the head, and removed those of the
+    lines it removes, counted at the merge base. A file whose diff shows no lines, such as a binary file,
+    a pure rename, or a mode change, has none. The ---, +++, rename, and copy lines name a file's paths;
+    the first line names them only for a file without those, since a path with a space and " b/" in it
+    reads two ways there."""
     files = []
     for part in re.split(r"^(?=diff --git )", patch, flags=re.M)[1:]:
-        first, *lines = part.splitlines()
+        # Only a newline ends a line: splitlines would also end one at a form feed in the code, and throw off
+        # the count of the lines after it.
+        first, *lines = part.split("\n")
         names = DIFF_HEADER.match(first)
         old, new = (diff_path(names[1], "a/"), diff_path(names[2], "b/")) if names else (None, None)
-        added = deleted = False
-        hunks = []
+        created = deleted = False
+        hunks, added, removed = [], set(), set()
         # git ends the path on a --- or +++ line with a tab when the path has a space.
         for line in lines:
             if hunk := HUNK.match(line):
                 hunks.append([int(n) if n is not None else 1 for n in hunk.groups()])
+                old_line, new_line = hunks[-1][0], hunks[-1][2]
             elif hunks:
-                # A line of a hunk, which may itself start with --- or +++.
-                continue
+                # A line of a hunk, which may itself start with --- or +++. "\ No newline at end of file" is
+                # none of the file's lines.
+                if line.startswith("+"):
+                    added.add(new_line)
+                    new_line += 1
+                elif line.startswith("-"):
+                    removed.add(old_line)
+                    old_line += 1
+                elif not line.startswith("\\"):
+                    old_line, new_line = old_line + 1, new_line + 1
             elif line.startswith("--- "):
                 old = diff_path(line[4:].split("\t")[0], "a/")
             elif line.startswith("+++ "):
@@ -661,7 +680,7 @@ def diff_files(patch):
             elif line.startswith(("rename to ", "copy to ")):
                 new = diff_path(line.split(" to ", 1)[1])
             elif line.startswith("new file mode"):
-                added = True
+                created = True
             elif line.startswith("deleted file mode"):
                 deleted = True
         spans = []
@@ -670,7 +689,7 @@ def diff_files(patch):
             start, count = (old_start, old_count) if deleted else (new_start, new_count)
             if count:
                 spans.append((start, start + count - 1))
-        files.append((old if deleted else new, None if added else old, spans))
+        files.append((old if deleted else new, None if created else old, spans, added, removed))
     return files
 
 
@@ -686,7 +705,7 @@ def check_overview(overview, patch):
     file whose diff shows no lines, such as a binary file, has no lines a range could name, so it is in
     no layer."""
     check_schema(overview, json.loads(OVERVIEW_SCHEMA.read_text()), "overview")
-    hunks = {path: spans for path, _, spans in diff_files(patch)}
+    hunks = {path: spans for path, _, spans, *_ in diff_files(patch)}
     ranges = [(f"overview.places[{i}]", place) for i, place in enumerate(overview["places"])]
     ranges += [(f"overview.layers[{i}].ranges[{j}]", r) for i, layer in enumerate(overview["layers"])
                for j, r in enumerate(layer["ranges"])]
@@ -774,6 +793,440 @@ def co_change(commits, paths):
     return list(best.values())[:CO_CHANGE_MAX]
 
 
+# How the changed code connects, connections.json: whooper-review's step stops looking after
+# CONNECTIONS_SECONDS, and the graph keeps at most CONNECTIONS_MAX_NODES nodes, the changed code first.
+CONNECTIONS_SECONDS, CONNECTIONS_MAX_NODES = 120, 40
+# The kind of node each declaration gopls lists is, by the Language Server Protocol's number for its kind:
+# a function, a method, a struct, an interface, any other type, a variable, and a constant.
+GOPLS_KINDS = {12: "func", 6: "method", 23: "type", 11: "type", 5: "type", 13: "var", 14: "const"}
+# The languages whose definitions name search finds by pattern: each with its files' extensions, the line
+# comment a line it skips starts with, how the comment, decorator, and attribute lines above a definition
+# that belong to it start, and the patterns of a definition's line, each with the kind of node it names. A
+# pattern's name group is the name, and the recv group of a Go method its receiver, which names it the way
+# gopls does, such as (*Cart).Total. Go's var (, const (, and type ( blocks name a declaration on each line
+# indented one tab. A pattern does not find a method of a JavaScript or TypeScript class, so a change in one
+# counts toward its class.
+LANGUAGES = {
+    "go": {"extensions": (".go",), "comment": "//", "above": ("//",), "definitions": [
+        (re.compile(r"func\s+\((?:\w+\s+)?(?P<recv>\*?\w+(?:\[[^\]]*\])?)\)\s*(?P<name>\w+)"), "method"),
+        (re.compile(r"func\s+(?P<name>\w+)"), "func"),
+        (re.compile(r"type\s+(?P<name>\w+)"), "type"),
+        (re.compile(r"var\s+(?P<name>\w+)"), "var"),
+        (re.compile(r"const\s+(?P<name>\w+)"), "const"),
+    ]},
+    "python": {"extensions": (".py", ".pyi"), "comment": "#", "above": ("#", "@"), "definitions": [
+        (re.compile(r"\s*(?:async\s+)?def\s+(?P<name>\w+)"), "func"),
+        (re.compile(r"\s*class\s+(?P<name>\w+)"), "type"),
+        (re.compile(r"(?P<name>[A-Z][A-Z0-9_]*)\s*(?::[^=]*)?=(?!=)"), "const"),
+        (re.compile(r"(?P<name>[A-Za-z_]\w*)\s*(?::[^=]*)?=(?!=)"), "var"),
+    ]},
+    "javascript": {"extensions": (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"), "comment": "//",
+                   "above": ("//", "/*", "*", "@"), "definitions": [
+        (re.compile(r"\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\b\s*\*?\s*(?P<name>[\w$]+)"), "func"),
+        (re.compile(r"\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+(?P<name>[\w$]+)"), "type"),
+        (re.compile(r"\s*(?:export\s+)?(?:declare\s+)?(?:interface|type|enum)\s+(?P<name>[\w$]+)"), "type"),
+        (re.compile(r"\s*(?:export\s+)?(?:const|let|var)\s+(?P<name>[\w$]+)\s*(?::[^=]*)?=\s*(?:async\s+)?"
+                    r"(?:function\b|\(|[\w$]+\s*=>)"), "func"),
+        (re.compile(r"(?:export\s+)?const\s+(?P<name>[\w$]+)"), "const"),
+        (re.compile(r"(?:export\s+)?(?:let|var)\s+(?P<name>[\w$]+)"), "var"),
+    ]},
+}
+
+
+def language_of(path):
+    """The language in LANGUAGES whose extensions path has, or None."""
+    return next((name for name, spec in LANGUAGES.items() if path.endswith(spec["extensions"])), None)
+
+
+def definitions(text, language):
+    """The definitions name search finds in text, a file in language, by LANGUAGES' patterns: each as its
+    name, kind, the line it is on, and the lines it spans, start to end, from the comments and decorators
+    directly above it to the line before the next definition, as git's hunk headers count each line toward
+    the nearest definition above it. A Python def inside a class is a method named with its class, as in
+    Cart.total."""
+    spec, lines, found, block = LANGUAGES[language], text.split("\n"), [], None
+    for number, line in enumerate(lines, 1):
+        if block:
+            if line.startswith(")"):
+                block = None
+            elif m := re.match(r"\t(\w+)", line):
+                found.append({"name": m[1], "kind": block, "line": number, "indent": 1})
+            continue
+        if language == "go" and (m := re.match(r"(var|const|type)\s*\($", line)):
+            block = m[1]
+            continue
+        for pattern, kind in spec["definitions"]:
+            # A Python one-line block such as `else: x = 1` would read as a variable named else.
+            if (m := pattern.match(line)) and not (language == "python" and keyword.iskeyword(m["name"])):
+                name = f"({m['recv']}).{m['name']}" if m.groupdict().get("recv") else m["name"]
+                found.append({"name": name, "kind": kind, "line": number, "indent": len(line) - len(line.lstrip())})
+                break
+    for i, symbol in enumerate(found):
+        if language == "python" and symbol["kind"] == "func" and symbol["indent"]:
+            outer = next((s for s in reversed(found[:i]) if s["indent"] < symbol["indent"]), None)
+            if outer and outer["kind"] == "type":
+                symbol.update(kind="method", name=f"{outer['name']}.{symbol['name']}")
+        symbol["start"] = symbol["line"]
+        while symbol["start"] > 1 and lines[symbol["start"] - 2].strip().startswith(spec["above"]):
+            symbol["start"] -= 1
+    for symbol, after in zip(found, found[1:] + [None]):
+        symbol["end"] = after["start"] - 1 if after else len(lines)
+    return found
+
+
+def committed(tree, commit, path):
+    """The text of path in commit, read in the worktree tree without fetching, or None when commit has no
+    such file."""
+    shown = subprocess.run(["git", "-C", str(tree), "--no-lazy-fetch", "cat-file", "blob", f"{commit}:{path}"],
+                           capture_output=True)
+    return shown.stdout.decode(errors="replace") if shown.returncode == 0 else None
+
+
+def name_search(tree, commit, name, language):
+    """The lines of commit's files in language that spell out name as a whole word, each as (path, line),
+    from git grep in the worktree tree, which reads the commit's files, not the worktree's, and fetches
+    nothing. A line that starts with the language's line comment is left out."""
+    spec = LANGUAGES[language]
+    grep = subprocess.run(["git", "-C", str(tree), "--no-lazy-fetch", "grep", "-z", "-n", "-w", "-F", "-I", "--no-color",
+                           "--no-column", "-e", name, commit, "--", *(f"*{e}" for e in spec["extensions"])],
+                          capture_output=True)
+    # git grep exits 1 when nothing matches.
+    if grep.returncode > 1:
+        raise OSError(f"git grep for {name} failed: {grep.stderr.decode(errors='replace').strip()}")
+    sites = []
+    for record in grep.stdout.decode(errors="replace").split("\n"):
+        if record:
+            where, number, text = record.split("\0", 2)
+            if not text.lstrip().startswith(spec["comment"]):
+                sites.append((where.removeprefix(f"{commit}:"), int(number)))
+    return sites
+
+
+def find_gopls():
+    """The gopls Whooper runs, and why there is none: gopls on PATH, or where go install puts it, GOBIN or
+    the bin folder of the first GOPATH folder, and none without the go command, which gopls runs to load
+    packages."""
+    if not shutil.which("go"):
+        return None, "The go command, which gopls needs, is not on PATH"
+    if found := shutil.which("gopls"):
+        return found, None
+    gobin, gopath, *_ = subprocess.run(["go", "env", "GOBIN", "GOPATH"], capture_output=True,
+                                       text=True).stdout.split("\n") + ["", ""]
+    folder = Path(gobin) if gobin else Path(gopath.split(os.pathsep)[0]) / "bin" if gopath else None
+    if folder and folder.is_absolute() and os.access(folder / "gopls", os.X_OK):
+        return str(folder / "gopls"), None
+    return None, "Whooper found no gopls on PATH or where go install puts it, go env GOBIN or GOPATH/bin"
+
+
+class GoplsError(Exception):
+    """gopls answered a request with an error, as for a position where it finds no declaration."""
+
+
+class Gopls:
+    """gopls, Go's language server, run in the worktree tree and spoken to through its standard input and
+    output in the Language Server Protocol, so one load of the worktree's packages answers every question.
+    gopls runs go with GOPROXY=off, so it downloads nothing and reads only the modules already on this Mac.
+    Each file asked about opens first, with its content in commit, which is also how gopls tells which of
+    the worktree's modules it belongs to. So do the Go files the review run changed in the worktree, and
+    those it added, such as a probe's test, as their package clause alone, so neither the run's edits nor
+    its probes reach gopls's answers. A request gopls answers with an error raises GoplsError, and gopls
+    exiting or writing something other than the protocol raises OSError or ValueError."""
+
+    def __init__(self, program, tree, commit):
+        self.tree, self.commit, self.requests, self.opened, self.errors = tree, commit, 0, set(), []
+        self.process = subprocess.Popen([program, "serve"], cwd=tree, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                        stderr=subprocess.DEVNULL, env={**os.environ, "GOPROXY": "off"})
+        # A gopls that fails to start, or the time limit meanwhile, leaves no process behind.
+        try:
+            uri = tree.as_uri()
+            self.call("initialize", {"processId": os.getpid(), "rootUri": uri, "workspaceFolders": [{"uri": uri, "name": tree.name}],
+                                     "capabilities": {"textDocument": {"documentSymbol": {"hierarchicalDocumentSymbolSupport": True}}}})
+            self.send({"method": "initialized", "params": {}})
+            status = subprocess.run(["git", "-C", str(tree), "--no-optional-locks", "status", "--porcelain", "-z",
+                                     "--untracked-files=all"], capture_output=True, text=True, check=True).stdout
+            entries = iter(status.split("\0"))
+            for entry in entries:
+                # A rename or copy names the path it came from next.
+                if entry[:1] in ("R", "C"):
+                    next(entries, None)
+                if entry.endswith(".go"):
+                    text = committed(tree, commit, entry[3:])
+                    if text is None:
+                        try:
+                            clause = re.search(r"^package\s+\w+", (tree / entry[3:]).read_text(errors="replace"), re.M)
+                        except OSError:
+                            clause = None
+                        text = f"{clause[0]}\n" if clause else ""
+                    self.open(entry[3:], text)
+        except BaseException:
+            self.close()
+            raise
+
+    def send(self, message):
+        body = json.dumps({"jsonrpc": "2.0", **message}).encode()
+        self.process.stdin.write(b"Content-Length: %d\r\n\r\n%s" % (len(body), body))
+        self.process.stdin.flush()
+
+    def call(self, method, params):
+        """gopls's answer to the request method with params. Meanwhile gopls's notifications are dropped,
+        except that each error it shows the user is kept in errors, and a request of gopls's own gets null."""
+        self.requests += 1
+        self.send({"id": self.requests, "method": method, "params": params})
+        while True:
+            length = None
+            while line := self.process.stdout.readline().strip():
+                name, _, value = line.partition(b":")
+                if name.lower() == b"content-length":
+                    length = int(value)
+            if length is None:
+                raise OSError(f"gopls exited with code {self.process.poll()}")
+            message = json.loads(self.process.stdout.read(length))
+            if message.get("method") == "window/showMessage" and message["params"].get("type") == 1:
+                self.errors.append(message["params"]["message"])
+            if "method" in message:
+                if "id" in message:
+                    self.send({"id": message["id"], "result": None})
+            elif message.get("id") == self.requests:
+                if "error" in message:
+                    raise GoplsError(message["error"].get("message"))
+                return message.get("result")
+
+    def uri(self, path):
+        return (self.tree / path).as_uri()
+
+    def open(self, path, text):
+        if path not in self.opened:
+            self.opened.add(path)
+            self.send({"method": "textDocument/didOpen", "params": {
+                "textDocument": {"uri": self.uri(path), "languageId": "go", "version": 1, "text": text}}})
+
+    def symbols(self, path):
+        """The declarations of path in commit, as definitions gives them, from gopls: each spans its
+        declaration and the comment lines directly above it, and keeps the position of its name, which
+        sites asks about."""
+        text = committed(self.tree, self.commit, path)
+        if text is None:
+            return []
+        self.open(path, text)
+        lines, found = text.split("\n"), []
+        for symbol in self.call("textDocument/documentSymbol", {"textDocument": {"uri": self.uri(path)}}) or []:
+            if kind := GOPLS_KINDS.get(symbol["kind"]):
+                start = symbol["range"]["start"]["line"] + 1
+                while start > 1 and lines[start - 2].strip().startswith("//"):
+                    start -= 1
+                found.append({"name": symbol["name"], "kind": kind, "line": symbol["selectionRange"]["start"]["line"] + 1,
+                              "start": start, "end": symbol["range"]["end"]["line"] + 1,
+                              "position": symbol["selectionRange"]["start"]})
+        return found
+
+    def sites(self, path, symbol):
+        """Where code calls symbol, a declaration of path that symbols gave, as gopls's incoming calls list
+        them for a func or method, or uses it, as its references list them for any other kind: each as
+        (path, line) in the worktree, by path and then line."""
+        document, position = {"uri": self.uri(path)}, symbol["position"]
+        if symbol["kind"] in ("func", "method"):
+            items = self.call("textDocument/prepareCallHierarchy", {"textDocument": document, "position": position})
+            places = [(call["from"]["uri"], where) for item in (items or [])[:1]
+                      for call in self.call("callHierarchy/incomingCalls", {"item": item}) or []
+                      for where in call["fromRanges"]]
+        else:
+            places = [(location["uri"], location["range"]) for location in self.call("textDocument/references", {
+                "textDocument": document, "position": position, "context": {"includeDeclaration": False}}) or []]
+        sites = []
+        for uri, where in places:
+            file = Path(urllib.parse.unquote(urllib.parse.urlparse(uri).path))
+            if file.is_relative_to(self.tree):
+                sites.append((file.relative_to(self.tree).as_posix(), where["start"]["line"] + 1))
+        # In the order git grep lists its matches, so the graph does not depend on gopls's order.
+        return sorted(sites)
+
+    def close(self):
+        self.process.kill()
+        self.process.wait()
+
+
+class TimeLimit(Exception):
+    """The connections step reached its time limit. It is no OSError, as TimeoutError is, so no handler of a
+    failed command takes it for one."""
+
+
+def stop_at_time_limit(signum, frame):
+    raise TimeLimit
+
+
+def connections(run, seconds=CONNECTIONS_SECONDS):
+    """Writes connections.json in run, a review run's directory, while its worktrees exist: how the code its
+    diff.patch changes connects, for whooper-show. The nodes are the declarations the diff adds, changes, or
+    removes, each found in the head, or a removed one at the merge base, and the code that calls or uses
+    them, one level up, found on the same side. Go files ask gopls (Gopls), on PATH or where go install puts
+    it, and every other file, and a Go file without gopls or when gopls cannot answer, name search: the
+    definitions LANGUAGES' patterns find, and git grep's whole-word matches of a name. Each link says which
+    of the two found it, and limits says in plain words what the graph can miss. It keeps at most
+    CONNECTIONS_MAX_NODES nodes: the changed code in the diff's order, then the callers of each changed
+    declaration in turn. Looking stops after seconds, and the file then says so and holds what was found."""
+    item = read_object(run / "run.json")
+    patch = (run / "diff.patch").read_text(errors="replace")
+    root = run.resolve()
+    sides = {"head": (root / "head", item["head_sha"]), "base": (root / "base", item["merge_base"])}
+    checkouts = {"head": "the head's checkout", "base": "the merge base's checkout"}
+    program, no_gopls = find_gopls()
+    sessions, cache, problems, reported, used = {}, {}, [], [], set()
+
+    def session(side):
+        """The side's gopls, started the first time it is needed, or None without gopls or once it failed."""
+        if program and side not in sessions:
+            sessions[side] = None
+            try:
+                sessions[side] = Gopls(program, *sides[side])
+            except (OSError, ValueError, GoplsError) as e:
+                problems.append(f"gopls did not start in {checkouts[side]}: {e}, so its Go links come from name search.")
+        return sessions.get(side)
+
+    def gopls_failed(side, e):
+        reported.extend(sessions[side].errors)
+        sessions[side].close()
+        sessions[side] = None
+        problems.append(f"gopls stopped answering in {checkouts[side]}: {e}, so the rest of its Go links come from"
+                        " name search.")
+
+    def symbols(side, path):
+        """The declarations of path on side, from gopls for a Go file while it answers, and otherwise from
+        LANGUAGES' patterns."""
+        if (side, path) not in cache:
+            language = language_of(path)
+            if language == "go" and (gopls := session(side)):
+                try:
+                    cache[side, path] = gopls.symbols(path)
+                    return cache[side, path]
+                except GoplsError as e:
+                    problems.append(f"gopls could not list the declarations of {path}: {e}.")
+                except (OSError, ValueError) as e:
+                    gopls_failed(side, e)
+            text = committed(*sides[side], path)
+            cache[side, path] = definitions(text, language) if text is not None else []
+            used.update(["patterns", language])
+        return cache[side, path]
+
+    changed, known, callers, edges, skipped, languages, stopped = [], {}, {}, {}, [], set(), None
+    previous = signal.signal(signal.SIGALRM, stop_at_time_limit)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        for path, old, _, added, removed in diff_files(patch):
+            if not (language := language_of(path)):
+                skipped.append(path)
+                continue
+            languages.add(language)
+            # A declaration's changed lines are those the diff adds to it in the head and removes from it at the
+            # merge base. A name declared twice in a file, such as a Python property's getter and setter, is one
+            # node.
+            found = {}
+            for side, file, lines in (("head", path, added), ("base", old, removed)):
+                for symbol in symbols(side, file) if file else []:
+                    entry = found.setdefault(symbol["name"], {"lines": 0})
+                    entry.setdefault(side, (file, symbol))
+                    entry["lines"] += sum(symbol["start"] <= n <= symbol["end"] for n in lines)
+            for name, entry in found.items():
+                if entry["lines"]:
+                    side = "head" if "head" in entry else "base"
+                    file, symbol = entry[side]
+                    node = {"id": f"{file}:{name}", "name": name, "kind": symbol["kind"], "path": file,
+                            "line": symbol["line"], "lines_changed": entry["lines"], "side": side,
+                            "change": "changed" if "head" in entry and "base" in entry else "added" if side == "head"
+                            else "removed",
+                            "symbol": symbol, "language": language}
+                    changed.append(node)
+                    known[node["id"]] = node
+        # The callers of a changed declaration past the cap would never show.
+        for node in changed[:CONNECTIONS_MAX_NODES]:
+            side, sites = node["side"], None
+            if node["language"] == "go" and "position" in node["symbol"] and (gopls := session(side)):
+                try:
+                    sites, found_by = gopls.sites(node["path"], node["symbol"]), "gopls"
+                except GoplsError as e:
+                    problems.append(f"gopls could not answer for {node['name']}: {e}, so its callers come from name"
+                                    " search.")
+                except (OSError, ValueError) as e:
+                    gopls_failed(side, e)
+            if sites is None:
+                # A method by its own name, as Total for (*Cart).Total and total for Cart.total.
+                sites = name_search(*sides[side], re.split(r"[.)]", node["name"])[-1], node["language"])
+                found_by = "name_search"
+            used.add(found_by)
+            kind = "calls" if node["kind"] in ("func", "method") else "uses"
+            callers[node["id"]] = []
+            for path, line in sites:
+                caller = next((s for s in reversed(symbols(side, path)) if s["start"] <= line <= s["end"]), None)
+                caller_id = caller and f"{path}:{caller['name']}"
+                if caller is None or caller_id == node["id"]:
+                    continue
+                if caller_id not in known:
+                    if len(callers[node["id"]]) == CONNECTIONS_MAX_NODES:
+                        used.add("more")
+                        break
+                    # Code the diff leaves alone shows where it is in the head, though it is found calling removed
+                    # code at the merge base.
+                    if side == "base":
+                        caller = next((s for s in symbols("head", path) if s["name"] == caller["name"]), caller)
+                    known[caller_id] = {"id": caller_id, "name": caller["name"], "kind": caller["kind"], "path": path,
+                                        "line": caller["line"], "change": "unchanged", "lines_changed": 0}
+                if known[caller_id] not in callers[node["id"]]:
+                    callers[node["id"]].append(known[caller_id])
+                edges.setdefault((caller_id, node["id"], kind, found_by), None)
+    except TimeLimit:
+        stopped = (f"Whooper stopped looking at its {seconds:g}-second limit, so changed code and callers may be"
+                   " missing.")
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+        for gopls in sessions.values():
+            if gopls:
+                reported.extend(gopls.errors)
+                gopls.close()
+    shown = {}
+    for node in changed[:CONNECTIONS_MAX_NODES]:
+        shown[node["id"]] = node
+    # Then each changed declaration's first caller, then each one's second, and so on, so no one declaration's
+    # callers crowd out the others'.
+    for caller in (caller for turn in zip_longest(*callers.values()) for caller in turn if caller):
+        if len(shown) == CONNECTIONS_MAX_NODES:
+            break
+        shown.setdefault(caller["id"], caller)
+    found = len(known)
+    limits = ["Callers are one level up only: the code that calls those callers is not shown."]
+    if no_gopls and "go" in languages:
+        limits.append(f"{no_gopls}, so the Go links come from name search.")
+    limits += problems + [f"gopls reported: {error}" for error in dict.fromkeys(reported)]
+    if "gopls" in used:
+        limits.append("gopls leaves out dynamic calls, such as calls through an interface, a function value, or"
+                      " reflection.")
+    if "name_search" in used:
+        limits.append("Name search links every whole-word match of a name, so a link can join code that only shares"
+                      " the name, and it misses calls that do not spell the name out.")
+    if "patterns" in used:
+        limits.append("Where gopls did not read a file, Whooper finds its definitions by a pattern per language and"
+                      " counts each changed line toward the nearest definition above it, so a change between two"
+                      " definitions can count toward the wrong one.")
+    if "javascript" in used:
+        limits.append("In JavaScript and TypeScript, a change to a method of a class counts toward the class.")
+    if any(node["change"] == "removed" for node in changed):
+        limits.append("Removed code shows the callers it had at the merge base.")
+    if skipped:
+        more = f", and {len(skipped) - 5} more" if len(skipped) > 5 else ""
+        limits.append(f"Whooper finds no definitions in files of other languages, so it leaves out {len(skipped)}"
+                      f" changed {'file' if len(skipped) == 1 else 'files'}: {', '.join(skipped[:5])}{more}.")
+    if found > len(shown):
+        limits.append(f"Whooper shows {len(shown)} of the {found}{' or more' if 'more' in used else ''} declarations"
+                      " it found, the changed code first, and leaves out the rest and their links.")
+    limits += [stopped] if stopped else []
+    fields = ("id", "name", "kind", "path", "line", "change", "lines_changed")
+    write_file(run / "connections.json", json.dumps({
+        "nodes": [{key: node[key] for key in fields} for node in shown.values()],
+        "edges": [{"from": a, "to": b, "kind": kind, "found_by": by} for a, b, kind, by in edges
+                  if a in shown and b in shown],
+        "limits": limits,
+    }, indent=2))
+
+
 def show_review(data, run_id):
     """One review run for Prompting Time's review screen, as whooper-show --json prints it:
     run.json, the outcome, the findings, whether it is safe to approve, and the posted review as
@@ -784,7 +1237,9 @@ def show_review(data, run_id):
     diff, as whooper-review did. From the repo's clone, without fetching (clone_log): the commits
     between the head the review read and the PR's newest head Whooper knows (pr_head), and the files
     that changed together with the PR's in the CO_CHANGE_DAYS days before the review started, in the
-    history the PR's merge base ends (co_change). Refuses a run ID that names no run directory."""
+    history the PR's merge base ends (co_change). How the changed code connects is connections.json, which
+    whooper-review's connections step writes (connections), once the review ended. Refuses a run ID that
+    names no run directory."""
     run, parsed = data / "runs" / run_id, parse_run_id(run_id)
     # A run ID names a directory right under runs, so a path such as ../x reads nothing outside it.
     if parsed is None or not run.is_dir():
@@ -819,7 +1274,7 @@ def show_review(data, run_id):
         # A merge, such as of the base branch into the PR, lists as one commit, with the files it brought.
         since = clone_log(repo, "--first-parent", f"{head}..{newest}")
     # The PR's files, by their paths in the head and at the merge base, so a renamed file's history counts.
-    paths = {path for new, old, _ in diff_files(diff or "") for path in (new, old) if path}
+    paths = {path for new, old, *_ in diff_files(diff or "") for path in (new, old) if path}
     history = (clone_log(repo, f"--since={(started - timedelta(days=CO_CHANGE_DAYS)).isoformat()}", "--no-merges",
                          item["merge_base"]) if paths and item and item.get("merge_base") else None)
     return {
@@ -843,6 +1298,8 @@ def show_review(data, run_id):
         "overview": None if dropped else overview,
         "commits_since_review": since,
         "co_change": co_change([set(commit["files"]) for commit in history or []], paths),
+        # whooper-review's connections step writes the file before the review ends.
+        "connections": read_object(run / "connections.json") if outcome != "running" else None,
     }
 
 
@@ -2181,6 +2638,10 @@ def main(command, *args):
             write_file(run / "overview.invalid.json", json.dumps({"reason": dropped, "overview": overview}, indent=2))
             (run / "overview.json").unlink()
             print(f"whooper-review: dropped the run's overview: {dropped}", file=sys.stderr)
+    elif command == "connections":
+        # whooper-review runs this as soon as the run ends, in a process group of its own, and the review then goes
+        # on as it would without connections.json, whatever this finds and even if it fails.
+        connections(Path(args[0]))
     elif command == "retry":
         data, run_id, head_now = args
         print(retry(Path(data), run_id, head_now, datetime.now(timezone.utc)))
