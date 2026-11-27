@@ -17,6 +17,9 @@ export interface FakeHostOptions {
   confirmSubmit?: (text: string) => boolean | Promise<boolean>;
   /** The route the host opens once the page is ready, as when the user opened a row in Prompting Time. */
   openOnReady?: string;
+  /** Top-level fields of what show-review prints, by run ID, that replace the fixture's, as a test's
+   * variation of a review, such as one without connections. */
+  shown?: Record<string, Partial<Shown>>;
 }
 
 /** The actions prompting-time-plugin.json declares. */
@@ -126,6 +129,8 @@ export function createFakeHost(send: (message: HostMessage) => void, options: Fa
       connections: null,
       test_gaps: null,
       examples: null,
+      ...structuredClone(r.extras),
+      ...structuredClone(options.shown?.[runId]),
     };
   }
 

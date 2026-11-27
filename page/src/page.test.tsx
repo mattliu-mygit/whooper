@@ -285,7 +285,7 @@ describe("Whooper's page with the fake host", () => {
     // Done stays folded until the user opens it.
     expect(done.open).toBe(false);
     expect(within(done).getByRole("button", { name: /refactor\(cache\)/ })).toBeInTheDocument();
-    expect(screen.queryByRole("list", { name: "Ready to approve" })).not.toBeInTheDocument();
+    expect(within(screen.getByRole("list", { name: "Ready to approve" })).queryByRole("button", { name: /refactor\(cache\)/ })).not.toBeInTheDocument();
 
     fireEvent.click(within(screen.getByRole("list", { name: "Stops every review" })).getByRole("button", { name: /Docker isn't running/ }));
     expect(await screen.findByRole("list", { name: "Reviews it holds back" })).toBeInTheDocument();
