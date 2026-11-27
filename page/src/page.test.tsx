@@ -128,7 +128,11 @@ describe("Whooper's page with the fake host", () => {
     expect(within(bar).queryByRole("button", { name: "Send with the mentions" })).not.toBeInTheDocument();
 
     fireEvent.click(within(bar).getByRole("button", { name: "Submit review" }));
-    fireEvent.click(await within(bar).findByRole("button", { name: "Send with the mentions" }));
+    // whooper-submit's stderr is the reason, and the refusal is not repeated as an error.
+    expect(await within(bar).findByText(/the review @-mentions someone, and posting would notify them/)).toBeInTheDocument();
+    expect(within(bar).queryByRole("alert")).not.toBeInTheDocument();
+    expect(within(bar).queryByRole("button", { name: "Approve anyway" })).not.toBeInTheDocument();
+    fireEvent.click(within(bar).getByRole("button", { name: "Send with the mentions" }));
     expect(await within(bar).findByText(/posted the review/)).toBeInTheDocument();
     expect(host.refusals).toEqual([12]);
     expect(host.calls("submit")).toEqual([[RUN], [RUN, "--allow-mentions"]]);
@@ -149,7 +153,8 @@ describe("Whooper's page with the fake host", () => {
     await waitFor(() => expect(changes(host)).toContainEqual([newest, "message", "Thanks @jordan"]));
 
     fireEvent.click(within(bar).getByRole("button", { name: "Submit review" }));
-    fireEvent.click(await within(bar).findByRole("button", { name: "Approve anyway" }));
+    expect(await within(bar).findByText(/the run is not safe to approve/)).toBeInTheDocument();
+    fireEvent.click(within(bar).getByRole("button", { name: "Approve anyway" }));
     fireEvent.click(await within(bar).findByRole("button", { name: "Send with the mentions" }));
     expect(await within(bar).findByText(/posted the review/)).toBeInTheDocument();
     expect(host.refusals).toEqual([11, 12]);

@@ -1,6 +1,5 @@
 import * as fixtures from "./fixtures";
-import { MENTION } from "./text";
-import { PROTOCOL_VERSION, readPageMessage, type Drafts, type FindingsResult, type HostMessage, type HostUpdate, type PageMessage, type Shown } from "./protocol";
+import { CallError, PROTOCOL_VERSION, readPageMessage, type Drafts, type FindingsResult, type HostMessage, type HostUpdate, type PageMessage, type Shown } from "./protocol";
 
 // A stand-in for Prompting Time, for development (dev/index.html) and the page's tests. It runs the
 // page's calls of the manifest's actions on the invented reviews in fixtures.ts the way Whooper's
@@ -28,6 +27,9 @@ const DECLARED = new Set([
 /** Whooper's comment marker and the message of an approval left without one (lib/whooper.py). */
 const VETTED = "AI comment (vetted)";
 const PRE_APPROVAL = "Pre-approving to unblock";
+/** Stands in for whooper-submit's @-mention rule (MENTION in lib/whooper.py), close enough for the
+ * fixtures; the page itself never looks for mentions. */
+const MENTION = /(?<![\w.@/])@[A-Za-z0-9]/;
 const LABELS: Record<string, string> = {
   caller_visible_bug: "**issue:**",
   ci_failure: "**issue:**",
@@ -150,7 +152,7 @@ export function createFakeHost(send: (message: HostMessage) => void, options: Fa
   /** whooper-submit --print's request, and the text Prompting Time's confirmation would show for it,
    * or its refusal of an approval of a run that is not safe to approve (exit 11) or of an @-mention
    * (exit 12) without the flag that allows it, which it checks in that order. */
-  function submitRequest(runId: string, flags: string[]): { text: string } | { refused: 11 | 12 } {
+  function submitRequest(runId: string, flags: string[]): { text: string } | { refused: 11 | 12; stderr: string } {
     if (submitted.has(runId)) throw new Error(`whooper-submit: ${runId} was already submitted; see its submit.json`);
     const { repo, pr } = record(runId, "whooper-submit");
     const findings = findingsOf(runId, "whooper-submit");
@@ -168,9 +170,17 @@ export function createFakeHost(send: (message: HostMessage) => void, options: Fa
       );
     const message =
       choices.event === "APPROVE" && !choices.message.trim() ? (comments.length > 0 ? PRE_APPROVAL : "") : choices.message;
-    if (choices.event === "APPROVE" && concerns(findings).length > 0 && !flags.includes("--approve-anyway")) return { refused: 11 };
+    const unsafe = concerns(findings);
+    if (choices.event === "APPROVE" && unsafe.length > 0 && !flags.includes("--approve-anyway"))
+      return {
+        refused: 11,
+        stderr: `whooper-submit: nothing posted: the review approves, and the run is not safe to approve:\n${unsafe.map((c) => `  ${c}\n`).join("")}Pass --approve-anyway to approve it anyway, or make the review only comment with bin/whooper-draft.\n`,
+      };
     if ([message, ...comments.map((c) => c.body)].some((text) => MENTION.test(text)) && !flags.includes("--allow-mentions"))
-      return { refused: 12 };
+      return {
+        refused: 12,
+        stderr: "whooper-submit: nothing posted: the review @-mentions someone, and posting would notify them.\nPass --allow-mentions to post it anyway.\n",
+      };
     const request = { commit_id: "0123456789abcdef0123456789abcdef01234567", event: choices.event, body: message, comments };
     return { text: [`Submit this review to ${repo}#${pr}?`, JSON.stringify(request, null, 2)].join("\n") };
   }
@@ -212,11 +222,13 @@ export function createFakeHost(send: (message: HostMessage) => void, options: Fa
         if (args.some((arg) => arg.startsWith("--print") || arg.startsWith("--expect")))
           throw new Error("submit asks to confirm first, so Prompting Time adds --print and --expect itself.");
         const preview = submitRequest(runId, rest);
-        // Prompting Time shows a refusal in its confirmation, which the user can only close, and tells
-        // the page what it tells it for a cancel.
-        if ("refused" in preview) refusals.push(preview.refused);
-        if ("refused" in preview || !(await options.confirmSubmit?.(preview.text)))
-          throw new Error("Nothing ran: the confirmation was cancelled.");
+        // Prompting Time shows a refusal in its confirmation, which the user can only close, and then
+        // tells the page the preview's exit code and stderr.
+        if ("refused" in preview) {
+          refusals.push(preview.refused);
+          throw new CallError(preview.stderr.trim(), { stage: "preview", exit_code: preview.refused, stderr: preview.stderr });
+        }
+        if (!(await options.confirmSubmit?.(preview.text))) throw new CallError("Nothing ran: the confirmation was cancelled.", { stage: "cancelled" });
         const { repo, pr } = record(runId);
         const printed = `posted the review: https://github.com/${repo}/pull/${pr}#pullrequestreview-1`;
         submitted.set(runId, printed);
@@ -263,7 +275,8 @@ export function createFakeHost(send: (message: HostMessage) => void, options: Fa
       }
       run(message.action, message.args).then(
         (json) => post({ type: "result", reply_to: message.id, json }),
-        (error: Error) => post({ type: "error", reply_to: message.id, message: error.message }),
+        (error: Error) =>
+          post({ type: "error", reply_to: message.id, message: error.message, ...(error instanceof CallError ? error.failure : {}) }),
       );
     },
     /** Opens a route, as when the user opens a row or Command-J in Prompting Time. */

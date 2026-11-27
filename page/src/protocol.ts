@@ -15,8 +15,14 @@
 //                              <fingerprint>, so the page never passes either flag.
 // Host -> page:
 //   result {reply_to, json}    What the action printed: JSON when it printed JSON, else the text.
-//   error {reply_to?, message} The action failed or was refused, with its message, such as
-//                              whooper-draft's refusal, or the user cancelled the confirmation.
+//   error {reply_to?, message, stage?, exit_code?, stderr?}
+//                              The action failed or was refused, with its message to show, such as
+//                              whooper-draft's refusal, or the user cancelled the confirmation. stage
+//                              says how far the call got: cancelled (the user cancelled the
+//                              confirmation), preview (submit's --print refused, which the
+//                              confirmation showed), or run; absent when Prompting Time refused the
+//                              call itself. When Whooper's command refused, exit_code (null on a
+//                              signal) and stderr say how, such as whooper-submit's exit 11 or 12.
 //   open {route}               The user opened an item or blocker of whooper-status's status format 2,
 //                              from a row or Command-J: /reviews/<run-id> or /causes/<cause-id>, or
 //                              Whooper's name, which opens the home route /.
@@ -346,9 +352,22 @@ export type PageMessage =
   | { version: typeof PROTOCOL_VERSION; type: "ready" }
   | { version: typeof PROTOCOL_VERSION; type: "call"; id: number; action: string; args: string[] };
 
+/** How far a failed call got, and when Whooper's command refused, its exit code and stderr. */
+export type ActionFailure = { stage?: "cancelled" | "preview" | "run"; exit_code?: number | null; stderr?: string };
+
+/** A failed call as the page's promises reject with it: the host's message, and what else it said. */
+export class CallError extends Error {
+  constructor(
+    message: string,
+    readonly failure: ActionFailure = {},
+  ) {
+    super(message);
+  }
+}
+
 export type HostUpdate =
   | { type: "result"; reply_to: number; json: unknown }
-  | { type: "error"; reply_to?: number; message: string }
+  | ({ type: "error"; reply_to?: number; message: string } & ActionFailure)
   | { type: "open"; route: string }
   | { type: "changed"; files: string[] | null };
 
@@ -371,9 +390,12 @@ export function readHostMessage(data: unknown): HostMessage | null {
     case "result":
       return hasKeys(data, ["version", "type", "reply_to", "json"]) && Number.isSafeInteger(data.reply_to) ? (data as HostMessage) : null;
     case "error":
-      return hasKeys(data, ["version", "type", "message"], ["reply_to"]) &&
+      return hasKeys(data, ["version", "type", "message"], ["reply_to", "stage", "exit_code", "stderr"]) &&
         typeof data.message === "string" &&
-        (data.reply_to === undefined || Number.isSafeInteger(data.reply_to))
+        (data.reply_to === undefined || Number.isSafeInteger(data.reply_to)) &&
+        (data.stage === undefined || data.stage === "cancelled" || data.stage === "preview" || data.stage === "run") &&
+        (data.exit_code === undefined || data.exit_code === null || Number.isSafeInteger(data.exit_code)) &&
+        (data.stderr === undefined || typeof data.stderr === "string")
         ? (data as HostMessage)
         : null;
     case "open":

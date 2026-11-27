@@ -2,9 +2,9 @@ import { createMemo, createSignal, For, Show, untrack } from "solid-js";
 import { Button, Diff, type DiffLineAnnotation } from "@prompting-time/ui";
 import { DraftThread } from "./DraftThread";
 import { readPatch, showsLine, type PatchFile } from "./patch";
-import type { Finding, Review } from "./protocol";
+import { CallError, type Finding, type Review } from "./protocol";
 import type { PageStore } from "./store";
-import { MENTION, verdictText } from "./text";
+import { verdictText } from "./text";
 
 /**
  * A review run as the agreed mock draws it: the PR's diff, one file at a time, with Whooper's
@@ -161,6 +161,13 @@ function FileCard(props: { store: PageStore; file: PatchFile; findings: Finding[
   );
 }
 
+/** What lets a submit through that whooper-submit refused with exit 11 (the review approves a run
+ * that is not safe to approve) or exit 12 (the review @-mentions someone). */
+const OVERRIDES: Record<number, { flag: string; label: string }> = {
+  11: { flag: "--approve-anyway", label: "Approve anyway" },
+  12: { flag: "--allow-mentions", label: "Send with the mentions" },
+};
+
 function SubmitBar(props: { store: PageStore }) {
   const store = props.store;
   const drafts = () => store.state.review!.drafts;
@@ -174,25 +181,11 @@ function SubmitBar(props: { store: PageStore }) {
   const locked = () => store.locked();
   const nothing = () => comments() === 0 && event() === "COMMENT";
   // The flags the user added by pressing Approve anyway or Send with the mentions, which the next of
-  // those buttons keeps, and whether the last submit came back refused or cancelled.
+  // those buttons keeps, and the button that lets the last submit's refusal through, with
+  // whooper-submit's stderr as the reason.
   const [flags, setFlags] = createSignal<string[]>([]);
-  const [refused, setRefused] = createSignal(false);
-  const mentions = () =>
-    MENTION.test(drafts().message) ||
-    store.state.review!.findings.findings.some((f) => drafts().findings[f.id]?.included && MENTION.test(drafts().findings[f.id].text ?? f.draft));
-  // What lets the refused submit through. Prompting Time shows whooper-submit's refusal in its
-  // confirmation and tells the page only that nothing ran, so the page finds the reason in the drafts
-  // by whooper-submit's rules, in its order: an approval of a run that is not safe to approve (exit
-  // 11), then an @-mention (exit 12). whooper-post, which Whooper runs on its own, still holds back
-  // each comment that @-mentions someone.
-  const override = () => {
-    if (!refused() || locked()) return null;
-    if (event() === "APPROVE" && !store.state.shown?.safe_to_approve && !flags().includes("--approve-anyway"))
-      return { flag: "--approve-anyway", label: "Approve anyway", why: "Whooper says the run is not safe to approve." };
-    if (mentions() && !flags().includes("--allow-mentions"))
-      return { flag: "--allow-mentions", label: "Send with the mentions", why: "The review @-mentions someone, and sending it notifies them." };
-    return null;
-  };
+  const [refusal, setRefusal] = createSignal<{ flag: string; label: string; why: string } | null>(null);
+  const override = () => (locked() ? null : refusal());
 
   /** Runs work, shows its error, if any, under the bar, and resolves with whether it succeeded. */
   async function run(work: () => Promise<unknown>): Promise<boolean> {
@@ -215,13 +208,24 @@ function SubmitBar(props: { store: PageStore }) {
     setPendingEvent(null);
   }
 
-  // Prompting Time confirms first; a cancelled or refused confirmation comes back as the host's error.
-  // Submit review sends no flags; each override button adds its flag to those the user added before.
+  // Prompting Time confirms first; a cancelled or refused confirmation comes back as the host's error,
+  // with whooper-submit's exit code when it refused. Submit review sends no flags; each override
+  // button adds its flag to those the user added before.
   async function submit(flag?: string) {
     const next = flag ? [...flags(), flag] : [];
     setFlags(next);
-    setRefused(false);
-    setRefused(!(await run(() => store.submit(next))));
+    setRefusal(null);
+    await run(async () => {
+      try {
+        await store.submit(next);
+      } catch (e) {
+        const code = e instanceof CallError ? e.failure.exit_code : undefined;
+        const allow = code == null ? undefined : OVERRIDES[code];
+        // A refusal the next button lets through shows as that button's reason, not as an error.
+        if (!(e instanceof CallError) || !allow) throw e;
+        setRefusal({ ...allow, why: e.failure.stderr?.trim() || e.message });
+      }
+    });
   }
 
   // What posts when the message stays empty (whooper-submit): an approval with comments says
@@ -262,7 +266,7 @@ function SubmitBar(props: { store: PageStore }) {
       <Show when={override()}>
         {(next) => (
           <>
-            <span class="w-hint">{next().why}</span>
+            <p class="w-hint w-submit-line w-refusal">{next().why}</p>
             <Button disabled={busy()} onClick={() => submit(next().flag)}>
               {next().label}
             </Button>

@@ -1,5 +1,6 @@
 import { createStore } from "solid-js";
 import {
+  CallError,
   PROTOCOL_VERSION,
   readHostMessage,
   type Drafts,
@@ -233,7 +234,7 @@ export function createPageStore(link: HostLink) {
         const request = host.reply_to === undefined ? undefined : waiting.get(host.reply_to);
         if (!request) return;
         waiting.delete(host.reply_to!);
-        if (host.type === "error") request.reject(new Error(host.message));
+        if (host.type === "error") request.reject(new CallError(host.message, { stage: host.stage, exit_code: host.exit_code, stderr: host.stderr }));
         else request.resolve(host.json);
         break;
       }

@@ -58,11 +58,3 @@ export function shortDate(iso: string, now = new Date()): string {
 export function waitingText(count: number): string {
   return count === 0 ? "no reviews waiting" : `${count} ${count === 1 ? "review" : "reviews"} waiting`;
 }
-
-/**
- * An @-mention, by whooper-submit's rule (MENTION in lib/whooper.py), which refuses to post one
- * without --allow-mentions. JavaScript's \w knows only ASCII letters and Python's knows every letter,
- * so this finds each mention whooper-submit finds, and also one right after a letter such as é, which
- * whooper-submit lets through.
- */
-export const MENTION = /(?<![\w.@/])@[A-Za-z0-9][A-Za-z0-9-]*(?:\/[A-Za-z0-9_-]+)?/;
