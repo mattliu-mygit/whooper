@@ -482,7 +482,7 @@ commands would, and reaches no Whooper, GitHub, or model; `/dev/` opens the firs
 The page installs `@prompting-time/ui` from its built tarball, `prompting-time-ui-0.1.0.tgz`, which
 Prompting Time's `scripts/pack-ui.sh` writes. Until Prompting Time attaches that tarball to a GitHub
 release, the page installs it from a Prompting Time checkout beside this one,
-`../../repos/prompting-time-uipkg/packages/ui/prompting-time-ui-0.1.0.tgz` from `page/`; it then
+`../../repos/prompting-time-layout/packages/ui/prompting-time-ui-0.1.0.tgz` from `page/`; it then
 switches to the release's URL. Either way `package-lock.json` pins the tarball's sha512, so `npm ci`
 refuses a different build. The tarball bundles everything but Solid, which the page supplies; the
 page also installs `@pierre/diffs`, at the tarball's version, only for the types of `Diff`'s props.
