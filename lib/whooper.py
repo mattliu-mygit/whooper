@@ -805,6 +805,13 @@ def co_change(commits, paths):
 # How the changed code connects, connections.json: whooper-review's step stops looking after
 # CONNECTIONS_SECONDS, and the graph keeps at most CONNECTIONS_MAX_NODES nodes, the changed code first.
 CONNECTIONS_SECONDS, CONNECTIONS_MAX_NODES = 120, 40
+# The script the step runs with node to ask TypeScript about JavaScript and TypeScript files (TypeScript). Its runs
+# end once TYPESCRIPT_SHARE of the step's limit has passed, so name search keeps the rest of it for the files
+# TypeScript did not answer. Loading a project takes most of a run: a frontend of 17,500 files, counting the type
+# declarations it installs, loaded in 15 seconds here, and each changed declaration's callers then took under a
+# second. A project too big for the share gets name search, and limits says so.
+TS_CALLERS = ROOT / "lib" / "ts-callers.mjs"
+TYPESCRIPT_SHARE = 0.75
 # The kind of node each declaration gopls lists is, by the Language Server Protocol's number for its kind:
 # a function, a method, a struct, an interface, any other type, a variable, and a constant.
 GOPLS_KINDS = {12: "func", 6: "method", 23: "type", 11: "type", 5: "type", 13: "var", 14: "const"}
@@ -813,8 +820,8 @@ GOPLS_KINDS = {12: "func", 6: "method", 23: "type", 11: "type", 5: "type", 13: "
 # that belong to it start, and the patterns of a definition's line, each with the kind of node it names. A
 # pattern's name group is the name, and the recv group of a Go method its receiver, which names it the way
 # gopls does, such as (*Cart).Total. Go's var (, const (, and type ( blocks name a declaration on each line
-# indented one tab. A pattern does not find a method of a JavaScript or TypeScript class, so a change in one
-# counts toward its class.
+# indented one tab. A pattern does not find a method of a JavaScript or TypeScript class, so where TypeScript
+# does not read a file, a change in one counts toward its class.
 LANGUAGES = {
     "go": {"extensions": (".go",), "comment": "//", "above": ("//",), "definitions": [
         (re.compile(r"func\s+\((?:\w+\s+)?(?P<recv>\*?\w+(?:\[[^\]]*\])?)\)\s*(?P<name>\w+)"), "method"),
@@ -840,6 +847,10 @@ LANGUAGES = {
         (re.compile(r"(?:export\s+)?(?:let|var)\s+(?P<name>[\w$]+)"), "var"),
     ]},
 }
+
+
+# The files TypeScript reads in a checkout: code, and the JSON of tsconfig.json, jsconfig.json, and package.json.
+TYPESCRIPT_FILES = (*LANGUAGES["javascript"]["extensions"], ".json")
 
 
 def language_of(path):
@@ -911,9 +922,9 @@ def name_search(tree, commit, name, language):
     return sites
 
 
-def edited_go_files(tree):
-    """The .go files git status lists in the worktree tree, by path: those a review run changed, added, or deleted
-    there, such as a probe's test."""
+def edited_files(tree, extensions):
+    """The files with one of extensions, such as .go, that git status lists in the worktree tree, by path: those a
+    review run changed, added, or deleted there, such as a probe's test."""
     status = subprocess.run(["git", "-C", str(tree), "--no-optional-locks", "status", "--porcelain", "-z",
                              "--untracked-files=all"], capture_output=True, text=True, check=True).stdout
     entries, paths = iter(status.split("\0")), []
@@ -921,7 +932,7 @@ def edited_go_files(tree):
         # A rename or copy names the path it came from next.
         if entry[:1] in ("R", "C"):
             next(entries, None)
-        if entry.endswith(".go"):
+        if entry.endswith(extensions):
             paths.append(entry[3:])
     return paths
 
@@ -966,7 +977,7 @@ class Gopls:
             self.call("initialize", {"processId": os.getpid(), "rootUri": uri, "workspaceFolders": [{"uri": uri, "name": tree.name}],
                                      "capabilities": {"textDocument": {"documentSymbol": {"hierarchicalDocumentSymbolSupport": True}}}})
             self.send({"method": "initialized", "params": {}})
-            for path in edited_go_files(tree):
+            for path in edited_files(tree, (".go",)):
                 text = committed(tree, commit, path)
                 if text is None:
                     try:
@@ -1067,6 +1078,141 @@ class Gopls:
             self.process.stdin.close()
 
 
+class TypeScript:
+    """TypeScript's own tools for the JavaScript and TypeScript files of a review run, through lib/ts-callers.mjs, which
+    node runs with a checkout as the folder it starts in, the head's or the merge base's (sides), once for each
+    typescript package a request needs. A file's typescript package is the one its package installed: node_modules/
+    typescript in the folder of the nearest package.json above the file or in a folder above that, in the file's
+    checkout, or else in the head's, since the repo's setup script installs nothing at the merge base. TypeScript lists
+    a file's declarations (declarations, by side and path), and finds the callers of a changed declaration in the
+    project of the nearest tsconfig.json or jsconfig.json above its file (sites, by node ID, each as (path, line)). Like
+    gopls, it reads each file the review run changed or added in a checkout as it is in the commit. Each run ends by
+    stop, by monotonic, which ends TypeScript's share of the step's limit of seconds. fallback holds, for each reason in
+    words, the changed files whose declarations or callers TypeScript did not give, so that name search finds their
+    links."""
+
+    def __init__(self, sides, checkouts, seconds, stop):
+        self.sides, self.checkouts, self.seconds, self.stop = sides, checkouts, seconds, stop
+        self.declarations, self.sites, self.fallback = {side: {} for side in sides}, {}, {}
+        # By side, the committed text of each file the run changed there, or None for one it added; by typescript
+        # package, why its run failed, so the other checkout's files, which use the same package, skip it.
+        self.hidden, self.broken, self.node = {}, {}, shutil.which("node")
+
+    def fall_back(self, why, paths):
+        """Notes that name search finds the links of paths, changed files, since why, in which {them} and {their} stand
+        for the files."""
+        self.fallback.setdefault(why, {}).update(dict.fromkeys(paths))
+
+    def module(self, side, path):
+        """The typescript package TypeScript loads for path, a file on side, and None, or None and why there is none."""
+        if not self.node:
+            return None, "the node command, which TypeScript needs, is not on PATH"
+        tree, folder = self.sides[side][0], posixpath.dirname(path)
+        while not (tree / folder / "package.json").is_file():
+            if not folder:
+                return None, "no package.json is above {them}"
+            folder = posixpath.dirname(folder)
+        for checkout in dict.fromkeys([tree, self.sides["head"][0]]):
+            for above in (checkout / folder, *(checkout / folder).parents):
+                if above.is_relative_to(checkout) and (above / "node_modules" / "typescript" / "package.json").is_file():
+                    return above / "node_modules" / "typescript", None
+        return None, ("Whooper found no node_modules/typescript in {their} package or a folder above it, which the repo's"
+                      " setup script would install")
+
+    def config(self, side, path):
+        """The path of the tsconfig.json or jsconfig.json nearest above path, a file on side, or None."""
+        tree, folder = self.sides[side][0], posixpath.dirname(path)
+        while True:
+            for name in ("tsconfig.json", "jsconfig.json"):
+                if (tree / folder / name).is_file():
+                    return posixpath.join(folder, name)
+            if not folder:
+                return None
+            folder = posixpath.dirname(folder)
+
+    def run(self, side, module, files=(), projects=None):
+        """What lib/ts-callers.mjs answers in the checkout of side with module, a typescript package, for files, whose
+        declarations it lists, and projects, the declarations whose callers it finds by the path of their project's
+        config: each answer as the dict it printed, and why the run ended before it answered all, in words, or None."""
+        if module in self.broken:
+            return [], self.broken[module]
+        if (left := self.stop - monotonic()) <= 0:
+            return [], self.out_of_time()
+        tree, commit = self.sides[side]
+        if side not in self.hidden:
+            self.hidden[side] = {path: committed(tree, commit, path) for path in edited_files(tree, TYPESCRIPT_FILES)}
+        with tempfile.TemporaryDirectory() as scratch:
+            request = Path(scratch) / "request.json"
+            request.write_text(json.dumps({"typescript": str(module), "root": str(tree), "hidden": self.hidden[side],
+                                           "files": list(files), "projects": projects or {}}))
+            code, out, err = run_command(["node", str(TS_CALLERS), str(request)], tree, left, os.environ)
+        answers = json_lines(out)
+        if code is None:
+            return answers, self.out_of_time()
+        if code == 0:
+            return answers, None
+        print(err, end="", file=sys.stderr)
+        why = next((answer["error"] for answer in answers if list(answer) == ["error"]), None)
+        why = why or (f"node was stopped by signal {-code}" if code < 0 else f"node exited with code {code}")
+        self.broken[module] = f"TypeScript failed in {self.checkouts[side]} ({why})"
+        return answers, self.broken[module]
+
+    def out_of_time(self):
+        return (f"TypeScript's {limit_text(self.seconds * TYPESCRIPT_SHARE)} share of the step's"
+                f" {limit_text(self.seconds)} limit ran out")
+
+    def list(self, side, paths):
+        """Lists the declarations of paths, changed files on side, in a run for each typescript package. A file
+        TypeScript does not list keeps the declarations patterns find, and fallback says why."""
+        packages = {}
+        for path in dict.fromkeys(paths):
+            module, why = self.module(side, path)
+            if module:
+                packages.setdefault(module, []).append(path)
+            else:
+                self.fall_back(why, [path])
+        for module, files in packages.items():
+            answers, why = self.run(side, module, files=files)
+            for answer in answers:
+                if "declarations" in answer:
+                    self.declarations[side][answer["file"]] = answer["declarations"]
+            if why:
+                self.fall_back(why, [path for path in files if path not in self.declarations[side]])
+
+    def find(self, side, nodes):
+        """Finds the callers of nodes, changed declarations of files TypeScript listed on side, in a run for each
+        typescript package, and lists the declarations of each file they are in. A node TypeScript gives no callers for
+        gets them from name search, and fallback says why."""
+        packages = {}
+        for node in nodes:
+            if config := self.config(side, node["path"]):
+                packages.setdefault(self.module(side, node["path"])[0], {}).setdefault(config, []).append(node)
+            else:
+                self.fall_back("Whooper found no tsconfig.json or jsconfig.json above {them}", [node["path"]])
+        for module, projects in packages.items():
+            answers, why = self.run(side, module, projects={
+                config: [{"id": node["id"], "path": node["path"], "name": node["name"],
+                          "calls": node["kind"] in ("func", "method")} for node in group]
+                for config, group in projects.items()})
+            failed = {}
+            for answer in answers:
+                if "declarations" in answer:
+                    self.declarations[side][answer["file"]] = answer["declarations"]
+                elif "sites" in answer:
+                    # In the order git grep lists its matches, so the graph does not depend on TypeScript's order.
+                    self.sites[answer["id"]] = sorted(tuple(site) for site in answer["sites"])
+                elif "id" in answer:
+                    failed[answer["id"]] = f"TypeScript could not answer in {self.checkouts[side]} ({answer['error']})"
+                elif "project" in answer:
+                    for node in projects[answer["project"]]:
+                        failed[node["id"]] = (f"TypeScript could not load {answer['project']} in {self.checkouts[side]}"
+                                              f" ({answer['error']})")
+            for group in projects.values():
+                for node in group:
+                    if node["id"] not in self.sites:
+                        self.fall_back(failed.get(node["id"], why), [node["path"]])
+
+
 class TimeLimit(Exception):
     """A step of whooper-review reached its time limit, such as the connections step. It is no OSError, as
     TimeoutError is, so no handler of a failed command takes it for one."""
@@ -1081,9 +1227,11 @@ def connections(run, seconds=CONNECTIONS_SECONDS):
     diff.patch changes connects, for whooper-show. The nodes are the declarations the diff adds, changes, or
     removes, each found in the head, or a removed one at the merge base, and the code that calls or uses
     them, one level up, found on the same side. Go files ask gopls (Gopls), on PATH or where go install puts
-    it, and every other file, and a Go file without gopls or when gopls cannot answer, name search: the
-    definitions LANGUAGES' patterns find, and git grep's whole-word matches of a name. Each link says which
-    of the two found it, and limits says in plain words what the graph can miss. It keeps at most
+    it, and JavaScript and TypeScript files the TypeScript their package installed (TypeScript), within
+    TYPESCRIPT_SHARE of seconds. Every other file, and a file whose tool is missing or cannot answer, gets
+    name search: the definitions LANGUAGES' patterns find, and git grep's whole-word matches of a name. A
+    changed line counts toward the innermost declaration around it, such as a method rather than its class.
+    Each link says which found it, and limits says in plain words what the graph can miss. It keeps at most
     CONNECTIONS_MAX_NODES nodes: the changed code in the diff's order, then the callers of each changed
     declaration in turn. Looking stops after seconds, and the file then says so and holds what was found."""
     item = read_object(run / "run.json")
@@ -1112,8 +1260,10 @@ def connections(run, seconds=CONNECTIONS_SECONDS):
                         " name search.")
 
     def symbols(side, path):
-        """The declarations of path on side, from gopls for a Go file while it answers, and otherwise from
-        LANGUAGES' patterns."""
+        """The declarations of path on side: from TypeScript for a file it listed, from gopls for a Go file
+        while it answers, and otherwise from LANGUAGES' patterns."""
+        if (found := typescript.declarations[side].get(path)) is not None:
+            return found
         if (side, path) not in cache:
             language = language_of(path)
             if language == "go" and (gopls := session(side)):
@@ -1130,10 +1280,16 @@ def connections(run, seconds=CONNECTIONS_SECONDS):
         return cache[side, path]
 
     changed, known, callers, edges, skipped, languages, stopped = [], {}, {}, {}, [], set(), None
+    typescript = TypeScript(sides, checkouts, seconds, monotonic() + seconds * TYPESCRIPT_SHARE)
     previous = signal.signal(signal.SIGALRM, stop_at_time_limit)
     signal.setitimer(signal.ITIMER_REAL, seconds)
     try:
-        for path, old, _, added, removed in diff_files(patch):
+        files = diff_files(patch)
+        # TypeScript first lists the declarations of the changed JavaScript and TypeScript files at both commits, so
+        # the loop below counts their changed lines toward the declarations TypeScript sees.
+        typescript.list("head", [path for path, *_ in files if language_of(path) == "javascript"])
+        typescript.list("base", [old for path, old, *_ in files if old and language_of(path) == "javascript"])
+        for path, old, _, added, removed in files:
             if not (language := language_of(path)):
                 skipped.append(path)
                 continue
@@ -1143,10 +1299,12 @@ def connections(run, seconds=CONNECTIONS_SECONDS):
             # node.
             found = {}
             for side, file, lines in (("head", path, added), ("base", old, removed)):
-                for symbol in symbols(side, file) if file else []:
-                    entry = found.setdefault(symbol["name"], {"lines": 0})
-                    entry.setdefault(side, (file, symbol))
-                    entry["lines"] += sum(symbol["start"] <= n <= symbol["end"] for n in lines)
+                declared = symbols(side, file) if file else []
+                for symbol in declared:
+                    found.setdefault(symbol["name"], {"lines": 0}).setdefault(side, (file, symbol))
+                for n in lines:
+                    if symbol := next((s for s in reversed(declared) if s["start"] <= n <= s["end"]), None):
+                        found[symbol["name"]]["lines"] += 1
             for name, entry in found.items():
                 if entry["lines"]:
                     side = "head" if "head" in entry else "base"
@@ -1158,7 +1316,12 @@ def connections(run, seconds=CONNECTIONS_SECONDS):
                             "symbol": symbol, "language": language}
                     changed.append(node)
                     known[node["id"]] = node
-        # The callers of a changed declaration past the cap would never show.
+        # TypeScript finds the callers of the changed declarations it listed, the head's first, before the loop below
+        # asks gopls and name search about the rest. The callers of a changed declaration past the cap would never
+        # show.
+        for side in ("head", "base"):
+            typescript.find(side, [node for node in changed[:CONNECTIONS_MAX_NODES]
+                                   if node["side"] == side and node["path"] in typescript.declarations[side]])
         for node in changed[:CONNECTIONS_MAX_NODES]:
             side, sites = node["side"], None
             if node["language"] == "go" and "position" in node["symbol"] and (gopls := session(side)):
@@ -1169,6 +1332,8 @@ def connections(run, seconds=CONNECTIONS_SECONDS):
                                     " search.")
                 except (OSError, ValueError) as e:
                     gopls_failed(side, e)
+            elif node["id"] in typescript.sites:
+                sites, found_by = typescript.sites[node["id"]], "typescript"
             if sites is None:
                 # A method by its own name, as Total for (*Cart).Total and total for Cart.total.
                 sites = name_search(*sides[side], re.split(r"[.)]", node["name"])[-1], node["language"])
@@ -1218,18 +1383,28 @@ def connections(run, seconds=CONNECTIONS_SECONDS):
     if no_gopls and "go" in languages:
         limits.append(f"{no_gopls}, so the Go links come from name search.")
     limits += problems + [f"gopls reported: {error}" for error in dict.fromkeys(reported)]
+    for why, paths in typescript.fallback.items():
+        one = len(paths) == 1
+        limits.append(f"The links of {plural(len(paths), 'changed file', 'changed files')} come from name search, since"
+                      f" {why.replace('{them}', 'it' if one else 'them').replace('{their}', 'its' if one else 'their')}:"
+                      f" {listed(list(paths))}.")
     if "gopls" in used:
         limits.append("gopls leaves out dynamic calls, such as calls through an interface, a function value, or"
                       " reflection.")
+    if "typescript" in used:
+        limits.append("TypeScript leaves out dynamic calls, such as calls through a function value, a value typed any,"
+                      " or a module import() loads at run time, and links a function only to code that calls it, not to"
+                      " code that only names it, such as a list of handlers.")
     if "name_search" in used:
         limits.append("Name search links every whole-word match of a name, so a link can join code that only shares"
                       " the name, and it misses calls that do not spell the name out.")
     if "patterns" in used:
-        limits.append("Where gopls did not read a file, Whooper finds its definitions by a pattern per language and"
-                      " counts each changed line toward the nearest definition above it, so a change between two"
-                      " definitions can count toward the wrong one.")
+        limits.append("Where neither gopls nor TypeScript read a file, Whooper finds its definitions by a pattern per"
+                      " language and counts each changed line toward the nearest definition above it, so a change"
+                      " between two definitions can count toward the wrong one.")
     if "javascript" in used:
-        limits.append("In JavaScript and TypeScript, a change to a method of a class counts toward the class.")
+        limits.append("In the JavaScript and TypeScript files TypeScript did not read, a change to a method of a class"
+                      " counts toward the class.")
     if any(node["change"] == "removed" for node in changed):
         limits.append("Removed code shows the callers it had at the merge base.")
     if skipped:
@@ -1298,8 +1473,8 @@ def run_go(folder, seconds, *args):
     return run_command(["go", *args], folder, seconds, {**os.environ, **GO_OFFLINE})
 
 
-def go_events(output):
-    """The events go test -json printed, one JSON object a line."""
+def json_lines(output):
+    """The JSON objects output holds, one a line, such as the events go test -json prints."""
     events = []
     for line in output.splitlines():
         with suppress(ValueError):
@@ -1491,7 +1666,7 @@ def go_coverage(head, changed, run, seconds):
                 code, out, err = go(root, "test", "-json", "-count=1", f"-coverpkg={','.join(tested)}",
                                     f"-coverprofile={profile}", *tested)
                 profile = profile.read_text(errors="replace") if profile.exists() else ""
-            events = go_events(out)
+            events = json_lines(out)
             if not events and code != 0:
                 return missed(f"go test did not run: {build_error([], err)}")
             if any(e.get("Action") == "build-fail" or e.get("FailedBuild") for e in events):
@@ -1725,7 +1900,7 @@ def examples(run, seconds=EXAMPLES_SECONDS):
     The run wrote them as examples.json, which whooper-review moved to examples.request.json as soon as the run
     ended, and EXAMPLE_TEST, a test that prints one JSON line per input. The test runs in the package's folder once in
     the head's worktree and twice in the merge base's, with go's -overlay leaving out the Go files the run edited or
-    added there (edited_go_files), so it runs the reviewed commits. A row is same or different when both runs at the
+    added there (edited_files), so it runs the reviewed commits. A row is same or different when both runs at the
     merge base printed one result for its input, flaky when they printed two, and error when a run printed none for
     it, as when the test does not compile; a function the merge base lacks runs at the head only. Rows hold only what
     the test printed. Each function's line is where the head defines it. Running stops after seconds. A run that
@@ -1799,7 +1974,7 @@ def examples(run, seconds=EXAMPLES_SECONDS):
             # go names a file the overlay replaces by the file that holds its text, so errors name the repository's
             # file instead.
             replace, names = {}, {str(test): posixpath.join(package, EXAMPLE_TEST)}
-            for path in edited_go_files(tree):
+            for path in edited_files(tree, (".go",)):
                 text = committed(tree, commit, path)
                 if text is not None:
                     backing = scratch / f"{side}-{len(replace)}.go"
@@ -1812,7 +1987,7 @@ def examples(run, seconds=EXAMPLES_SECONDS):
             code, out, err = run_go(tree / package, deadline - monotonic(), "test", "-json", "-count=1", "-run",
                                     "^TestWhooperExamples$", f"-timeout={EXAMPLE_TIMEOUT}", "-vet=off",
                                     f"-overlay={overlay}", ".")
-            events = go_events(out)
+            events = json_lines(out)
             printed = "".join(e.get("Output", "") for e in events if e.get("Action") == "output"
                               and e.get("Test") == "TestWhooperExamples" and e.get("OutputType") != "frame")
             results = {}
@@ -1921,7 +2096,7 @@ def mutation(run, seconds=MUTATION_SECONDS):
     passing all the same, survived, or one failing, caught, each with the change. gremlins runs once in the folder of each
     changed Go file (changed_code), but for one inside another such folder, which the other's run covers, with --diff at
     the merge base and MUTATION_GIT, so it changes only lines the diff adds, and only those its own coverage run finds a
-    test runs; before that, the Go files the run changed or added in the head's worktree (edited_go_files) get their
+    test runs; before that, the Go files the run changed or added in the head's worktree (edited_files) get their
     committed text back, or go, so gremlins reads the reviewed commit. A line the diff does not add, or that
     test_gaps.json lists as not run, counts for none, and a change that ran out of time or did not compile neither. A
     line shows one change, a surviving one first, and a file at most MUTATION_LINES_PER_FILE lines, survived first. The
@@ -1942,7 +2117,7 @@ def mutation(run, seconds=MUTATION_SECONDS):
                                                        for other in folders)]
     tools, problems, results = [], [], []
     if program:
-        for edited in edited_go_files(head):
+        for edited in edited_files(head, (".go",)):
             shown = subprocess.run(["git", "-C", str(head), "--no-lazy-fetch", "cat-file", "blob", f"{commit}:{edited}"],
                                    capture_output=True)
             if shown.returncode == 0:
@@ -3454,17 +3629,15 @@ def main(command, *args):
             write_file(run / "overview.invalid.json", json.dumps({"reason": dropped, "overview": overview}, indent=2))
             (run / "overview.json").unlink()
             print(f"whooper-review: dropped the run's overview: {dropped}", file=sys.stderr)
-    elif command == "connections":
-        # whooper-review runs this as soon as the run ends, in a process group of its own, and the review then goes
-        # on as it would without connections.json, whatever this finds and even if it fails.
-        connections(Path(args[0]))
-    elif command in ("test-gaps", "examples", "mutation"):
-        # whooper-review runs each in a process group of its own, as it runs connections, and the review then goes on
-        # as it would without the step's file, whatever this finds and even if it fails. Its cleanup stops a step with
-        # SIGTERM, which raises SystemExit here, so the step kills the go it started on its way out (run_go).
+    elif command in ("connections", "test-gaps", "examples", "mutation"):
+        # whooper-review runs each in a process group of its own, connections as soon as the review run ends, and the
+        # review then goes on as it would without the step's file, whatever this finds and even if it fails. Its
+        # cleanup stops a step with SIGTERM, which raises SystemExit here, so the step kills the command it started on
+        # its way out (run_command), such as go or TypeScript, each in a process group of its own.
         for stop in (signal.SIGTERM, signal.SIGHUP):
             signal.signal(stop, lambda signum, frame: sys.exit(128 + signum))
-        {"test-gaps": test_gaps, "examples": examples, "mutation": mutation}[command](Path(args[0]))
+        {"connections": connections, "test-gaps": test_gaps, "examples": examples,
+         "mutation": mutation}[command](Path(args[0]))
     elif command == "retry":
         data, run_id, head_now = args
         print(retry(Path(data), run_id, head_now, datetime.now(timezone.utc)))

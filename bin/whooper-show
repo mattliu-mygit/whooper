@@ -58,8 +58,9 @@
 #              them, one level up, each as {id, name, kind (func, method, type, var, or const), path, line,
 #              change (added, changed, removed, or unchanged), lines_changed}, where a removed one's path
 #              and line are at the merge base and any other's in the head; edges, each as {from, to, kind
-#              (calls or uses), found_by (gopls or name_search)}, from caller to called by node ID; and
-#              limits, what the graph can miss, in plain words, such as that it stops at 40 nodes
+#              (calls or uses), found_by (gopls, typescript, or name_search)}, from caller to called by
+#              node ID; and limits, what the graph can miss, in plain words, such as that it stops at 40
+#              nodes
 #   test_gaps  test_gaps.json, which of the lines the diff adds to Go, JavaScript, and TypeScript code no
 #              test ran, which whooper-review measures before the review run starts; null while the review
 #              runs, when the PR changes no such code, and when the file is missing or cannot be read:

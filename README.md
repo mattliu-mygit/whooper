@@ -22,7 +22,9 @@ github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0`): with it, a review checks 
 small change to the changed Go lines they run. So is
 the `go` command, with which a review measures which changed Go lines no test ran and runs the example
 inputs its run chose, at the head and at the merge base, and `node`, with which it measures the changed
-JavaScript and TypeScript lines of a package whose tests run with Vitest or Jest.
+JavaScript and TypeScript lines of a package whose tests run with Vitest or Jest, and links changed
+JavaScript and TypeScript code to its callers with the TypeScript the package installed rather than by
+name search.
 
 1. Copy `examples/config.example.toml` to `~/.config/whooper/config.toml` and fill it in. Everything
    that identifies you, your company, or your repos lives there: your GitHub login and name, the
@@ -196,8 +198,8 @@ out: each with the PR's file as `partner`, that share as `ratio`, and how many a
 `nodes`, each with its `id`, `name`, `kind` (`func`, `method`, `type`, `var`, or `const`), `path` and
 `line`, in the head, or for removed code at the merge base, `change` (`added`, `changed`, `removed`, or
 `unchanged`, for a caller the diff leaves alone), and `lines_changed`; `edges` from the code that calls
-or uses a node to it, by node ID, each with `kind` (`calls` or `uses`) and `found_by` (`gopls` or
-`name_search`); and `limits`. For example, a PR that changes `Total` in `prices/prices.go`, which
+or uses a node to it, by node ID, each with `kind` (`calls` or `uses`) and `found_by` (`gopls`,
+`typescript`, or `name_search`); and `limits`. For example, a PR that changes `Total` in `prices/prices.go`, which
 `Report` in `shop/report.go` calls, has the nodes `prices/prices.go:Total`, changed, and
 `shop/report.go:Report`, unchanged, and an edge from Report to Total that calls, found by gopls. It is
 null while the review runs and when the file is missing or cannot be read, as for a review from before
@@ -543,14 +545,24 @@ the code the diff changes connects, for the review screen: the declarations the 
 removes, such as functions, methods, types, variables, and constants, each found in the head, or a
 removed one at the merge base, and the code that calls or uses each of them, one level up, found on the
 same side. For Go files it asks gopls, Go's language server, when Whooper finds it on PATH or where
-`go install` puts it (`go env GOBIN`, or `GOPATH/bin`). For any other file, and for Go files without
-gopls, it uses name search: the definitions a pattern per language finds, in Go, Python, JavaScript, and
-TypeScript, and `git grep`'s whole-word matches of each name. Each link names which of the two found it,
-and `limits` says in plain words what the graph can miss, such as calls through an interface, which gopls
-leaves out, or code that only shares a name, which name search links. Both read the reviewed commits, not
-the edits or probes the run left in the worktrees, and gopls downloads nothing (`GOPROXY=off`). The graph
-keeps at most 40 nodes, the changed code first, and the step stops looking after 2 minutes, and says so in
-`limits`. Like the overview, it never changes how a review ends: when it fails, the review has no
+`go install` puts it (`go env GOBIN`, or `GOPATH/bin`). For JavaScript and TypeScript files it asks
+TypeScript, the one the file's package installed: `node_modules/typescript` in the folder of the nearest
+`package.json` above the file or in a folder above that, which the repo's setup script installs; at the
+merge base, where setup installs nothing, the head's. `node` runs `lib/ts-callers.mjs` with it, which
+lists each file's declarations, those at its top level and each class's methods, such as `Cart.add`, and
+finds, in the project of the nearest `tsconfig.json` or `jsconfig.json`, the code that calls a changed
+function or method, as TypeScript's call hierarchy lists it, or uses any other changed declaration, as its
+references list them. TypeScript gets the first three quarters of the step's time. A file whose package
+installed no TypeScript, or TypeScript 7, which has no language service `node` can load, or whose project
+TypeScript cannot load or answer for in that time, gets name search, and `limits` says which and why. For
+any other file, and for Go files without gopls, it uses name search: the definitions a pattern per
+language finds, in Go, Python, JavaScript, and TypeScript, and `git grep`'s whole-word matches of each
+name. A changed line counts toward the innermost declaration around it, such as a method rather than its
+class. Each link names which of the three found it, and `limits` says in plain words what the graph can
+miss, such as calls through an interface, which gopls leaves out, or code that only shares a name, which
+name search links. All three read the reviewed commits, not the edits or probes the run left in the
+worktrees, and gopls downloads nothing (`GOPROXY=off`). The graph keeps at most 40 nodes, the changed code
+first, and the step stops looking after 2 minutes, and says so in `limits`. Like the overview, it never changes how a review ends: when it fails, the review has no
 `connections.json`.
 
 After the examples step below, while the worktrees still exist, a mutation step adds to `test_gaps.json`

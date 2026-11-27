@@ -1450,10 +1450,96 @@ NO_GOPLS = ("Whooper found no gopls on PATH or where go install puts it, go env 
 GOPLS_MISSES = "gopls leaves out dynamic calls, such as calls through an interface, a function value, or reflection."
 NAME_SEARCH = ("Name search links every whole-word match of a name, so a link can join code that only shares the name,"
                " and it misses calls that do not spell the name out.")
-PATTERNS = ("Where gopls did not read a file, Whooper finds its definitions by a pattern per language and counts each"
-            " changed line toward the nearest definition above it, so a change between two definitions can count"
-            " toward the wrong one.")
+PATTERNS = ("Where neither gopls nor TypeScript read a file, Whooper finds its definitions by a pattern per language and"
+            " counts each changed line toward the nearest definition above it, so a change between two definitions can"
+            " count toward the wrong one.")
 REMOVED = "Removed code shows the callers it had at the merge base."
+TYPESCRIPT_MISSES = ("TypeScript leaves out dynamic calls, such as calls through a function value, a value typed any, or a"
+                     " module import() loads at run time, and links a function only to code that calls it, not to code that"
+                     " only names it, such as a list of handlers.")
+JS_METHODS = ("In the JavaScript and TypeScript files TypeScript did not read, a change to a method of a class counts toward"
+              " the class.")
+NO_TYPESCRIPT = ("Whooper found no node_modules/typescript in its package or a folder above it, which the repo's setup"
+                 " script would install")
+# A TypeScript package's PR: total leaves out refunds, Cart's items become readonly, and Cart.add leaves out items that
+# are not above 0. checkout calls total and Cart.add and uses Cart, report calls total by another name, an import's alias,
+# and handlers names it without calling it, and useIt calls a total of its own, which shares only the name. node_modules
+# stays out of git, as a package's .gitignore keeps it.
+TS_SHOP = {
+    "shop/package.json": '{"name": "shop", "private": true, "devDependencies": {"typescript": "5.9.3"}}\n',
+    "shop/.gitignore": "node_modules/\n",
+    "shop/tsconfig.json": ('{"compilerOptions": {"strict": true, "module": "esnext", "moduleResolution": "bundler",'
+                           ' "target": "es2022", "noEmit": true}, "include": ["src"]}\n'),
+    "shop/src/prices.ts": ("/** Totals the prices. */\nexport function total(prices: number[]): number {\n"
+                           "  return prices.reduce((sum, p) => sum + p, 0);\n}\n\nexport class Cart {\n"
+                           "  items: number[] = [];\n\n  add(item: number) {\n    this.items.push(item);\n  }\n}\n"),
+    "shop/src/checkout.ts": ('import { Cart, total } from "./prices";\n\nexport function checkout(cart: number[]): number {\n'
+                             "  const c = new Cart();\n  c.add(1);\n  return total(cart);\n}\n"),
+    "shop/src/report.ts": ('import { total as sum } from "./prices";\n\n'
+                           "export const report = (rows: number[]) => `Total: ${sum(rows)}`;\n\n"
+                           "export const handlers = [sum];\n"),
+    "shop/src/unrelated.ts": ("// Another total, which shares only the name.\nfunction total(n: number): number {\n"
+                              "  return n;\n}\n\nexport function useIt(): number {\n  return total(1);\n}\n"),
+}
+TS_SHOP_PR = {
+    **TS_SHOP,
+    "shop/src/prices.ts": ("/** Totals the prices, leaving out refunds. */\nexport function total(prices: number[]): number {\n"
+                           "  return prices.filter((p) => p > 0).reduce((sum, p) => sum + p, 0);\n}\n\nexport class Cart {\n"
+                           "  readonly items: number[] = [];\n\n  add(item: number) {\n    if (item > 0) {\n"
+                           "      this.items.push(item);\n    }\n  }\n}\n"),
+}
+
+
+def ts_node(path, name, kind, line, change="unchanged", lines_changed=0):
+    """A node of connections.json."""
+    return {"id": f"{path}:{name}", "name": name, "kind": kind, "path": path, "line": line, "change": change,
+            "lines_changed": lines_changed}
+
+
+def ts_shop_by_name_search(why):
+    """The connections.json of TS_SHOP's PR when name search finds its links and patterns its definitions, since
+    TypeScript did not run, for why. The patterns find no method, so Cart.add's change counts toward Cart too, and name
+    search links useIt and the other total, which only share total's name, and misses report, which calls total by
+    another name."""
+    def link(caller, called, kind="calls"):
+        return {"from": caller, "to": called, "kind": kind, "found_by": "name_search"}
+
+    return {
+        "nodes": [ts_node("shop/src/prices.ts", "total", "func", 2, "changed", 4),
+                  ts_node("shop/src/prices.ts", "Cart", "type", 6, "changed", 6),
+                  ts_node("shop/src/checkout.ts", "checkout", "func", 3),
+                  ts_node("shop/src/unrelated.ts", "total", "func", 2),
+                  ts_node("shop/src/unrelated.ts", "useIt", "func", 6)],
+        "edges": [link("shop/src/checkout.ts:checkout", "shop/src/prices.ts:total"),
+                  link("shop/src/unrelated.ts:total", "shop/src/prices.ts:total"),
+                  link("shop/src/unrelated.ts:useIt", "shop/src/prices.ts:total"),
+                  link("shop/src/checkout.ts:checkout", "shop/src/prices.ts:Cart", "uses")],
+        "limits": [ONE_LEVEL, f"The links of 1 changed file come from name search, since {why}: shop/src/prices.ts.",
+                   NAME_SEARCH, PATTERNS, JS_METHODS],
+    }
+
+
+def install_typescript(package):
+    """Installs TypeScript in package's node_modules, as the repo's setup script would: a link to the one in
+    PAGE_MODULES."""
+    (package / "node_modules").mkdir(parents=True, exist_ok=True)
+    (package / "node_modules" / "typescript").symlink_to(PAGE_MODULES / "typescript")
+
+
+def fake_typescript(package, body, version="5.9.3"):
+    """Installs in package's node_modules a typescript package of version whose compiler, lib/typescript.js, runs body,
+    JavaScript, as node loads it, or which has none, as TypeScript 7 has none, when body is None."""
+    folder = package / "node_modules" / "typescript"
+    (folder / "lib").mkdir(parents=True)
+    (folder / "package.json").write_text(json.dumps({"name": "typescript", "version": version}))
+    if body is not None:
+        (folder / "lib" / "typescript.js").write_text(body)
+
+
+def block_once(pid):
+    """JavaScript that writes its process ID to the file pid and then waits for ever."""
+    return (f'require("fs").writeFileSync({json.dumps(str(pid))}, String(process.pid));\n'
+            "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);\n")
 
 
 def shop_connections(found_by):
@@ -1714,6 +1800,165 @@ class ConnectionsTest(RunDirTest):
         # The step stopped the gopls it started.
         with self.assertRaises(ProcessLookupError):
             os.kill(int((self.tmp / "gopls.pid").read_text()), 0)
+
+    def need_typescript(self):
+        if not shutil.which("node"):
+            self.skipTest("node is not on PATH, so no TypeScript can run")
+        if not (PAGE_MODULES / "typescript" / "lib" / "typescript.js").is_file():
+            self.skipTest("TypeScript is not installed offline; npm ci in page/ installs it")
+
+    def test_javascript_and_typescript_link_by_typescript_to_the_code_that_calls_them(self):
+        self.need_typescript()
+        run = self.run_dir(TS_SHOP, TS_SHOP_PR)
+        install_typescript(run / "head" / "shop")
+        # The review run left a probe that calls total, and a function it added to checkout.ts that calls it too.
+        # TypeScript reads neither, so checkout is where checkout.ts has it in the head.
+        (run / "head" / "shop" / "src" / "probe.ts").write_text(
+            'import { total } from "./prices";\n\nexport const probe = () => total([1]);\n')
+        checkout = run / "head" / "shop" / "src" / "checkout.ts"
+        checkout.write_text("// probe\n\n" + checkout.read_text() + "\nexport const extra = () => total([]);\n")
+
+        def link(caller, called, kind="calls"):
+            return {"from": caller, "to": called, "kind": kind, "found_by": "typescript"}
+
+        # TypeScript sees Cart.add as a method of its own, so Cart's own change is the line of its items, and the merge
+        # base's checkout, which has no TypeScript installed, reads with the head's. total's callers are checkout and
+        # report, which calls it by its alias, and not handlers, which only names it, or useIt, whose total is another
+        # function.
+        self.assertEqual(self.connections(run, self.env), {
+            "nodes": [ts_node("shop/src/prices.ts", "total", "func", 2, "changed", 4),
+                      ts_node("shop/src/prices.ts", "Cart", "type", 6, "changed", 2),
+                      ts_node("shop/src/prices.ts", "Cart.add", "method", 9, "changed", 4),
+                      ts_node("shop/src/checkout.ts", "checkout", "func", 3),
+                      ts_node("shop/src/report.ts", "report", "func", 3)],
+            "edges": [link("shop/src/checkout.ts:checkout", "shop/src/prices.ts:total"),
+                      link("shop/src/report.ts:report", "shop/src/prices.ts:total"),
+                      link("shop/src/checkout.ts:checkout", "shop/src/prices.ts:Cart", "uses"),
+                      link("shop/src/checkout.ts:checkout", "shop/src/prices.ts:Cart.add")],
+            "limits": [ONE_LEVEL, TYPESCRIPT_MISSES],
+        })
+
+    def test_a_package_without_typescript_links_by_name_search_and_says_so(self):
+        self.assertEqual(self.connections(self.run_dir(TS_SHOP, TS_SHOP_PR), self.env),
+                         ts_shop_by_name_search(NO_TYPESCRIPT))
+
+    def test_typescript_7_links_by_name_search_and_says_why(self):
+        if not shutil.which("node"):
+            self.skipTest("node is not on PATH, so no TypeScript can run")
+        run = self.run_dir(TS_SHOP, TS_SHOP_PR)
+        fake_typescript(run / "head" / "shop", None, "7.1.0-beta")
+        self.assertEqual(self.connections(run, self.env), ts_shop_by_name_search(
+            "TypeScript failed in the head's checkout (TypeScript 7.1.0-beta has no language service that node can load)"))
+
+    def test_moved_typescript_code_shows_the_callers_typescript_finds_at_each_commit(self):
+        self.need_typescript()
+        # discount moves from prices.ts to deals.ts, so checkout.ts imports it from there, and checkout, which calls it
+        # and does not change, moves down a line. unrelated.ts has a discount of its own. The package's tsconfig.json
+        # only references the project of its code, as a solution does.
+        discount = "/** Takes a tenth off. */\nexport function discount(amount: number): number {\n  return amount - amount / 10;\n}\n"
+        base = {**TS_SHOP, "shop/tsconfig.json": '{"files": [], "references": [{"path": "./tsconfig.app.json"}]}\n',
+                "shop/tsconfig.app.json": TS_SHOP["shop/tsconfig.json"],
+                "shop/src/prices.ts": TS_SHOP["shop/src/prices.ts"] + "\n" + discount,
+                "shop/src/checkout.ts": ('import { Cart, discount, total } from "./prices";\n\n'
+                                         "export function checkout(cart: number[]): number {\n  const c = new Cart();\n"
+                                         "  c.add(1);\n  return discount(total(cart));\n}\n"),
+                "shop/src/unrelated.ts": (TS_SHOP["shop/src/unrelated.ts"] + "\nfunction discount(n: number): number {\n"
+                                          "  return n;\n}\n\nexport const useDiscount = () => discount(2);\n")}
+        head = {**base, "shop/src/prices.ts": TS_SHOP["shop/src/prices.ts"], "shop/src/deals.ts": discount,
+                "shop/src/checkout.ts": base["shop/src/checkout.ts"].replace(
+                    'import { Cart, discount, total } from "./prices";',
+                    'import { discount } from "./deals";\nimport { Cart, total } from "./prices";')}
+        run = self.run_dir(base, head)
+        install_typescript(run / "head" / "shop")
+        self.assertEqual(self.connections(run, self.env), {
+            "nodes": [ts_node("shop/src/deals.ts", "discount", "func", 2, "added", 4),
+                      ts_node("shop/src/prices.ts", "discount", "func", 15, "removed", 4),
+                      # Found at the merge base, where it is on line 3, calling the removed discount.
+                      ts_node("shop/src/checkout.ts", "checkout", "func", 4)],
+            "edges": [{"from": "shop/src/checkout.ts:checkout", "to": "shop/src/deals.ts:discount", "kind": "calls",
+                       "found_by": "typescript"},
+                      {"from": "shop/src/checkout.ts:checkout", "to": "shop/src/prices.ts:discount", "kind": "calls",
+                       "found_by": "typescript"}],
+            "limits": [ONE_LEVEL, TYPESCRIPT_MISSES, REMOVED],
+        })
+
+    def test_typescript_stops_at_its_share_of_the_time_limit_and_name_search_finds_the_rest(self):
+        self.need_typescript()
+        run = self.run_dir(TS_SHOP, TS_SHOP_PR)
+        # A TypeScript that lists declarations, and that waits for ever once asked to load a project, after it writes
+        # its process ID: the limit finds it waiting, however slow the machine is.
+        pid = self.tmp / "typescript.pid"
+        fake_typescript(run / "head" / "shop", "\n".join([
+            f"const ts = require({json.dumps(str(PAGE_MODULES / 'typescript'))});",
+            "module.exports = new Proxy(ts, {get(target, key) {",
+            f"  if (key === 'getParsedCommandLineOfConfigFile') {{ {block_once(pid)} }}",
+            "  return target[key];",
+            "}});"]))
+        with limit_once_the_test_runs(pid, ("node", str(whooper.TS_CALLERS))) as limited:
+            graph = self.connections(run, self.env, seconds=60)
+        # Two runs list the changed file's declarations, at the head and at the merge base, and the third, which finds
+        # callers, had at most three quarters of the step's 60 seconds.
+        self.assertEqual(len(limited), 3)
+        (left, ran_out) = limited[-1]
+        self.assertTrue(0 < left <= 45, left)
+        self.assertLess(monotonic() - ran_out, 10)
+        # TypeScript listed prices.ts's declarations, so Cart.add is a method of its own, and name search found the
+        # callers of each.
+        def link(caller, called, kind="calls"):
+            return {"from": caller, "to": called, "kind": kind, "found_by": "name_search"}
+
+        self.assertEqual(graph, {
+            "nodes": [ts_node("shop/src/prices.ts", "total", "func", 2, "changed", 4),
+                      ts_node("shop/src/prices.ts", "Cart", "type", 6, "changed", 2),
+                      ts_node("shop/src/prices.ts", "Cart.add", "method", 9, "changed", 4),
+                      ts_node("shop/src/checkout.ts", "checkout", "func", 3),
+                      ts_node("shop/src/unrelated.ts", "total", "func", 2),
+                      ts_node("shop/src/unrelated.ts", "useIt", "func", 6)],
+            "edges": [link("shop/src/checkout.ts:checkout", "shop/src/prices.ts:total"),
+                      link("shop/src/unrelated.ts:total", "shop/src/prices.ts:total"),
+                      link("shop/src/unrelated.ts:useIt", "shop/src/prices.ts:total"),
+                      link("shop/src/checkout.ts:checkout", "shop/src/prices.ts:Cart", "uses"),
+                      link("shop/src/checkout.ts:checkout", "shop/src/prices.ts:Cart.add")],
+            "limits": [ONE_LEVEL, "The links of 1 changed file come from name search, since TypeScript's 45-second share"
+                       " of the step's 1-minute limit ran out: shop/src/prices.ts.", NAME_SEARCH, PATTERNS, JS_METHODS],
+        })
+        # The step stopped the TypeScript it started.
+        with self.assertRaises(ProcessLookupError):
+            os.kill(int(pid.read_text()), 0)
+
+    def test_a_stopped_step_leaves_no_typescript_running(self):
+        self.need_typescript()
+        run = self.run_dir(TS_SHOP, TS_SHOP_PR)
+        pid = self.tmp / "typescript.pid"
+        fake_typescript(run / "head" / "shop", block_once(pid))
+        # whooper-review stops a step with a TERM to the step's process group, which TypeScript, in a group of its
+        # own, is not in.
+        step = subprocess.Popen([str(ROOT / "lib" / "python"), str(ROOT / "lib" / "whooper.py"), "connections", str(run)],
+                                env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+        def stop_step():
+            if step.poll() is None:
+                step.kill()
+            step.wait()
+
+        self.addCleanup(stop_step)
+        deadline = monotonic() + 30
+        while not (pid.exists() and pid.read_text()) and monotonic() < deadline:
+            sleep(0.05)
+        typescript = int(pid.read_text())
+
+        def stop_typescript():
+            with suppress(ProcessLookupError):
+                os.kill(typescript, signal.SIGKILL)
+
+        self.addCleanup(stop_typescript)
+        os.killpg(step.pid, signal.SIGTERM)
+        step.wait(timeout=30)
+        deadline = monotonic() + 5
+        with self.assertRaises(ProcessLookupError):
+            while monotonic() < deadline:
+                os.kill(typescript, 0)
+                sleep(0.05)
 
 # The limits test_gaps.json gives whenever it measures, in plain words.
 AND_LINES = "Go counts a line as run when any part of it ran: in `a && b`, the line counts as run even when b never ran."
@@ -4163,13 +4408,13 @@ class RunTest(unittest.TestCase):
             self.assertFalse((run / "overview.invalid.json").exists())
             self.assertEqual(shown, {**reviewed, "overview": kept})
 
-    def shop_pull_request(self):
-        """Makes PR 12 of sample-org/plain-repo SHOP's PR in a local origin, the cache's clone of it, and its work
-        item, has claude's review run find nothing, and returns the environment for git and the review
-        (git_env), with no gopls Whooper can find, and the work item's path."""
+    def shop_pull_request(self, base=SHOP, head=SHOP_PR):
+        """Makes PR 12 of sample-org/plain-repo the PR that changes base's files to head's, SHOP's unless given, in a
+        local origin, the cache's clone of it, and its work item, has claude's review run find nothing, and returns the
+        environment for git and the review (git_env), with no gopls Whooper can find, and the work item's path."""
         tmp = Path(self.tmp.name)
         env = self.git_env()
-        _, head = commit_pr(tmp / "origin", env, SHOP, SHOP_PR)
+        _, head = commit_pr(tmp / "origin", env, base, head)
         subprocess.run(["git", "clone", "--quiet", "--no-checkout", str(tmp / "origin"),
                         str(tmp / "cache" / "whooper" / "repos" / "sample-org-plain-repo")], env=env, check=True)
         item = tmp / "item.json"
@@ -4201,6 +4446,26 @@ class RunTest(unittest.TestCase):
                 self.assertEqual(shown.returncode, 0, shown.stderr)
                 self.assertEqual({key: json.loads(shown.stdout)[key] for key in ["outcome", "connections"]},
                                  {"outcome": "reviewed", "connections": shop_connections(found_by)})
+
+    def test_a_review_succeeds_with_name_search_links_when_typescript_crashes(self):
+        if not shutil.which("node"):
+            self.skipTest("node is not on PATH, so no TypeScript can run")
+        env, item = self.shop_pull_request(TS_SHOP, TS_SHOP_PR)
+        # The review run installs in the head's checkout, where the repo's setup script would, a TypeScript that kills
+        # its own process as node loads it.
+        self.script(self.fakes / "claude", "\n".join([
+            'ts="$WHOOPER_HEAD/shop/node_modules/typescript"', 'mkdir -p "$ts/lib"',
+            """echo '{"name": "typescript", "version": "5.9.3"}' > "$ts/package.json\"""",
+            """echo 'process.kill(process.pid, "SIGKILL");' > "$ts/lib/typescript.js\"""",
+            'cat "${0%/*}/result.json"']))
+        result = self.command("whooper-review", str(item), "--dry-run", env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        run = Path(result.stdout.strip())
+        self.assertEqual(json.loads((run / "connections.json").read_text()), ts_shop_by_name_search(
+            "TypeScript failed in the head's checkout (node was stopped by signal 9)"))
+        shown = self.command("whooper-show", run.name, "--json", env=env)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertEqual(json.loads(shown.stdout)["outcome"], "reviewed")
 
     def test_a_review_goes_on_when_the_connections_step_fails(self):
         env, item = self.shop_pull_request()

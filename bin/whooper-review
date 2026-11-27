@@ -30,8 +30,9 @@
 # script's error output (lib/whooper.py's read_overview). Whatever the overview, the review goes on as
 # it would without one. Then, before the worktrees go, a step of at most 2 minutes saves
 # connections.json, how the code the diff changes connects: the declarations it adds, changes, or
-# removes, the code that calls them, one level up, and how each link was found, by gopls for Go files
-# and name search for the rest (lib/whooper.py's connections). Then, when the run chose example inputs
+# removes, the code that calls them, one level up, and how each link was found, by gopls for Go files,
+# by the TypeScript a file's package installed for JavaScript and TypeScript files, and by name search for
+# the rest (lib/whooper.py's connections). Then, when the run chose example inputs
 # for Go functions the PR changes, which it wrote as examples.json beside its test, whooper_examples_test.go,
 # and which move to examples.request.json as soon as it ends, a step of at most 5 minutes runs the test once
 # at the head and twice at the merge base, without the run's edits, and saves what it printed as
@@ -355,7 +356,8 @@ rm -rf "$run/test_gaps.json" || true
 "$root/lib/python" "$root/lib/whooper.py" overview "$run" || true
 
 # Then, while the worktrees exist, the connections step writes connections.json: how the code the diff
-# changes connects, from gopls for Go files and name search for the rest (lib/whooper.py's connections).
+# changes connects, from gopls for Go files, the TypeScript a file's package installed for JavaScript and
+# TypeScript files, and name search for the rest (lib/whooper.py's connections).
 run_step connections connections.json
 # Then, when the run chose examples, the examples step writes examples.json: what the Go functions the run
 # chose return for the inputs it chose, from its test run once at the head and twice at the merge base,
