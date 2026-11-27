@@ -2,7 +2,8 @@ import { createMemo, createSignal, For, Show, untrack } from "solid-js";
 import { Button, Diff, type DiffLineAnnotation } from "@prompting-time/ui";
 import { DraftThread } from "./DraftThread";
 import { readPatch, showsLine, type PatchFile } from "./patch";
-import { CallError, type Finding, type Review } from "./protocol";
+import { createDecision } from "./decision";
+import type { Finding, Review } from "./protocol";
 import type { PageStore } from "./store";
 import { verdictText } from "./text";
 
@@ -161,72 +162,14 @@ function FileCard(props: { store: PageStore; file: PatchFile; findings: Finding[
   );
 }
 
-/** What lets a submit through that whooper-submit refused with exit 11 (the review approves a run
- * that is not safe to approve) or exit 12 (the review @-mentions someone). */
-const OVERRIDES: Record<number, { flag: string; label: string }> = {
-  11: { flag: "--approve-anyway", label: "Approve anyway" },
-  12: { flag: "--allow-mentions", label: "Send with the mentions" },
-};
-
 function SubmitBar(props: { store: PageStore }) {
   const store = props.store;
   const drafts = () => store.state.review!.drafts;
-  const comments = () => store.state.review!.findings.findings.filter((f) => drafts().findings[f.id]?.included).length;
+  const decision = createDecision(store);
+  const { comments, event, busy, error } = decision;
   // The message box shows the user's typing until it is saved, then whatever the drafts say.
   const [message, setMessage] = createSignal(() => drafts().message);
-  const [pendingEvent, setPendingEvent] = createSignal<"APPROVE" | "COMMENT" | null>(null);
-  const event = () => pendingEvent() ?? drafts().event;
-  const [busy, setBusy] = createSignal(false);
-  const [error, setError] = createSignal("");
   const locked = () => store.locked();
-  const nothing = () => comments() === 0 && event() === "COMMENT";
-  // The flags the user added by pressing Approve anyway or Send with the mentions, which the next of
-  // those buttons keeps, and the button that lets the last submit's refusal through, with
-  // whooper-submit's stderr as the reason.
-  const [flags, setFlags] = createSignal<string[]>([]);
-  const [refusal, setRefusal] = createSignal<{ flag: string; label: string; why: string } | null>(null);
-  const override = () => (locked() ? null : refusal());
-
-  /** Runs work, shows its error, if any, under the bar, and resolves with whether it succeeded. */
-  async function run(work: () => Promise<unknown>): Promise<boolean> {
-    setBusy(true);
-    try {
-      await work();
-      setError("");
-      return true;
-    } catch (e) {
-      setError((e as Error).message);
-      return false;
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function choose(next: "APPROVE" | "COMMENT") {
-    setPendingEvent(next);
-    await run(() => store.changeDraft({ op: next === "APPROVE" ? "approve" : "comment" }));
-    setPendingEvent(null);
-  }
-
-  // Prompting Time confirms first; a cancelled or refused confirmation comes back as the host's error,
-  // with whooper-submit's exit code when it refused. Submit review sends no flags; each override
-  // button adds its flag to those the user added before.
-  async function submit(flag?: string) {
-    const next = flag ? [...flags(), flag] : [];
-    setFlags(next);
-    setRefusal(null);
-    await run(async () => {
-      try {
-        await store.submit(next);
-      } catch (e) {
-        const code = e instanceof CallError ? e.failure.exit_code : undefined;
-        const allow = code == null ? undefined : OVERRIDES[code];
-        // A refusal the next button lets through shows as that button's reason, not as an error.
-        if (!(e instanceof CallError) || !allow) throw e;
-        setRefusal({ ...allow, why: e.failure.stderr?.trim() || e.message });
-      }
-    });
-  }
 
   // What posts when the message stays empty (whooper-submit): an approval with comments says
   // "Pre-approving to unblock".
@@ -240,11 +183,11 @@ function SubmitBar(props: { store: PageStore }) {
       </span>
       <span class="w-radios" role="radiogroup" aria-label="Review">
         <label>
-          <input type="radio" name="event" checked={event() === "COMMENT"} disabled={busy() || locked()} onChange={() => choose("COMMENT")} />
+          <input type="radio" name="event" checked={event() === "COMMENT"} disabled={busy() || locked()} onChange={() => decision.choose("COMMENT")} />
           Comment
         </label>
         <label>
-          <input type="radio" name="event" checked={event() === "APPROVE"} disabled={busy() || locked()} onChange={() => choose("APPROVE")} />
+          <input type="radio" name="event" checked={event() === "APPROVE"} disabled={busy() || locked()} onChange={() => decision.choose("APPROVE")} />
           Approve
         </label>
       </span>
@@ -257,17 +200,17 @@ function SubmitBar(props: { store: PageStore }) {
         onInput={(e) => setMessage(e.currentTarget.value)}
         onChange={(e) => {
           const text = e.currentTarget.value;
-          if (text !== drafts().message) void run(() => store.changeDraft({ op: "message", text }));
+          if (text !== drafts().message) void decision.run(() => store.changeDraft({ op: "message", text }));
         }}
       />
-      <Button variant="primary" disabled={busy() || store.held() || locked() || nothing()} onClick={() => submit()}>
+      <Button variant="primary" disabled={busy() || store.held() || locked() || decision.nothing()} onClick={() => decision.submit()}>
         {busy() ? "Submitting…" : "Submit review"}
       </Button>
-      <Show when={override()}>
+      <Show when={decision.override()}>
         {(next) => (
           <>
             <p class="w-hint w-submit-line w-refusal">{next().why}</p>
-            <Button disabled={busy() || store.held()} onClick={() => submit(next().flag)}>
+            <Button disabled={busy() || store.held()} onClick={() => decision.submit(next().flag)}>
               {next().label}
             </Button>
           </>
