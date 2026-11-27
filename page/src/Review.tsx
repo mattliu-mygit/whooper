@@ -1,5 +1,6 @@
 import { createMemo, createSignal, For, Show, untrack } from "solid-js";
 import { Button, Diff, type DiffLineAnnotation } from "@prompting-time/ui";
+import type { JSX } from "@solidjs/web";
 import { DraftThread } from "./DraftThread";
 import { readPatch, showsLine, type PatchFile } from "./patch";
 import { createDecision } from "./decision";
@@ -10,8 +11,10 @@ import { verdictText } from "./text";
 /**
  * A review run as the agreed mock draws it: the PR's diff, one file at a time, with Whooper's
  * findings as draft comments under their lines, and one bar that submits them as one GitHub review.
+ * For a review with an overview, this is its Diff, with `top`, the verdict banner and the since
+ * notice, in place of the line that says Whooper's reason.
  */
-export function ReviewScreen(props: { store: PageStore }) {
+export function ReviewScreen(props: { store: PageStore; top?: JSX.Element }) {
   const store = props.store;
   const review = () => store.state.review as Review;
   // A new review message, even for the same run, parses the patch again, and the diff rebuilds.
@@ -51,12 +54,17 @@ export function ReviewScreen(props: { store: PageStore }) {
           </Button>
         </div>
       </header>
-      <p class="w-summary">
-        <strong>Whooper</strong>{" "}
-        {review().findings.status === "skipped"
-          ? `skipped this review: ${review().findings.skip_reason}`
-          : review().findings.approval.reason}
-      </p>
+      <Show
+        when={props.top}
+        fallback={
+          <p class="w-summary">
+            <strong>Whooper</strong>{" "}
+            {review().findings.status === "skipped" ? `skipped this review: ${review().findings.skip_reason}` : review().findings.approval.reason}
+          </p>
+        }
+      >
+        {props.top}
+      </Show>
       <div class="w-body">
         <FileList files={files()} selected={file()?.path} findingsIn={findingsIn} onSelect={setChosen} />
         <div class="w-files-pane">

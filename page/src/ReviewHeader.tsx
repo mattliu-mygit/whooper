@@ -1,6 +1,8 @@
 import { createSignal, For, Show } from "solid-js";
-import { Button } from "@prompting-time/ui";
-import type { StatusReview } from "./protocol";
+import { Button, Menu, type MenuItem } from "@prompting-time/ui";
+import type { Review, StatusReview } from "./protocol";
+import type { ReviewMode } from "./review/OverviewReview";
+import { REVIEW_VIEWS, viewHasData, viewListed, type ReviewViews } from "./review/views";
 import type { PageStore } from "./store";
 import { shortDate, shortSha } from "./text";
 
@@ -17,9 +19,14 @@ export function versionLabel(review: StatusReview, number: number): string {
  * the review. Each button runs the manifest's action for the run, and a refusal shows under the bar.
  * The store disables the buttons while one runs and briefly after (PageStore.held).
  * It reads the review as whooper-status lists it, so it shows nothing until the status arrives or for
- * a review older than the 30 days whooper-status lists.
+ * a review older than the 30 days whooper-status lists. For a review with an overview, `modes` adds
+ * Walkthrough | Diff and the Views menu, and the since notice under the verdict says what the
+ * new-commits banner would.
  */
-export function ReviewHeader(props: { store: PageStore }) {
+export function ReviewHeader(props: {
+  store: PageStore;
+  modes?: { mode: ReviewMode; onMode(mode: ReviewMode): void; views: ReviewViews };
+}) {
   const store = props.store;
   const [queued, setQueued] = createSignal<string | null>(null);
   const [error, setError] = createSignal<string | null>(null);
@@ -51,6 +58,17 @@ export function ReviewHeader(props: { store: PageStore }) {
         const canRemove = () => !earlier() && !running() && !removed();
         const newCommits = () =>
           !earlier() && !running() && review().head_sha !== null && review().pr_head_sha !== null && review().head_sha !== review().pr_head_sha;
+        /** The Views menu: each view this review lists, on or off, and what it shows. */
+        const viewItems = (views: ReviewViews): MenuItem[] => {
+          const shown = store.state.review as Review;
+          return REVIEW_VIEWS.filter((view) => viewListed(view, shown)).map((view) => ({
+            value: view.id,
+            label: view.name,
+            description: viewHasData(view.id, shown) ? view.description : `${view.description} Nothing for this review.`,
+            type: "checkbox" as const,
+            checked: views.isOn(view.id),
+          }));
+        };
         const rerun = () => run(() => store.retry(), (printed) => setQueued(printed));
         return (
           <header class="w-review-header">
@@ -93,6 +111,33 @@ export function ReviewHeader(props: { store: PageStore }) {
                   {problem() ? "Retry review" : "Rerun review"}
                 </Button>
               </Show>
+              <Show when={props.modes}>
+                {(modes) => {
+                  const off = () => viewItems(modes().views).filter((item) => !item.checked).length;
+                  return (
+                    <>
+                      <div class="w-segmented review-modes" role="group" aria-label="Show the review as">
+                        <Button aria-pressed={modes().mode === "diff" ? "false" : "true"} onClick={() => modes().onMode("walkthrough")}>
+                          Walkthrough
+                        </Button>
+                        <Button aria-pressed={modes().mode === "diff" ? "true" : "false"} onClick={() => modes().onMode("diff")}>
+                          Diff
+                        </Button>
+                      </div>
+                      <Menu
+                        label="Views in reviews"
+                        text={off() > 0 ? `Views · ${off()} off` : "Views"}
+                        items={viewItems(modes().views)}
+                        closeOnSelect={false}
+                        onSelect={(id) => {
+                          const view = REVIEW_VIEWS.find((item) => item.id === id);
+                          if (view) modes().views.setOn(view.id, !modes().views.isOn(view.id));
+                        }}
+                      />
+                    </>
+                  );
+                }}
+              </Show>
             </div>
             <Show when={removed()}>
               <div class="w-banner" role="note">
@@ -112,7 +157,7 @@ export function ReviewHeader(props: { store: PageStore }) {
                 <Button onClick={() => store.open(`/reviews/${newest().run_id}`)}>Open review {versions().length}</Button>
               </div>
             </Show>
-            <Show when={newCommits()}>
+            <Show when={newCommits() && !props.modes}>
               <div class="w-banner" role="note">
                 <span>
                   <strong>New commits since this review</strong> · it reviewed {shortSha(review().head_sha)}; the pull request is at{" "}

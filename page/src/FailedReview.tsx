@@ -62,11 +62,10 @@ export function FailedReview(props: { store: PageStore; shown: Shown }) {
           )}
         </Show>
       </header>
-      <section class="w-card w-failed" aria-labelledby="failed-review-heading">
+      {/* Tinted red like the verdict banner a finished review opens on: failed, or blocked by a cause. */}
+      <section class="w-card w-failed verdict-banner" data-tone="error" aria-labelledby="failed-review-heading">
         <h2 id="failed-review-heading">
-          <Show when={!waiting()}>
-            <StatusDot status="error" />
-          </Show>
+          <StatusDot status="error" />
           {waiting() ? `Waiting · ${props.shown.cause?.summary ?? "blocked"}` : "Review failed"}
         </h2>
         <Show when={!waiting() && props.shown.cause}>{(cause) => <p>{cause().summary}</p>}</Show>
