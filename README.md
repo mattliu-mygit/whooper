@@ -333,6 +333,7 @@ stop it. It refuses a review that is still running, since a Devin review may sti
 `findings.json`, a review that did not finish, a run whose `run.json` it cannot read, a review that
 includes no comment and does not approve, and a run it already submitted, so a review never posts
 twice.
+For example, a review whose drafts include no comment and do not approve exits 13.
 
 ## Skip a review
 
