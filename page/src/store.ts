@@ -190,10 +190,14 @@ export function createPageStore(link: HostLink) {
 
   // While an action the user pressed runs, and for HOLD_MS after its reply, the page holds every
   // action button disabled. Prompting Time may open the next item in that time, and an open in that
-  // time holds them HOLD_MS more, so a second click can't act on the item it opened. The plain
-  // variables decide; the signal only draws, since the store applies a write at its next flush.
+  // time holds them HOLD_MS more, so a second click can't act on the item it opened. Ask, which can
+  // take Whooper's agent a long time, holds only the Ask buttons while it runs, and every button for
+  // HOLD_MS after its reply. The plain variables decide; the signals only draw, since the store
+  // applies a write at its next flush.
   const [held, setHeld] = createSignal(false);
+  const [asking, setAsking] = createSignal(false);
   let running = 0;
+  let asks = 0;
   let release: ReturnType<typeof setTimeout> | undefined;
   function holdFor(ms: number) {
     clearTimeout(release);
@@ -211,6 +215,21 @@ export function createPageStore(link: HostLink) {
       return await work();
     } finally {
       if (--running === 0) holdFor(HOLD_MS);
+    }
+  }
+  /** Runs work holding only the Ask buttons, then holds every button HOLD_MS after its reply. */
+  async function holdingAsk<T>(work: () => Promise<T>): Promise<T> {
+    asks++;
+    setAsking(true);
+    try {
+      return await work();
+    } finally {
+      if (--asks === 0) setAsking(false);
+      // An action still running starts the hold when it ends.
+      if (running === 0) {
+        setHeld(true);
+        holdFor(HOLD_MS);
+      }
     }
   }
 
@@ -300,8 +319,11 @@ export function createPageStore(link: HostLink) {
     entry,
     versions,
     earlier,
-    /** Whether the action buttons are disabled: while an action runs, and for HOLD_MS after. */
+    /** Whether the action buttons are disabled: while an action other than Ask runs, and for HOLD_MS
+     * after any action's reply. */
     held,
+    /** Whether an Ask runs, which disables only the Ask buttons. */
+    asking,
     /** Whether the open review takes no more changes: submitted, or superseded by a newer run. */
     locked: () => state.submitted !== null || state.shown?.submitted != null || earlier(),
     ready: () => link.post({ version: PROTOCOL_VERSION, type: "ready" }),
@@ -328,7 +350,7 @@ export function createPageStore(link: HostLink) {
     },
     ask: async (question: string, finding: string | null) => {
       const id = runId();
-      const answer = String(await holding(() => call("ask", [id, question, ...(finding ? ["--finding", finding] : [])]))).trim();
+      const answer = String(await holdingAsk(() => call("ask", [id, question, ...(finding ? ["--finding", finding] : [])]))).trim();
       setState((s) => {
         if (openRun() === id) (s.answers[finding ?? ""] ??= []).push({ question, answer });
       });

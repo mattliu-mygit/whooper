@@ -20,7 +20,8 @@ function storeWithHost() {
   /** The id of the last call of action. */
   const lastCall = (action: string) => posted.flatMap((m) => (m.type === "call" && m.action === action ? [m.id] : [])).at(-1)!;
   const held = () => (flush(), store.held());
-  return { store, send, lastCall, held };
+  const asking = () => (flush(), store.asking());
+  return { store, send, lastCall, held, asking };
 }
 
 describe("the page store", () => {
@@ -63,6 +64,51 @@ describe("the page store", () => {
     expect((error as CallError).failure).toEqual({ stage: "preview", exit_code: 12, stderr });
     expect(held()).toBe(true);
     vi.advanceTimersByTime(HOLD_MS);
+    expect(held()).toBe(false);
+  });
+
+  it("holds only the Ask buttons while an ask runs, so other actions stay usable, and every button for HOLD_MS after its reply", async () => {
+    const { store, send, lastCall, held, asking } = storeWithHost();
+    send({ type: "open", route: "/reviews/r1" });
+    const asked = store.ask("Why?", "1");
+    expect(asking()).toBe(true);
+    expect(held()).toBe(false);
+
+    // Skip runs and ends while the ask still runs, and holds the buttons HOLD_MS after its reply.
+    const skipped = store.skip();
+    expect(held()).toBe(true);
+    send({ type: "result", reply_to: lastCall("skip"), json: "marked r1 as skipped\n" });
+    await skipped;
+    vi.advanceTimersByTime(HOLD_MS);
+    expect(held()).toBe(false);
+    expect(asking()).toBe(true);
+
+    send({ type: "result", reply_to: lastCall("ask"), json: "It timed out.\n" });
+    expect(await asked).toBe("It timed out.");
+    expect(asking()).toBe(false);
+    expect(held()).toBe(true);
+    expect(store.state.answers["1"]).toEqual([{ question: "Why?", answer: "It timed out." }]);
+    vi.advanceTimersByTime(HOLD_MS - 1);
+    expect(held()).toBe(true);
+    vi.advanceTimersByTime(1);
+    expect(held()).toBe(false);
+  });
+
+  it("leaves the hold to an action that still runs when an ask's reply arrives", async () => {
+    const { store, send, lastCall, held, asking } = storeWithHost();
+    send({ type: "open", route: "/reviews/r1" });
+    const asked = store.ask("Why?", null);
+    const submitted = store.submit();
+    send({ type: "error", reply_to: lastCall("ask"), message: "whooper-ask: the review is still running" });
+    await expect(asked).rejects.toThrow("still running");
+    expect(asking()).toBe(false);
+    vi.advanceTimersByTime(HOLD_MS);
+    expect(held()).toBe(true);
+    send({ type: "result", reply_to: lastCall("submit"), json: "posted\n" });
+    await submitted;
+    vi.advanceTimersByTime(HOLD_MS - 1);
+    expect(held()).toBe(true);
+    vi.advanceTimersByTime(1);
     expect(held()).toBe(false);
   });
 });

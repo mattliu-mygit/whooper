@@ -451,7 +451,9 @@ stderr as the reason. Only such a press sends a mention: whooper-post, which Who
 own, still holds back each comment that @-mentions someone. After you press an action button (Skip,
 Remove, Rerun review, Poll now, Submit review, the two refusal buttons, or Ask), the page disables
 the action buttons until 600 ms after the action's reply, and 600 ms more when Prompting Time opens
-another item in that time, so a second click can't act on the item Prompting Time moved on to. A
+another item in that time, so a second click can't act on the item Prompting Time moved on to.
+While Ask waits for Whooper's agent, which can take a long time, only the Ask buttons are disabled;
+the 600 ms hold of every button starts at its reply. A
 review that runs, waits, or failed shows why instead, with whooper-review's reason, the answers to
 earlier questions, and Ask why, and a cause that stops every review lists the reviews it holds back,
 with Poll now. It is a Solid 2.0 app built on Prompting Time's shared UI library,

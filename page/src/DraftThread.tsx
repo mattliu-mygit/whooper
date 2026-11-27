@@ -23,10 +23,12 @@ export function DraftThread(props: { store: PageStore; findingId: string }) {
   const [asking, setAsking] = createSignal(false);
   const [question, setQuestion] = createSignal("");
   const [busy, setBusy] = createSignal(false);
+  // Ask runs apart from the other changes, which stay usable while Whooper's agent answers.
+  const [askBusy, setAskBusy] = createSignal(false);
   const [error, setError] = createSignal("");
 
-  async function run(work: () => Promise<unknown>) {
-    setBusy(true);
+  async function run(work: () => Promise<unknown>, setRunning = setBusy) {
+    setRunning(true);
     try {
       await work();
       setError("");
@@ -35,7 +37,7 @@ export function DraftThread(props: { store: PageStore; findingId: string }) {
       setError((e as Error).message);
       return false;
     } finally {
-      setBusy(false);
+      setRunning(false);
     }
   }
 
@@ -50,7 +52,7 @@ export function DraftThread(props: { store: PageStore; findingId: string }) {
   }
 
   async function ask() {
-    if (await run(() => store.ask(question(), props.findingId))) {
+    if (await run(() => store.ask(question(), props.findingId), setAskBusy)) {
       setQuestion("");
       setAsking(false);
     }
@@ -134,10 +136,10 @@ export function DraftThread(props: { store: PageStore; findingId: string }) {
                   onInput={(e) => setQuestion(e.currentTarget.value)}
                 />
                 <div class="w-thread-actions">
-                  <Button variant="primary" disabled={busy() || store.held() || !question().trim()} onClick={ask}>
-                    {busy() ? "Asking…" : "Ask"}
+                  <Button variant="primary" disabled={askBusy() || store.held() || store.asking() || !question().trim()} onClick={ask}>
+                    {askBusy() ? "Asking…" : "Ask"}
                   </Button>
-                  <Button disabled={busy()} onClick={() => setAsking(false)}>
+                  <Button disabled={askBusy()} onClick={() => setAsking(false)}>
                     Cancel
                   </Button>
                   <span class="w-hint">Whooper's agent answers from the review's record. Nothing posts.</span>

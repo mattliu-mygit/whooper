@@ -35,7 +35,7 @@ export function FailedReview(props: { store: PageStore; shown: Shown }) {
   async function ask(event: SubmitEvent) {
     event.preventDefault();
     const text = question().trim();
-    if (!text || busy() || store.held()) return;
+    if (!text || busy() || store.held() || store.asking()) return;
     setBusy(true);
     setError(null);
     try {
@@ -99,7 +99,7 @@ export function FailedReview(props: { store: PageStore; shown: Shown }) {
           <form class="w-ask" onSubmit={(event) => void ask(event)}>
             <Textarea label="Question" rows={2} value={question()} disabled={busy()} onInput={(e) => setQuestion(e.currentTarget.value)} />
             <div class="w-thread-actions">
-              <Button type="submit" variant="primary" disabled={busy() || store.held() || !question().trim()}>
+              <Button type="submit" variant="primary" disabled={busy() || store.held() || store.asking() || !question().trim()}>
                 {busy() ? "Asking…" : "Ask"}
               </Button>
               <Button disabled={busy()} onClick={() => setAsking(false)}>
