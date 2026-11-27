@@ -23,8 +23,8 @@ small change to the changed Go lines they run. So is
 the `go` command, with which a review measures which changed Go lines no test ran and runs the example
 inputs its run chose, at the head and at the merge base, and `node`, with which it measures the changed
 JavaScript and TypeScript lines of a package whose tests run with Vitest or Jest, and links changed
-JavaScript and TypeScript code to its callers with the TypeScript the package installed rather than by
-name search.
+JavaScript and TypeScript code to its callers with the TypeScript 5 or 6 the package installed rather than by
+name search. A package's TypeScript 7 links them without `node`, through its own language server.
 
 1. Copy `examples/config.example.toml` to `~/.config/whooper/config.toml` and fill it in. Everything
    that identifies you, your company, or your repos lives there: your GitHub login and name, the
@@ -615,20 +615,24 @@ same side. For Go files it asks gopls, Go's language server, when Whooper finds 
 `go install` puts it (`go env GOBIN`, or `GOPATH/bin`). For JavaScript and TypeScript files it asks
 TypeScript, the one the file's package installed: `node_modules/typescript` in the folder of the nearest
 `package.json` above the file or in a folder above that, which the repo's setup script installs; at the
-merge base, where setup installs nothing, the head's. `node` runs `lib/ts-callers.mjs` with it, which
-lists each file's declarations, those at its top level and each class's methods, such as `Cart.add`, and
-finds, in the project of the nearest `tsconfig.json` or `jsconfig.json`, the code that calls a changed
-function or method, as TypeScript's call hierarchy lists it, or uses any other changed declaration, as its
-references list them. TypeScript gets the first three quarters of the step's time. A file whose package
-installed no TypeScript, or TypeScript 7, which has no language service `node` can load, or whose project
-TypeScript cannot load or answer for in that time, gets name search, and `limits` says which and why. For
+merge base, where setup installs nothing, the head's. For TypeScript 5 or 6, `node` runs `lib/ts-callers.mjs`
+with it. TypeScript 7, written in Go, has no code `node` can load, so Whooper runs its language server,
+`tsc --lsp --stdio`, from the package its installer puts beside `typescript` for this machine, such as
+`@typescript/typescript-darwin-arm64`, with its automatic type acquisition, which would download type
+declarations with npm, turned off. Either way, TypeScript lists each file's declarations, those at its top
+level and each class's methods, such as `Cart.add`, and finds, in the project of the nearest `tsconfig.json`
+or `jsconfig.json`, the code that calls a changed function or method, as TypeScript's call hierarchy lists
+it, or uses any other changed declaration, as its references list them. TypeScript gets the first three
+quarters of the step's time. A file whose package installed no TypeScript, or a TypeScript 7 without its
+language server, or whose project TypeScript cannot load or answer for in that time, gets name search, and
+`limits` says which and why. For
 any other file, and for Go files without gopls, it uses name search: the definitions a pattern per
 language finds, in Go, Python, JavaScript, and TypeScript, and `git grep`'s whole-word matches of each
 name. A changed line counts toward the innermost declaration around it, such as a method rather than its
 class. Each link names which of the three found it, and `limits` says in plain words what the graph can
 miss, such as calls through an interface, which gopls leaves out, or code that only shares a name, which
 name search links. All three read the reviewed commits, not the edits or probes the run left in the
-worktrees, and gopls downloads nothing (`GOPROXY=off`). The graph keeps at most 40 nodes, the changed code
+worktrees, and gopls downloads nothing (`GOPROXY=off`), nor does TypeScript. The graph keeps at most 40 nodes, the changed code
 first, and the step stops looking after 2 minutes, and says so in `limits`. Like the overview, it never changes how a review ends: when it fails, the review has no
 `connections.json`.
 

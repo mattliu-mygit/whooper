@@ -72,6 +72,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 from time import monotonic
 import tomllib
 import urllib.parse
@@ -960,16 +961,25 @@ def co_change(commits, paths):
 # How the changed code connects, connections.json: whooper-review's step stops looking after
 # CONNECTIONS_SECONDS, and the graph keeps at most CONNECTIONS_MAX_NODES nodes, the changed code first.
 CONNECTIONS_SECONDS, CONNECTIONS_MAX_NODES = 120, 40
-# The script the step runs with node to ask TypeScript about JavaScript and TypeScript files (TypeScript). Its runs
-# end once TYPESCRIPT_SHARE of the step's limit has passed, so name search keeps the rest of it for the files
-# TypeScript did not answer. Loading a project takes most of a run: a frontend of 17,500 files, counting the type
-# declarations it installs, loaded in 15 seconds here, and each changed declaration's callers then took under a
-# second. A project too big for the share gets name search, and limits says so.
+# The script the step runs with node to ask TypeScript 5 or 6 about JavaScript and TypeScript files (TypeScript). Its
+# runs, and TypeScript 7's language server, end once TYPESCRIPT_SHARE of the step's limit has passed, so name search
+# keeps the rest of it for the files TypeScript did not answer. Loading a project takes most of a run: a frontend of
+# 17,500 files, counting the type declarations it installs, loaded in 15 seconds here, and each changed declaration's
+# callers then took under a second. A project too big for the share gets name search, and limits says so.
 TS_CALLERS = ROOT / "lib" / "ts-callers.mjs"
 TYPESCRIPT_SHARE = 0.75
+# TypeScript 7, written in Go, ships no lib/typescript.js but a language server: the program lib/tsc of the package its
+# installer puts beside the typescript package for this machine, named by node's names for its system and processor, as
+# the typescript package's lib/getExePath.js finds it, such as @typescript/typescript-darwin-arm64.
+TYPESCRIPT_SERVER_PACKAGE = "@typescript/typescript-{}-{}".format(
+    sys.platform, {"x86_64": "x64", "aarch64": "arm64"}.get(os.uname().machine, os.uname().machine))
 # The kind of node each declaration gopls lists is, by the Language Server Protocol's number for its kind:
 # a function, a method, a struct, an interface, any other type, a variable, and a constant.
 GOPLS_KINDS = {12: "func", 6: "method", 23: "type", 11: "type", 5: "type", 13: "var", 14: "const"}
+# The kind of node each declaration at a file's top level that TypeScript 7's language server lists is, by the same
+# numbers: a function, a class, which a type alias also goes by, an interface, an enum, and a variable, which
+# TypeScriptServer.symbols makes a func or a const where it can tell.
+TYPESCRIPT_KINDS = {12: "func", 5: "type", 11: "type", 10: "type", 13: "var"}
 # The languages whose definitions name search finds by pattern: each with its files' extensions, the line
 # comment a line it skips starts with, how the comment, decorator, and attribute lines above a definition
 # that belong to it start, and the patterns of a definition's line, each with the kind of node it names. A
@@ -1004,8 +1014,12 @@ LANGUAGES = {
 }
 
 
-# The files TypeScript reads in a checkout: code, and the JSON of tsconfig.json, jsconfig.json, and package.json.
-TYPESCRIPT_FILES = (*LANGUAGES["javascript"]["extensions"], ".json")
+# The files TypeScript reads in a checkout, by the language TypeScript 7's language server reads each as: code, in which
+# only a .jsx or .tsx file holds JSX, and the JSON of tsconfig.json, jsconfig.json, and package.json.
+TYPESCRIPT_LANGUAGES = {".js": "javascript", ".jsx": "javascriptreact", ".mjs": "javascript", ".cjs": "javascript",
+                        ".ts": "typescript", ".tsx": "typescriptreact", ".mts": "typescript", ".cts": "typescript",
+                        ".json": "json"}
+TYPESCRIPT_FILES = tuple(TYPESCRIPT_LANGUAGES)
 
 
 def language_of(path):
@@ -1108,51 +1122,70 @@ def find_go_tool(name):
     return None, f"Whooper found no {name} on PATH or where go install puts it, go env GOBIN or GOPATH/bin"
 
 
-class GoplsError(Exception):
-    """gopls answered a request with an error, as for a position where it finds no declaration."""
+class LanguageServerError(Exception):
+    """A language server answered a request with an error, as gopls does for a position where it finds no declaration."""
 
 
-class Gopls:
-    """gopls, Go's language server, run in the worktree tree and spoken to through its standard input and
-    output in the Language Server Protocol, so one load of the worktree's packages answers every question.
-    gopls runs go with GOPROXY=off, so it downloads nothing and reads only the modules already on this Mac.
-    Each file asked about opens first, with its content in commit, which is also how gopls tells which of
-    the worktree's modules it belongs to. So do the Go files the review run changed in the worktree, and
-    those it added, such as a probe's test, as their package clause alone, so neither the run's edits nor
-    its probes reach gopls's answers. A request gopls answers with an error raises GoplsError, and gopls
-    exiting or writing something other than the protocol raises OSError or ValueError."""
+class LanguageServer:
+    """A language server, command, run in the worktree tree with the environment env and spoken to through its standard
+    input and output in the Language Server Protocol, so one load of the worktree's code answers every question: gopls
+    (Gopls) or TypeScript 7's (TypeScriptServer), each of which gives its name, the extensions of its files, the language
+    it opens a file as (language), and what a file the review run added opens as (blank), and takes options as its
+    initialization options. Each file asked about opens first, with its content in commit. So do the files with one of
+    extensions that the review run changed in the worktree, and those it added, such as a probe's test, so neither the
+    run's edits nor its probes reach the server's answers. A request the server answers with an error raises
+    LanguageServerError, and the server exiting or writing something other than the protocol raises OSError or
+    ValueError. Given seconds, the server is killed once they pass, and what it was asked then raises TimeoutError."""
 
-    def __init__(self, program, tree, commit):
+    def __init__(self, command, tree, commit, env=None, seconds=None, options=None):
         self.tree, self.commit, self.requests, self.opened, self.errors = tree, commit, 0, set(), []
-        self.process = subprocess.Popen([program, "serve"], cwd=tree, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                        stderr=subprocess.DEVNULL, env={**os.environ, "GOPROXY": "off"})
-        # A gopls that fails to start, or the time limit meanwhile, leaves no process behind.
+        self.out_of_time, self.watchdog = False, None
+        self.process = subprocess.Popen(command, cwd=tree, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                        stderr=subprocess.DEVNULL, env=env)
+        # A server that fails to start, or the time limit meanwhile, leaves no process behind.
         try:
+            if seconds is not None:
+                self.watchdog = threading.Thread(target=self.watch, args=(seconds,), daemon=True)
+                self.watchdog.start()
             uri = tree.as_uri()
             self.call("initialize", {"processId": os.getpid(), "rootUri": uri, "workspaceFolders": [{"uri": uri, "name": tree.name}],
-                                     "capabilities": {"textDocument": {"documentSymbol": {"hierarchicalDocumentSymbolSupport": True}}}})
+                                     "capabilities": {"textDocument": {"documentSymbol": {"hierarchicalDocumentSymbolSupport": True}}},
+                                     **({"initializationOptions": options} if options else {})})
             self.send({"method": "initialized", "params": {}})
-            for path in edited_files(tree, (".go",)):
+            for path in edited_files(tree, self.extensions):
                 text = committed(tree, commit, path)
-                if text is None:
-                    try:
-                        clause = re.search(r"^package\s+\w+", (tree / path).read_text(errors="replace"), re.M)
-                    except OSError:
-                        clause = None
-                    text = f"{clause[0]}\n" if clause else ""
-                self.open(path, text)
+                self.open(path, self.blank(path) if text is None else text)
         except BaseException:
             self.close()
             raise
 
+    def watch(self, seconds):
+        """Kills the server once seconds pass, unless it ended first."""
+        try:
+            self.process.wait(timeout=seconds)
+        except subprocess.TimeoutExpired:
+            self.out_of_time = True
+            self.process.kill()
+
+    def gone(self):
+        """The error for the server, which closed its end of the pipes: TimeoutError once its seconds ran out, and
+        otherwise OSError with how it ended."""
+        code = self.process.wait()
+        if self.out_of_time:
+            return TimeoutError(f"{self.name} ran out of time")
+        return OSError(f"{self.name} was stopped by signal {-code}" if code < 0 else f"{self.name} exited with code {code}")
+
     def send(self, message):
         body = json.dumps({"jsonrpc": "2.0", **message}).encode()
-        self.process.stdin.write(b"Content-Length: %d\r\n\r\n%s" % (len(body), body))
-        self.process.stdin.flush()
+        try:
+            self.process.stdin.write(b"Content-Length: %d\r\n\r\n%s" % (len(body), body))
+            self.process.stdin.flush()
+        except BrokenPipeError:
+            raise self.gone() from None
 
     def call(self, method, params):
-        """gopls's answer to the request method with params. Meanwhile gopls's notifications are dropped,
-        except that each error it shows the user is kept in errors, and a request of gopls's own gets null."""
+        """The server's answer to the request method with params. Meanwhile the server's notifications are dropped,
+        except that each error it shows the user is kept in errors, and a request of the server's own gets null."""
         self.requests += 1
         self.send({"id": self.requests, "method": method, "params": params})
         while True:
@@ -1161,9 +1194,9 @@ class Gopls:
                 name, _, value = line.partition(b":")
                 if name.lower() == b"content-length":
                     length = int(value)
-            if length is None:
-                raise OSError(f"gopls exited with code {self.process.poll()}")
-            message = json.loads(self.process.stdout.read(length))
+            if length is None or len(body := self.process.stdout.read(length)) < length:
+                raise self.gone()
+            message = json.loads(body)
             if message.get("method") == "window/showMessage" and message["params"].get("type") == 1:
                 self.errors.append(message["params"]["message"])
             if "method" in message:
@@ -1171,7 +1204,7 @@ class Gopls:
                     self.send({"id": message["id"], "result": None})
             elif message.get("id") == self.requests:
                 if "error" in message:
-                    raise GoplsError(message["error"].get("message"))
+                    raise LanguageServerError(message["error"].get("message"))
                 return message.get("result")
 
     def uri(self, path):
@@ -1181,7 +1214,60 @@ class Gopls:
         if path not in self.opened:
             self.opened.add(path)
             self.send({"method": "textDocument/didOpen", "params": {
-                "textDocument": {"uri": self.uri(path), "languageId": "go", "version": 1, "text": text}}})
+                "textDocument": {"uri": self.uri(path), "languageId": self.language(path), "version": 1, "text": text}}})
+
+    def sites(self, path, symbol):
+        """Where code calls symbol, a declaration of path that symbols gave, as the server's incoming calls list
+        them for a func or method, or uses it, as its references list them for any other kind: each as
+        (path, line) in the worktree, by path and then line."""
+        document, position = {"uri": self.uri(path)}, symbol["position"]
+        if symbol["kind"] in ("func", "method"):
+            items = self.call("textDocument/prepareCallHierarchy", {"textDocument": document, "position": position})
+            places = [(call["from"]["uri"], where) for item in (items or [])[:1]
+                      for call in self.call("callHierarchy/incomingCalls", {"item": item}) or []
+                      for where in call["fromRanges"]]
+        else:
+            places = [(location["uri"], location["range"]) for location in self.call("textDocument/references", {
+                "textDocument": document, "position": position, "context": {"includeDeclaration": False}}) or []]
+        sites = []
+        for uri, where in places:
+            file = Path(urllib.parse.unquote(urllib.parse.urlparse(uri).path))
+            if file.is_relative_to(self.tree):
+                sites.append((file.relative_to(self.tree).as_posix(), where["start"]["line"] + 1))
+        # In the order git grep lists its matches, so the graph does not depend on the server's order.
+        return sorted(sites)
+
+    def close(self):
+        self.process.kill()
+        self.process.wait()
+        self.process.stdout.close()
+        # A request the time limit cut off can leave bytes to flush, which the server, now gone, cannot read. close still
+        # closes the pipe then.
+        with suppress(BrokenPipeError):
+            self.process.stdin.close()
+        if self.watchdog:
+            self.watchdog.join()
+
+
+class Gopls(LanguageServer):
+    """gopls, Go's language server, run as gopls serve (LanguageServer). gopls runs go with GOPROXY=off, so it downloads
+    nothing and reads only the modules already on this Mac. Opening a file is also how gopls tells which of the worktree's
+    modules it belongs to, so a Go file the review run added opens as its package clause alone."""
+
+    name, extensions = "gopls", (".go",)
+
+    def __init__(self, program, tree, commit):
+        super().__init__([program, "serve"], tree, commit, env={**os.environ, "GOPROXY": "off"})
+
+    def language(self, path):
+        return "go"
+
+    def blank(self, path):
+        try:
+            clause = re.search(r"^package\s+\w+", (self.tree / path).read_text(errors="replace"), re.M)
+        except OSError:
+            clause = None
+        return f"{clause[0]}\n" if clause else ""
 
     def symbols(self, path):
         """The declarations of path in commit, as definitions gives them, from gopls: each spans its
@@ -1202,56 +1288,95 @@ class Gopls:
                               "position": symbol["selectionRange"]["start"]})
         return found
 
-    def sites(self, path, symbol):
-        """Where code calls symbol, a declaration of path that symbols gave, as gopls's incoming calls list
-        them for a func or method, or uses it, as its references list them for any other kind: each as
-        (path, line) in the worktree, by path and then line."""
-        document, position = {"uri": self.uri(path)}, symbol["position"]
-        if symbol["kind"] in ("func", "method"):
-            items = self.call("textDocument/prepareCallHierarchy", {"textDocument": document, "position": position})
-            places = [(call["from"]["uri"], where) for item in (items or [])[:1]
-                      for call in self.call("callHierarchy/incomingCalls", {"item": item}) or []
-                      for where in call["fromRanges"]]
-        else:
-            places = [(location["uri"], location["range"]) for location in self.call("textDocument/references", {
-                "textDocument": document, "position": position, "context": {"includeDeclaration": False}}) or []]
-        sites = []
-        for uri, where in places:
-            file = Path(urllib.parse.unquote(urllib.parse.urlparse(uri).path))
-            if file.is_relative_to(self.tree):
-                sites.append((file.relative_to(self.tree).as_posix(), where["start"]["line"] + 1))
-        # In the order git grep lists its matches, so the graph does not depend on gopls's order.
-        return sorted(sites)
 
-    def close(self):
-        self.process.kill()
-        self.process.wait()
-        self.process.stdout.close()
-        # A request the time limit cut off can leave bytes to flush, which gopls, now gone, cannot read. close still
-        # closes the pipe then.
-        with suppress(BrokenPipeError):
-            self.process.stdin.close()
+class TypeScriptServer(LanguageServer):
+    """TypeScript 7's language server, program, run as tsc --lsp --stdio, the flags tsc --lsp -h lists (LanguageServer),
+    which is killed once seconds pass. It finds the project of each file it opens itself: that of the nearest
+    tsconfig.json or jsconfig.json above the file, or of a project one of those references that holds the file, as a
+    solution's does. A file the review run added opens empty. Its automatic type acquisition, with which it runs npm to
+    download the type declarations of a project's packages into a cache of the user's, stays off."""
+
+    name, extensions = "tsc --lsp", TYPESCRIPT_FILES
+
+    def __init__(self, program, tree, commit, seconds):
+        self.listed = {}
+        super().__init__([str(program), "--lsp", "--stdio"], tree, commit, seconds=seconds,
+                         options={"userPreferences": {"disableAutomaticTypeAcquisition": True}})
+
+    def language(self, path):
+        return TYPESCRIPT_LANGUAGES[posixpath.splitext(path)[1]]
+
+    def blank(self, path):
+        return ""
+
+    def symbols(self, path):
+        """The declarations of path in commit, as lib/ts-callers.mjs lists them for TypeScript 5 and 6, from the server's:
+        those at its top level, and each class's methods, and the accessors and properties holding a function that the
+        call hierarchy takes for functions, named with their class, such as Cart.add. A variable is a func when the call
+        hierarchy takes it for one, as a const holding an arrow function, and otherwise a const or var as its line
+        declares it. Each spans its declaration and the comment lines directly above it, and keeps the position of its
+        name, which sites asks about: for an anonymous default export, which the server names from its export keyword,
+        that of its default keyword, the one the call hierarchy finds it from."""
+        if path in self.listed:
+            return self.listed[path]
+        text = committed(self.tree, self.commit, path)
+        found = self.listed[path] = []
+        if text is None:
+            return found
+        self.open(path, text)
+        lines, document = text.split("\n"), {"uri": self.uri(path)}
+
+        def function_like(symbol):
+            return bool(self.call("textDocument/prepareCallHierarchy",
+                                  {"textDocument": document, "position": symbol["selectionRange"]["start"]}))
+
+        def add(symbol, name, kind):
+            start, position = symbol["range"]["start"]["line"] + 1, symbol["selectionRange"]["start"]
+            while start > 1 and re.match(r"\s*(//|/\*|\*)", lines[start - 2]):
+                start -= 1
+            if name == "default" and (at := lines[position["line"]].find("default", position["character"])) >= 0:
+                position = {**position, "character": at}
+            found.append({"name": name, "kind": kind, "line": position["line"] + 1, "start": start,
+                          "end": symbol["range"]["end"]["line"] + 1, "position": position})
+
+        for symbol in self.call("textDocument/documentSymbol", {"textDocument": document}) or []:
+            if not (kind := TYPESCRIPT_KINDS.get(symbol["kind"])):
+                continue
+            if kind == "var":
+                where = symbol["selectionRange"]["start"]
+                declared = re.findall(r"\b(?:const|let|var)\b", lines[where["line"]][:where["character"]])
+                kind = "func" if function_like(symbol) else "const" if declared[-1:] == ["const"] else "var"
+            add(symbol, symbol["name"], kind)
+            # A class's members, which a type alias, of the same kind, does not have.
+            if symbol["kind"] == 5:
+                for member in symbol.get("children") or []:
+                    if member["kind"] == 6 or (member["kind"] == 7 and function_like(member)):
+                        add(member, f"{symbol['name']}.{member['name']}", "method")
+        return found
 
 
 class TypeScript:
-    """TypeScript's own tools for the JavaScript and TypeScript files of a review run, through lib/ts-callers.mjs, which
-    node runs with a checkout as the folder it starts in, the head's or the merge base's (sides), once for each
-    typescript package a request needs. A file's typescript package is the one its package installed: node_modules/
-    typescript in the folder of the nearest package.json above the file or in a folder above that, in the file's
-    checkout, or else in the head's, since the repo's setup script installs nothing at the merge base. TypeScript lists
-    a file's declarations (declarations, by side and path), and finds the callers of a changed declaration in the
-    project of the nearest tsconfig.json or jsconfig.json above its file (sites, by node ID, each as (path, line)). Like
-    gopls, it reads each file the review run changed or added in a checkout as it is in the commit. Each run ends by
-    stop, by monotonic, which ends TypeScript's share of the step's limit of seconds. fallback holds, for each reason in
-    words, the changed files whose declarations or callers TypeScript did not give, so that name search finds their
-    links."""
+    """TypeScript's own tools for the JavaScript and TypeScript files of a review run, in a checkout, the head's or the
+    merge base's (sides), with each typescript package a request needs. A file's typescript package is the one its
+    package installed: node_modules/typescript in the folder of the nearest package.json above the file or in a folder
+    above that, in the file's checkout, or else in the head's, since the repo's setup script installs nothing at the
+    merge base. A typescript package with lib/typescript.js, as TypeScript 5 and 6 have, answers through
+    lib/ts-callers.mjs, which node runs with the checkout as the folder it starts in, once for each request; TypeScript 7,
+    which has none, answers through its language server (TypeScriptServer), which starts the first time a checkout needs
+    it and answers until close. TypeScript lists a file's declarations (declarations, by side and path), and finds the
+    callers of a changed declaration in the project of the nearest tsconfig.json or jsconfig.json above its file (sites,
+    by node ID, each as (path, line)). Like gopls, it reads each file the review run changed or added in a checkout as it
+    is in the commit. Each run, and each language server, ends by stop, by monotonic, which ends TypeScript's share of the
+    step's limit of seconds. fallback holds, for each reason in words, the changed files whose declarations or callers
+    TypeScript did not give, so that name search finds their links."""
 
     def __init__(self, sides, checkouts, seconds, stop):
         self.sides, self.checkouts, self.seconds, self.stop = sides, checkouts, seconds, stop
         self.declarations, self.sites, self.fallback = {side: {} for side in sides}, {}, {}
         # By side, the committed text of each file the run changed there, or None for one it added; by typescript
-        # package, why its run failed, so the other checkout's files, which use the same package, skip it.
-        self.hidden, self.broken, self.node = {}, {}, shutil.which("node")
+        # package, why its run failed, so the other checkout's files, which use the same package, skip it; and by side
+        # and typescript package, the language server of a TypeScript 7.
+        self.hidden, self.broken, self.servers, self.node = {}, {}, {}, shutil.which("node")
 
     def fall_back(self, why, paths):
         """Notes that name search finds the links of paths, changed files, since why, in which {them} and {their} stand
@@ -1260,8 +1385,6 @@ class TypeScript:
 
     def module(self, side, path):
         """The typescript package TypeScript loads for path, a file on side, and None, or None and why there is none."""
-        if not self.node:
-            return None, "the node command, which TypeScript needs, is not on PATH"
         tree, folder = self.sides[side][0], posixpath.dirname(path)
         while not (tree / folder / "package.json").is_file():
             if not folder:
@@ -1288,11 +1411,16 @@ class TypeScript:
     def run(self, side, module, files=(), projects=None):
         """What lib/ts-callers.mjs answers in the checkout of side with module, a typescript package, for files, whose
         declarations it lists, and projects, the declarations whose callers it finds by the path of their project's
-        config: each answer as the dict it printed, and why the run ended before it answered all, in words, or None."""
+        config: each answer as the dict it printed, and why the run ended before it answered all, in words, or None. A
+        typescript package without lib/typescript.js answers through its language server instead (ask)."""
         if module in self.broken:
             return [], self.broken[module]
         if (left := self.stop - monotonic()) <= 0:
             return [], self.out_of_time()
+        if not (module / "lib" / "typescript.js").is_file():
+            return self.ask(side, module, files, projects or {})
+        if not self.node:
+            return [], "the node command, which TypeScript needs, is not on PATH"
         tree, commit = self.sides[side]
         if side not in self.hidden:
             self.hidden[side] = {path: committed(tree, commit, path) for path in edited_files(tree, TYPESCRIPT_FILES)}
@@ -1311,6 +1439,51 @@ class TypeScript:
         why = why or (f"node was stopped by signal {-code}" if code < 0 else f"node exited with code {code}")
         self.broken[module] = f"TypeScript failed in {self.checkouts[side]} ({why})"
         return answers, self.broken[module]
+
+    def ask(self, side, module, files, projects):
+        """What TypeScript 7's language server answers in the checkout of side, as run gives lib/ts-callers.mjs's answers.
+        The server, the tsc of TYPESCRIPT_SERVER_PACKAGE, which node would find in node_modules of module's real folder or
+        of a folder above it, starts the first time the checkout needs it, and stops at the end of TypeScript's share of
+        the step's limit, or when it fails."""
+        real = Path(os.path.realpath(module))
+        places = (above / "node_modules" / TYPESCRIPT_SERVER_PACKAGE / "lib" / "tsc" for above in (real, *real.parents))
+        if not (program := next((place for place in places if place.is_file()), None)):
+            self.broken[module] = (f"Whooper found no {TYPESCRIPT_SERVER_PACKAGE}, the package of TypeScript 7's language"
+                                   " server, beside {their} TypeScript")
+            return [], self.broken[module]
+        answers = []
+        try:
+            if (side, module) not in self.servers:
+                self.servers[side, module] = TypeScriptServer(program, *self.sides[side], self.stop - monotonic())
+            server = self.servers[side, module]
+            for path in files:
+                answers.append({"file": path, "declarations": server.symbols(path)})
+            for queries in projects.values():
+                for query in queries:
+                    symbol = next(found for found in server.symbols(query["path"]) if found["name"] == query["name"])
+                    try:
+                        sites = server.sites(query["path"], symbol)
+                    except LanguageServerError as e:
+                        answers.append({"id": query["id"], "error": str(e)})
+                        continue
+                    # As lib/ts-callers.mjs does, the declarations of each file with a site come before the sites.
+                    answers += [{"file": path, "declarations": server.symbols(path)}
+                                for path in dict.fromkeys(path for path, _ in sites)]
+                    answers.append({"id": query["id"], "sites": sites})
+        except (OSError, ValueError, LanguageServerError) as e:
+            if server := self.servers.pop((side, module), None):
+                server.close()
+            if isinstance(e, TimeoutError):
+                return answers, self.out_of_time()
+            self.broken[module] = f"TypeScript failed in {self.checkouts[side]} ({e})"
+            return answers, self.broken[module]
+        return answers, None
+
+    def close(self):
+        """Stops each language server ask started."""
+        for server in self.servers.values():
+            server.close()
+        self.servers.clear()
 
     def out_of_time(self):
         return (f"TypeScript's {limit_text(self.seconds * TYPESCRIPT_SHARE)} share of the step's"
@@ -1382,8 +1555,8 @@ def connections(run, seconds=CONNECTIONS_SECONDS):
     diff.patch changes connects, for whooper-show. The nodes are the declarations the diff adds, changes, or
     removes, each found in the head, or a removed one at the merge base, and the code that calls or uses
     them, one level up, found on the same side. Go files ask gopls (Gopls), on PATH or where go install puts
-    it, and JavaScript and TypeScript files the TypeScript their package installed (TypeScript), within
-    TYPESCRIPT_SHARE of seconds. Every other file, and a file whose tool is missing or cannot answer, gets
+    it, and JavaScript and TypeScript files the TypeScript their package installed (TypeScript), through
+    lib/ts-callers.mjs or TypeScript 7's language server, within TYPESCRIPT_SHARE of seconds. Every other file, and a file whose tool is missing or cannot answer, gets
     name search: the definitions LANGUAGES' patterns find, and git grep's whole-word matches of a name. A
     changed line counts toward the innermost declaration around it, such as a method rather than its class.
     Each link says which found it, and limits says in plain words what the graph can miss. It keeps at most
@@ -1403,7 +1576,7 @@ def connections(run, seconds=CONNECTIONS_SECONDS):
             sessions[side] = None
             try:
                 sessions[side] = Gopls(program, *sides[side])
-            except (OSError, ValueError, GoplsError) as e:
+            except (OSError, ValueError, LanguageServerError) as e:
                 problems.append(f"gopls did not start in {checkouts[side]}: {e}, so its Go links come from name search.")
         return sessions.get(side)
 
@@ -1425,7 +1598,7 @@ def connections(run, seconds=CONNECTIONS_SECONDS):
                 try:
                     cache[side, path] = gopls.symbols(path)
                     return cache[side, path]
-                except GoplsError as e:
+                except LanguageServerError as e:
                     problems.append(f"gopls could not list the declarations of {path}: {e}.")
                 except (OSError, ValueError) as e:
                     gopls_failed(side, e)
@@ -1482,7 +1655,7 @@ def connections(run, seconds=CONNECTIONS_SECONDS):
             if node["language"] == "go" and "position" in node["symbol"] and (gopls := session(side)):
                 try:
                     sites, found_by = gopls.sites(node["path"], node["symbol"]), "gopls"
-                except GoplsError as e:
+                except LanguageServerError as e:
                     problems.append(f"gopls could not answer for {node['name']}: {e}, so its callers come from name"
                                     " search.")
                 except (OSError, ValueError) as e:
@@ -1520,6 +1693,7 @@ def connections(run, seconds=CONNECTIONS_SECONDS):
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous)
+        typescript.close()
         for gopls in sessions.values():
             if gopls:
                 reported.extend(gopls.errors)
