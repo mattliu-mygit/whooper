@@ -18,13 +18,15 @@
 //   error {reply_to?, message} The action failed or was refused, with its message, such as
 //                              whooper-draft's refusal, or the user cancelled the confirmation.
 //   open {route}               The user opened an item or blocker of whooper-status's status format 2,
-//                              from a row or Command-J: /reviews/<run-id> or /causes/<cause-id>.
+//                              from a row or Command-J: /reviews/<run-id> or /causes/<cause-id>, or
+//                              Whooper's name, which opens the home route /.
 //   changed {files}            Files changed in Whooper's state folder, relative to it, such as
 //                              runs/<run-id>/drafts.json, or null when more changed than one event
 //                              lists. The page reads again with call.
 //
 // The actions the page calls, each with the arguments it adds:
-//   status                     bin/whooper-status --json: the reviews, for the open review's header
+//   status                     bin/whooper-status --json: the reviews, for the home and the open
+//                              review's header
 //   show-review <run-id>       bin/whooper-show --json <run-id>: the review the page shows
 //   draft <run-id> [<op> [<finding>] [<text>]]
 //                              bin/whooper-draft: changes the drafts and prints them
@@ -94,6 +96,32 @@ export interface WhooperStatus {
     selected: number;
     reason: string | null;
   }[];
+  // Prompting Time's status format 2 (schemas/prompting-time-status.json), beside format 1.
+  format: 2;
+  /** Whooper's row in Prompting Time, such as "Running · next poll 3:45 PM". */
+  agent: { words: string; dot: Dot };
+  /** Each cause that stops every review. */
+  blockers: { id: string; title: string; dot: Dot; route: string; action?: string }[];
+  /** The newest review of each PR the user did not remove, at most 50, current before finished. */
+  items: StatusItem[];
+  truncated: boolean;
+}
+
+/** A dot of status format 2: error red, attention orange, success green, running uncolored, idle none. */
+export type Dot = "error" | "attention" | "success" | "running" | "idle";
+
+/** One review in status format 2, in one of the groups prompting-time-plugin.json declares. */
+export interface StatusItem {
+  id: string;
+  group: string;
+  title: string;
+  detail?: string | null;
+  dot: Dot;
+  project?: string | null;
+  updated_at: string;
+  /** /reviews/<run-id> */
+  route: string;
+  actions?: string[];
 }
 
 /** One review in the reviews of `bin/whooper-status --json`. */

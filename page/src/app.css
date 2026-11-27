@@ -421,3 +421,32 @@ ul {
 .w-cause-review:hover {
   background: var(--s-surface-elevated);
 }
+
+/* Home */
+.w-home-agent,
+.w-home-blocker {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-4);
+}
+
+.w-home-agent {
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+}
+
+.w-home-group {
+  display: grid;
+  gap: var(--s-space-4);
+}
+
+.w-home-group h2,
+.w-home-group summary {
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+  font-weight: var(--s-weight-medium);
+}
+
+.w-home-group summary {
+  cursor: pointer;
+}

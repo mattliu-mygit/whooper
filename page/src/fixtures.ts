@@ -327,5 +327,27 @@ export function status(): WhooperStatus {
     rounds: [
       { started_at: "2031-07-27T15:15:01-07:00", ended_at: "2031-07-27T15:22:40-07:00", result: "done", selected: 2, reason: null },
     ],
+    // The same reviews in status format 2, as lib/whooper.py's status_v2 lists them.
+    format: 2,
+    agent: { words: "Can't review · Docker isn't running", dot: "error" },
+    blockers: [{ id: "docker_unavailable", title: "Docker isn't running", dot: "error", route: "/causes/docker_unavailable", action: "round" }],
+    items: [
+      { id: "20310727T014000Z-120", group: "reviewing", title: "feat(api): page the orders list",
+        detail: "widgets#120 · @casey · reviewing since Jul 26", dot: "running", project: null,
+        updated_at: "2031-07-26T18:40:00-07:00", route: "/reviews/20310727T014000Z-120", actions: ["skip"] },
+      { id: "20310727T011502Z-107", group: "look", title: "fix(store): make writers honor version constraints",
+        detail: "widgets#107 · @jordan · 2 findings", dot: "attention", project: null,
+        updated_at: "2031-07-26T18:31:27-07:00", route: "/reviews/20310727T011502Z-107", actions: ["retry", "skip", "remove"] },
+      { id: "20310727T013000Z-115", group: "waiting", title: "example-org/widgets#115",
+        detail: "widgets#115 · waiting · Docker isn't running", dot: "idle", project: null,
+        updated_at: "2031-07-26T18:30:00-07:00", route: "/reviews/20310727T013000Z-115", actions: ["retry", "skip", "remove"] },
+      { id: "20310727T010246Z-101", group: "ready", title: "refactor(cache): separate the cache configuration",
+        detail: "widgets#101 · @alex · 2 findings", dot: "success", project: null,
+        updated_at: "2031-07-26T18:14:58-07:00", route: "/reviews/20310727T010246Z-101", actions: ["retry", "skip", "remove"] },
+      { id: "20310727T005510Z-109", group: "failed", title: "keep only shared types in domain",
+        detail: "gadgets#109 · @riley · The review agent left no usable findings", dot: "error", project: null,
+        updated_at: "2031-07-26T18:02:31-07:00", route: "/reviews/20310727T005510Z-109", actions: ["retry", "skip", "remove"] },
+    ],
+    truncated: false,
   };
 }

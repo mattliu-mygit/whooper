@@ -3,8 +3,8 @@ import { reviewRecords } from "../src/fixtures";
 
 // Shows the page as Prompting Time will: in an iframe sandboxed to scripts only, so the page has an
 // opaque origin and talks to this window through postMessage alone, here with the fake host. As in
-// Prompting Time, a route opens at once: ?route=/reviews/<run id> or ?route=/causes/<cause id> names
-// it, ?review=<run id> is short for the first, and without either the first of the fake host's
+// Prompting Time, a route opens at once: ?route=/, ?route=/reviews/<run id>, or ?route=/causes/<cause id>
+// names it, ?review=<run id> is short for the first, and without either the first of the fake host's
 // reviews opens.
 const frame = document.createElement("iframe");
 frame.title = "Whooper";

@@ -91,6 +91,9 @@ export function createFakeHost(send: (message: HostMessage) => void, options: Fa
       if (submitted.has(review.run_id)) review.submitted = { event: draftsOf(review.run_id).event, at: "2031-07-27T15:40:00-07:00" };
       if (review.skipped_by_user || review.removed_by_user || review.submitted) review.needs_you = false;
     }
+    // In status format 2, a removed review leaves the items, and a skipped or submitted one is done.
+    base.items = base.items.filter((item) => !removed.has(item.id));
+    for (const item of base.items) if (skipped.has(item.id) || submitted.has(item.id)) item.group = "done";
     return base;
   }
 

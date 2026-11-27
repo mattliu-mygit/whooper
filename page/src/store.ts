@@ -32,11 +32,13 @@ export function parentLink(): HostLink {
   };
 }
 
-/** What a route shows: one review, or one cause that stops every review. */
-export type Place = { kind: "review"; runId: string } | { kind: "cause"; cause: string } | null;
+/** What a route shows: Whooper's home, one review, or one cause that stops every review. */
+export type Place = { kind: "home" } | { kind: "review"; runId: string } | { kind: "cause"; cause: string } | null;
 
-/** The place a route of whooper-status's items and blockers names, or null for any other route. */
+/** The place a route names: / for the home Prompting Time opens from Whooper's name, and the routes of
+ * whooper-status's items and blockers; null for any other route. */
 export function placeOf(route: string | null): Place {
+  if (route === "/") return { kind: "home" };
   const match = route ? /^\/(reviews|causes)\/([^/]+)$/.exec(route) : null;
   if (!match) return null;
   const id = decodeURIComponent(match[2]);

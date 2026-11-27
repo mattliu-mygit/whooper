@@ -1,14 +1,16 @@
 import { Match, Show, Switch } from "solid-js";
 import { CauseScreen, FailedReview, RunningReview } from "./FailedReview";
+import { Home } from "./Home";
 import { ReviewScreen } from "./Review";
 import { ReviewHeader } from "./ReviewHeader";
 import type { PageStore } from "./store";
 
 /**
- * The route Prompting Time opened, and nothing until it opens one: Prompting Time lists Whooper's
- * reviews and blockers from whooper-status, so the page has no list of its own. A review shows its
- * header, then its diff when it finished with findings, or the screen for a review that runs, waits,
- * or failed; a cause that stops every review shows the reviews it holds back. Each review stays
+ * The route Prompting Time opened, and nothing until it opens one: Whooper's home at /, which
+ * Prompting Time opens from Whooper's name, a review, or a cause that stops every review. Home lists
+ * the reviews and causes whooper-status lists. A review shows its header, then its diff when it
+ * finished with findings, or the screen for a review that runs, waits, or failed; a cause that stops
+ * every review shows the reviews it holds back. Each review stays
  * mounted while its run stays the same, so a new read of the same run updates it in place.
  */
 export function App(props: { store: PageStore }) {
@@ -23,6 +25,11 @@ export function App(props: { store: PageStore }) {
   };
   return (
     <Switch>
+      <Match when={store.place()?.kind === "home"}>
+        <div class="w-page-body">
+          <Home store={store} />
+        </div>
+      </Match>
       <Match when={review()} keyed>
         {(runId: string) => (
           <div class="w-page">

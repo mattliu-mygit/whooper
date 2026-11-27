@@ -434,29 +434,32 @@ checkout.
 
 ### Whooper's page
 
-`page/` is the page Prompting Time shows for one of Whooper's reviews or blockers: a review's header,
-with its versions, Skip, which also stops a review that runs, and Undo, Remove and Restore, Rerun
-review, and a banner for new commits since the review; then the review's diff with Whooper's findings as draft comments under their lines,
-Include in review, Edit, Ask about this, Discard, and one bar that submits the review. When
-whooper-submit refuses the submit because the run is not safe to approve (exit 11) or the review
-@-mentions someone (exit 12), the bar offers Approve anyway or Send with the mentions, which submit
-again with `--approve-anyway` or `--allow-mentions`, and Prompting Time confirms that submit too.
-Prompting Time tells the page only that nothing ran, so the page finds which refusal it was from the
-drafts, by whooper-submit's rules. Only such a press sends a mention: whooper-post, which Whooper runs
-on its own, still holds back each comment that @-mentions someone. A review that
-runs, waits, or failed shows why instead, with whooper-review's reason, the answers to earlier
-questions, and Ask why, and a cause that stops every review lists the reviews it holds back, with
-Poll now. It is a Solid 2.0 app built on Prompting Time's shared UI library, `@prompting-time/ui`.
-Prompting Time shows it in an iframe sandboxed to scripts only, so the page reaches nothing but its
-host, through page protocol 2 in `page/src/protocol.ts`: it says `ready`, Prompting Time sends `open`
-with the route of the item or blocker the user opened, `/reviews/<run-id>` or `/causes/<cause-id>`
-([See reviews](#see-reviews)), and the page reads and changes everything with `call`s of the
-manifest's actions, such as `status`, `show-review`, `draft`, `ask`, `skip`, `retry`, and `submit`,
-which Prompting Time confirms before `whooper-submit` posts. When files in the state folder change,
+`page/` is the page Prompting Time shows for Whooper and for one of its reviews or blockers. Its
+home, which Prompting Time opens at `/` when you click Whooper's name, shows Whooper's agent row,
+such as `Paused` or `Running · next poll 3:45 PM`, each cause that stops every review, and the
+reviews in the groups status format 2 puts them in, those that need you first and Done folded, each
+opening its review. A review shows its header, with its versions, Skip, which also stops a review
+that runs, and Undo, Remove and Restore, Rerun review, and a banner for new commits since the
+review; then the review's diff with Whooper's findings as draft comments under their lines, Include
+in review, Edit, Ask about this, Discard, and one bar that submits the review. When whooper-submit
+refuses the submit because the run is not safe to approve (exit 11) or the review @-mentions someone
+(exit 12), the bar offers Approve anyway or Send with the mentions, which submit again with
+`--approve-anyway` or `--allow-mentions`, and Prompting Time confirms that submit too. Prompting
+Time tells the page only that nothing ran, so the page finds which refusal it was from the drafts,
+by whooper-submit's rules. Only such a press sends a mention: whooper-post, which Whooper runs on
+its own, still holds back each comment that @-mentions someone. A review that runs, waits, or failed
+shows why instead, with whooper-review's reason, the answers to earlier questions, and Ask why, and
+a cause that stops every review lists the reviews it holds back, with Poll now. It is a Solid 2.0
+app built on Prompting Time's shared UI library, `@prompting-time/ui`. Prompting Time shows it in an
+iframe sandboxed to scripts only, so the page reaches nothing but its host, through page protocol 2
+in `page/src/protocol.ts`: it says `ready`, Prompting Time sends `open` with the route the user
+opened, `/`, or the route of an item or blocker, `/reviews/<run-id>` or `/causes/<cause-id>` ([See
+reviews](#see-reviews)), and the page reads and changes everything with `call`s of the manifest's
+actions, such as `status`, `show-review`, `draft`, `ask`, `skip`, `retry`, and `submit`, which
+Prompting Time confirms before `whooper-submit` posts. When files in the state folder change,
 Prompting Time sends `changed` with their paths, and the page reads the status again, and the open
-review when one of its run's files changed: only its drafts when `drafts.json` alone did, which keeps
-the diff as it is. The page has no list of its own, since Prompting Time lists what whooper-status
-lists.
+review when one of its run's files changed: only its drafts when `drafts.json` alone did, which
+keeps the diff as it is.
 
 The page needs Node 22.12 or later. In `page/`:
 
