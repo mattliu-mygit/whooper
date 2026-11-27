@@ -437,7 +437,13 @@ checkout.
 `page/` is the page Prompting Time shows for one of Whooper's reviews or blockers: a review's header,
 with its versions, Skip, which also stops a review that runs, and Undo, Remove and Restore, Rerun
 review, and a banner for new commits since the review; then the review's diff with Whooper's findings as draft comments under their lines,
-Include in review, Edit, Ask about this, Discard, and one bar that submits the review. A review that
+Include in review, Edit, Ask about this, Discard, and one bar that submits the review. When
+whooper-submit refuses the submit because the run is not safe to approve (exit 11) or the review
+@-mentions someone (exit 12), the bar offers Approve anyway or Send with the mentions, which submit
+again with `--approve-anyway` or `--allow-mentions`, and Prompting Time confirms that submit too.
+Prompting Time tells the page only that nothing ran, so the page finds which refusal it was from the
+drafts, by whooper-submit's rules. Only such a press sends a mention: whooper-post, which Whooper runs
+on its own, still holds back each comment that @-mentions someone. A review that
 runs, waits, or failed shows why instead, with whooper-review's reason, the answers to earlier
 questions, and Ask why, and a cause that stops every review lists the reviews it holds back, with
 Poll now. It is a Solid 2.0 app built on Prompting Time's shared UI library, `@prompting-time/ui`.

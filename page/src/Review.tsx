@@ -4,7 +4,7 @@ import { DraftThread } from "./DraftThread";
 import { readPatch, showsLine, type PatchFile } from "./patch";
 import type { Finding, Review } from "./protocol";
 import type { PageStore } from "./store";
-import { verdictText } from "./text";
+import { MENTION, verdictText } from "./text";
 
 /**
  * A review run as the agreed mock draws it: the PR's diff, one file at a time, with Whooper's
@@ -173,6 +173,25 @@ function SubmitBar(props: { store: PageStore }) {
   const [error, setError] = createSignal("");
   const locked = () => store.locked();
   const nothing = () => comments() === 0 && event() === "COMMENT";
+  // The flags the user added by pressing Approve anyway or Send with the mentions, which the next of
+  // those buttons keeps, and whether the last submit came back refused or cancelled.
+  const [flags, setFlags] = createSignal<string[]>([]);
+  const [refused, setRefused] = createSignal(false);
+  const mentions = () =>
+    MENTION.test(drafts().message) ||
+    store.state.review!.findings.findings.some((f) => drafts().findings[f.id]?.included && MENTION.test(drafts().findings[f.id].text ?? f.draft));
+  // What lets the refused submit through. Prompting Time shows whooper-submit's refusal in its
+  // confirmation and tells the page only that nothing ran, so the page finds the reason in the drafts
+  // by whooper-submit's rules, in its order: an approval of a run that is not safe to approve (exit
+  // 11), then an @-mention (exit 12). Whatever Whooper posts on its own still never @-mentions anyone.
+  const override = () => {
+    if (!refused() || locked()) return null;
+    if (event() === "APPROVE" && !store.state.shown?.safe_to_approve && !flags().includes("--approve-anyway"))
+      return { flag: "--approve-anyway", label: "Approve anyway", why: "Whooper says the run is not safe to approve." };
+    if (mentions() && !flags().includes("--allow-mentions"))
+      return { flag: "--allow-mentions", label: "Send with the mentions", why: "The review @-mentions someone, and sending it notifies them." };
+    return null;
+  };
 
   async function run(work: () => Promise<unknown>) {
     setBusy(true);
@@ -192,8 +211,15 @@ function SubmitBar(props: { store: PageStore }) {
     setPendingEvent(null);
   }
 
-  // Prompting Time confirms first; a cancelled confirmation comes back as the host's error.
-  const submit = () => run(() => store.submit());
+  // Prompting Time confirms first; a cancelled or refused confirmation comes back as the host's error.
+  // Submit review sends no flags; each override button adds its flag to those the user added before.
+  async function submit(flag?: string) {
+    const next = flag ? [...flags(), flag] : [];
+    setFlags(next);
+    setRefused(false);
+    await run(() => store.submit(next));
+    setRefused(error() !== "");
+  }
 
   // What posts when the message stays empty (whooper-submit): an approval with comments says
   // "Pre-approving to unblock".
@@ -227,9 +253,19 @@ function SubmitBar(props: { store: PageStore }) {
           if (text !== drafts().message) void run(() => store.changeDraft({ op: "message", text }));
         }}
       />
-      <Button variant="primary" disabled={busy() || locked() || nothing()} onClick={submit}>
+      <Button variant="primary" disabled={busy() || locked() || nothing()} onClick={() => submit()}>
         {busy() ? "Submitting…" : "Submit review"}
       </Button>
+      <Show when={override()}>
+        {(next) => (
+          <>
+            <span class="w-hint">{next().why}</span>
+            <Button disabled={busy()} onClick={() => submit(next().flag)}>
+              {next().label}
+            </Button>
+          </>
+        )}
+      </Show>
       <Show when={store.state.submitted}>{(text) => <p class="w-hint w-submit-line">Submitted. Whooper says: {text()}</p>}</Show>
       <Show when={error()}>
         <p class="w-error w-submit-line" role="alert">

@@ -1,17 +1,20 @@
 import * as fixtures from "./fixtures";
+import { MENTION } from "./text";
 import { PROTOCOL_VERSION, readPageMessage, type Drafts, type FindingsResult, type HostMessage, type HostUpdate, type PageMessage, type Shown } from "./protocol";
 
 // A stand-in for Prompting Time, for development (dev/index.html) and the page's tests. It runs the
 // page's calls of the manifest's actions on the invented reviews in fixtures.ts the way Whooper's
 // commands would: drafts change by whooper-draft's rules and refusals, a submit builds
-// whooper-submit's request and asks confirmSubmit first, an ask answers at once, and skip, remove,
+// whooper-submit's request and asks confirmSubmit first, or is refused as whooper-submit refuses an
+// unsafe approval or an @-mention, an ask answers at once, and skip, remove,
 // and retry change what status and show-review print, after which it says which files changed. It
 // refuses an action the manifest does not declare, as Prompting Time does. It reaches no Whooper,
 // GitHub, or model.
 
 export interface FakeHostOptions {
   /** Prompting Time's confirmation: gets the text it would show for the request whooper-submit
-   * --print wrote, and returns whether the user confirmed. Without it every submit is cancelled. */
+   * --print wrote, and returns whether the user confirmed. Without it every submit is cancelled. A
+   * request whooper-submit --print refuses never reaches it. */
   confirmSubmit?: (text: string) => boolean | Promise<boolean>;
   /** The route the host opens once the page is ready, as when the user opened a row in Prompting Time. */
   openOnReady?: string;
@@ -55,6 +58,8 @@ export function createFakeHost(send: (message: HostMessage) => void, options: Fa
   const submitted = new Map<string, string>();
   const skipped = new Set<string>();
   const removed = new Set<string>();
+  /** The exit code of each submit whooper-submit --print refused, in order. */
+  const refusals: number[] = [];
   /** Every message the page sent that fits the protocol, in order. */
   const received: PageMessage[] = [];
 
@@ -139,8 +144,10 @@ export function createFakeHost(send: (message: HostMessage) => void, options: Fa
     return structuredClone(current);
   }
 
-  /** whooper-submit --print's request, and the text Prompting Time's confirmation would show for it. */
-  function submitRequest(runId: string): string {
+  /** whooper-submit --print's request, and the text Prompting Time's confirmation would show for it,
+   * or its refusal of an approval of a run that is not safe to approve (exit 11) or of an @-mention
+   * (exit 12) without the flag that allows it, which it checks in that order. */
+  function submitRequest(runId: string, flags: string[]): { text: string } | { refused: 11 | 12 } {
     if (submitted.has(runId)) throw new Error(`whooper-submit: ${runId} was already submitted; see its submit.json`);
     const { repo, pr } = record(runId, "whooper-submit");
     const findings = findingsOf(runId, "whooper-submit");
@@ -158,13 +165,11 @@ export function createFakeHost(send: (message: HostMessage) => void, options: Fa
       );
     const message =
       choices.event === "APPROVE" && !choices.message.trim() ? (comments.length > 0 ? PRE_APPROVAL : "") : choices.message;
+    if (choices.event === "APPROVE" && concerns(findings).length > 0 && !flags.includes("--approve-anyway")) return { refused: 11 };
+    if ([message, ...comments.map((c) => c.body)].some((text) => MENTION.test(text)) && !flags.includes("--allow-mentions"))
+      return { refused: 12 };
     const request = { commit_id: "0123456789abcdef0123456789abcdef01234567", event: choices.event, body: message, comments };
-    const unsafe = choices.event === "APPROVE" ? concerns(findings) : [];
-    return [
-      `Submit this review to ${repo}#${pr}?`,
-      ...(unsafe.length > 0 ? ["Whooper says the run is not safe to approve:", ...unsafe.map((c) => `  ${c}`)] : []),
-      JSON.stringify(request, null, 2),
-    ].join("\n");
+    return { text: [`Submit this review to ${repo}#${pr}?`, JSON.stringify(request, null, 2)].join("\n") };
   }
 
   /** Marks or unmarks a run as whooper-skip and whooper-remove do, and prints what it did. */
@@ -203,8 +208,12 @@ export function createFakeHost(send: (message: HostMessage) => void, options: Fa
       case "submit": {
         if (args.some((arg) => arg.startsWith("--print") || arg.startsWith("--expect")))
           throw new Error("submit asks to confirm first, so Prompting Time adds --print and --expect itself.");
-        const text = submitRequest(runId);
-        if (!(await options.confirmSubmit?.(text))) throw new Error("Nothing ran: the confirmation was cancelled.");
+        const preview = submitRequest(runId, rest);
+        // Prompting Time shows a refusal in its confirmation, which the user can only close, and tells
+        // the page what it tells it for a cancel.
+        if ("refused" in preview) refusals.push(preview.refused);
+        if ("refused" in preview || !(await options.confirmSubmit?.(preview.text)))
+          throw new Error("Nothing ran: the confirmation was cancelled.");
         const { repo, pr } = record(runId);
         const printed = `posted the review: https://github.com/${repo}/pull/${pr}#pullrequestreview-1`;
         submitted.set(runId, printed);
@@ -237,6 +246,7 @@ export function createFakeHost(send: (message: HostMessage) => void, options: Fa
 
   return {
     received,
+    refusals,
     /** The calls of action the page made, each with its arguments. */
     calls: (action: string) => received.flatMap((m) => (m.type === "call" && m.action === action ? [m.args] : [])),
     /** Takes one message from the page. One that does not fit the protocol is dropped, as Prompting Time drops it. */

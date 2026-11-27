@@ -280,10 +280,11 @@ export function createPageStore(link: HostLink) {
       setDrafts(id, drafts);
       return drafts;
     },
-    /** Asks Prompting Time to run whooper-submit, which it does only after the user confirms. */
-    submit: async () => {
+    /** Asks Prompting Time to run whooper-submit, which it does only after the user confirms, with
+     * flags such as --approve-anyway that the user chose after a refusal. */
+    submit: async (flags: string[] = []) => {
       const id = runId();
-      const printed = String(await call("submit", [id])).trim();
+      const printed = String(await call("submit", [id, ...flags])).trim();
       setState((s) => {
         if (openRun() === id) s.submitted = printed;
       });

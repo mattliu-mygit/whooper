@@ -115,6 +115,47 @@ describe("Whooper's page with the fake host", () => {
     expect(within(await thread("config_test.go:18")).getByRole("checkbox", { name: "Include in review" })).toBeDisabled();
   }, 30_000);
 
+  it("sends the @-mentions whooper-submit refused once the user presses Send with the mentions", async () => {
+    const confirmSubmit = vi.fn().mockResolvedValue(true);
+    const host = renderWithFakeHost({ ...OPEN, confirmSubmit });
+    const nit = await thread("config_test.go:18");
+    fireEvent.click(within(nit).getByRole("button", { name: "Edit" }));
+    fireEvent.input(within(nit).getByRole("textbox", { name: "Comment" }), { target: { value: "**nit:** @sam owns this test." } });
+    fireEvent.click(within(nit).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(within(nit).queryByRole("textbox", { name: "Comment" })).not.toBeInTheDocument());
+    const bar = screen.getByRole("region", { name: "Submit review" });
+    // Nothing shows until a submit comes back refused.
+    expect(within(bar).queryByRole("button", { name: "Send with the mentions" })).not.toBeInTheDocument();
+
+    fireEvent.click(within(bar).getByRole("button", { name: "Submit review" }));
+    fireEvent.click(await within(bar).findByRole("button", { name: "Send with the mentions" }));
+    expect(await within(bar).findByText(/posted the review/)).toBeInTheDocument();
+    expect(host.refusals).toEqual([12]);
+    expect(host.calls("submit")).toEqual([[RUN], [RUN, "--allow-mentions"]]);
+    expect(confirmSubmit).toHaveBeenCalledTimes(1);
+    expect(within(bar).queryByRole("button", { name: "Send with the mentions" })).not.toBeInTheDocument();
+  }, 30_000);
+
+  it("approves anyway, then sends the mentions, each after its own refusal", async () => {
+    const newest = "20310727T011502Z-107";
+    const host = renderWithFakeHost({ openOnReady: `/reviews/${newest}`, confirmSubmit: () => true });
+    const bar = await screen.findByRole("region", { name: "Submit review" }, SLOW);
+    // The run has a question, so it is not safe to approve, and its drafts start as a comment.
+    fireEvent.click(within(bar).getByRole("radio", { name: "Approve" }));
+    await waitFor(() => expect(within(bar).getByRole("radio", { name: "Approve" })).toBeChecked());
+    const message = within(bar).getByRole("textbox", { name: "Review message" });
+    fireEvent.input(message, { target: { value: "Thanks @jordan" } });
+    fireEvent.change(message, { target: { value: "Thanks @jordan" } });
+    await waitFor(() => expect(changes(host)).toContainEqual([newest, "message", "Thanks @jordan"]));
+
+    fireEvent.click(within(bar).getByRole("button", { name: "Submit review" }));
+    fireEvent.click(await within(bar).findByRole("button", { name: "Approve anyway" }));
+    fireEvent.click(await within(bar).findByRole("button", { name: "Send with the mentions" }));
+    expect(await within(bar).findByText(/posted the review/)).toBeInTheDocument();
+    expect(host.refusals).toEqual([11, 12]);
+    expect(host.calls("submit")).toEqual([[newest], [newest, "--approve-anyway"], [newest, "--approve-anyway", "--allow-mentions"]]);
+  }, 30_000);
+
   it("keeps a half-typed draft when the diff rebuilds", async () => {
     const host = renderWithFakeHost(OPEN);
     const first = await thread("config_test.go:18");

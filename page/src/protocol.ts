@@ -30,7 +30,8 @@
 //                              bin/whooper-draft: changes the drafts and prints them
 //   ask <run-id> <question> [--finding <id>]
 //                              bin/whooper-ask: prints the answer
-//   submit <run-id>            bin/whooper-submit, after Prompting Time's confirmation
+//   submit <run-id> [--approve-anyway] [--allow-mentions]
+//                              bin/whooper-submit, after Prompting Time's confirmation
 //   skip <run-id> [--undo], remove <run-id> [--undo], retry <run-id>
 //                              bin/whooper-skip, bin/whooper-remove, bin/whooper-retry
 //   round                      bin/whooper-round: reviews the waiting PRs again now
