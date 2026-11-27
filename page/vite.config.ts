@@ -10,13 +10,10 @@ export default defineConfig({
   plugins: [solid()],
   // Relative asset paths, so the built page works wherever Prompting Time serves page/dist from.
   base: "./",
-  // @prompting-time/ui ships TSX source, which only the Solid plugin compiles.
-  optimizeDeps: { exclude: ["@prompting-time/ui"] },
   server: { host: "localhost", port: 5175, strictPort: true, cors: sandboxed },
   preview: { host: "localhost", port: 5175, strictPort: true, cors: sandboxed },
   test: {
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
-    server: { deps: { inline: ["@prompting-time/ui"] } },
   },
 });

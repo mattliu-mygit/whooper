@@ -23,12 +23,12 @@ jobs:
         with:
           node-version: 24.12.0
 
-      # Until @prompting-time/ui's first npm release, the page installs it from a Prompting Time
-      # checkout, which this runner does not have.
+      # Until Prompting Time attaches @prompting-time/ui's tarball to a release, the page installs it
+      # from a Prompting Time checkout, which this runner does not have.
       - name: Check that the page's packages come from npm
         run: |
           jq -e '[.dependencies[], .devDependencies[]] | all(startswith("file:") | not)' page/package.json > /dev/null || {
-            echo "page/package.json installs a local package; switch it to its npm release first"
+            echo "page/package.json installs a local package; switch it to its release URL first"
             exit 1
           }
 

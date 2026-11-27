@@ -476,11 +476,15 @@ npm run build   # page/dist, which the repo does not track
 The fake host runs the page's calls on invented reviews in `page/src/fixtures.ts` the way Whooper's
 commands would, and reaches no Whooper, GitHub, or model; `/dev/` opens the first of its reviews,
 `/dev/?review=<run id>` another, and `/dev/?route=/causes/docker_unavailable` a cause.
-Until `@prompting-time/ui`'s first npm release, the page installs it from a Prompting Time checkout
-beside this one, `../../repos/prompting-time-actions/packages/ui` from `page/`, which `npm ci`
-copies in; it then switches to a pinned npm version. The checkout must be on branch `solid-actions`,
-whose `Diff` draws one file of a parsed patch. Versions are exact and resolved as of `.npmrc`'s
-`before` date, at least a week before they were pinned, and no install script runs.
+The page installs `@prompting-time/ui` from its built tarball, `prompting-time-ui-0.1.0.tgz`, which
+Prompting Time's `scripts/pack-ui.sh` writes. Until Prompting Time attaches that tarball to a GitHub
+release, the page installs it from a Prompting Time checkout beside this one,
+`../../repos/prompting-time-uipkg/packages/ui/prompting-time-ui-0.1.0.tgz` from `page/`; it then
+switches to the release's URL. Either way `package-lock.json` pins the tarball's sha512, so `npm ci`
+refuses a different build. The tarball bundles everything but Solid, which the page supplies; the
+page also installs `@pierre/diffs`, at the tarball's version, only for the types of `Diff`'s props.
+Versions are exact and resolved as of `.npmrc`'s `before` date, at least a week before they were
+pinned, and no install script runs.
 
 ### Releases
 
@@ -489,8 +493,8 @@ The repo tracks no build output. Pushing a version tag, `v` and the manifest's v
 attaches it and its SHA-256 to the tag's GitHub release; Prompting Time installs that archive,
 pinned by the tag and the checksum. `scripts/build-release [<tag>]` builds the same archive locally:
 `release/whooper-<version>.tar.gz`, HEAD's files plus `page/dist`, and its `.sha256`. Until
-`@prompting-time/ui` is on npm, the workflow stops at its first check, since the runner has no
-Prompting Time checkout to install it from.
+the page installs `@prompting-time/ui` from a release URL, the workflow stops at its first check,
+since the runner has no Prompting Time checkout to install it from.
 
 ## What counts as work
 
