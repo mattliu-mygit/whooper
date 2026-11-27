@@ -11,8 +11,8 @@
 //                                       findings.json, diff.patch, and the drafts
 //                                       `bin/whooper-draft <run_id>` prints, and from
 //                                       `bin/whooper-show <run_id> --json`, the overview, the commits
-//                                       since the review, and the files that change with the PR's,
-//                                       which the host may leave out.
+//                                       since the review, the files that change with the PR's, and how
+//                                       the changed code connects, which the host may leave out.
 //   change-draft {run_id, change}       The host runs `bin/whooper-draft <run_id> <op> [<finding>] [<text>]`
 //                                       and answers with drafts, the JSON it prints.
 //   submit {run_id}                     The host runs `bin/whooper-submit <run_id> --print`, shows the
@@ -202,6 +202,28 @@ export interface CoChange {
   commits: number;
 }
 
+/** How the code a review's diff changes connects (connections.json): the declarations the diff adds,
+ * changes, or removes, the code that calls or uses them, one level up, and how each link was found. */
+export interface Connections {
+  nodes: {
+    /** <path>:<name>, which edges name. */
+    id: string;
+    /** As the language names it, such as Total, (*Cart).Total for a Go method, or Cart.total in Python. */
+    name: string;
+    kind: "func" | "method" | "type" | "var" | "const";
+    /** In the head, or for removed code at the merge base. */
+    path: string;
+    line: number;
+    /** unchanged for code the diff leaves alone, which calls or uses changed code. */
+    change: "added" | "changed" | "removed" | "unchanged";
+    lines_changed: number;
+  }[];
+  /** From the code that calls or uses a node to that node. */
+  edges: { from: string; to: string; kind: "calls" | "uses"; found_by: "gopls" | "name_search" }[];
+  /** What the graph can miss, in plain words, such as that it keeps at most 40 nodes. */
+  limits: string[];
+}
+
 export interface Review {
   run_id: string;
   /** <owner>/<repo> */
@@ -220,6 +242,8 @@ export interface Review {
   commits_since_review?: CommitSinceReview[] | null;
   /** At most 5, highest ratio first. */
   co_change?: CoChange[];
+  /** null when the review saved no connections.json. */
+  connections?: Connections | null;
 }
 
 /** One whooper-draft change: include <id>, leave-out <id>, text <id> <text>, approve, comment, or message <text>. */
