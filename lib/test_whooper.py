@@ -1523,15 +1523,16 @@ def without_go(env):
 
 
 @contextmanager
-def limit_once_the_test_runs(pid):
-    """Has each go test that a step waits for with a time limit, as run_go does, run out of time as soon as the test
-    binary has written its process ID to the file pid, however long go takes to build it, rather than when the
-    seconds pass: Popen.wait with a timeout waits for the file, or for go to end, and then times out at once. Yields,
-    for each such go test, the seconds the step gave it and when they ran out, by monotonic."""
+def limit_once_the_test_runs(pid, command=("go", "test")):
+    """Has each command that a step waits for with a time limit, as run_command does, whose program and first arguments
+    are command, go test unless given, run out of time as soon as the test it runs has written its process ID to the
+    file pid, however long the command takes to build or start it, rather than when the seconds pass: Popen.wait with a
+    timeout waits for the file, or for the command to end, and then times out at once. Yields, for each such command, the
+    seconds the step gave it and when they ran out, by monotonic."""
     wait, waits = subprocess.Popen.wait, []
 
     def wait_for_the_test(process, timeout=None):
-        if timeout is not None and process.args[:2] == ["go", "test"]:
+        if timeout is not None and [Path(process.args[0]).name, *process.args[1:len(command)]] == list(command):
             while process.poll() is None and not (pid.exists() and pid.read_text()):
                 sleep(0.01)
             waits.append((timeout, monotonic()))
@@ -1756,7 +1757,8 @@ GAPS_PR = {
 }
 LEFT_OUT = ("The build on this Mac leaves out 2 changed Go files, so Whooper did not measure them: calc/calc_windows.go,"
             " win/win_windows.go.")
-OTHER_LANGUAGE = "Whooper measures only Go code so far, so it left out 1 changed file in another language: tools/report.py."
+OTHER_LANGUAGE = ("Whooper measures only Go, JavaScript, and TypeScript code so far, so it left out 1 changed file in"
+                  " another language: tools/report.py.")
 
 
 def gaps_tests(allowed):
@@ -1853,6 +1855,188 @@ class TestGapsTest(RunDirTest):
                 "calc/more_test.go": GAPS_PR["calc/more_test.go"],
                 "calc/calc.go": GAPS["calc/calc.go"].replace("// Clamp keeps", "// Clamp still keeps")}
         self.assertIsNone(self.gaps(self.run_dir(GAPS, head)))
+
+
+# The limits test_gaps.json gives whenever it measures JavaScript or TypeScript lines, in plain words.
+NODE_LINES = ("Vitest and Jest count a line as run when a statement that starts on it ran: in `a && b`, the line counts as"
+              " run even when b never ran, and the other lines of a statement that spans several lines do not count.")
+# PR 7 of a repository with two Node packages: web's tests run with Vitest, whose test calls clamp with 50 only, so of
+# clamp's new lines its cap is the one no test ran; untested.ts, which no test imports, and a page under a folder whose
+# name is a glob, [id], are new or changed, and a test file and a declaration file change too. other's package.json names
+# no test runner. A Python file changes as well.
+WEB = {
+    "web/package.json": ('{"name": "web", "private": true, "scripts": {"test": "vitest run"},'
+                         ' "devDependencies": {"vitest": "4.1.11", "@vitest/coverage-v8": "4.1.11"}}\n'),
+    "web/src/calc.ts": "export function clamp(n: number): number {\n  return n;\n}\n",
+    "web/src/calc.test.ts": ('import { expect, test } from "vitest";\nimport { clamp } from "./calc";\n\n'
+                             'test("clamp", () => {\n  expect(clamp(50)).toBe(50);\n});\n'),
+    "web/src/routes/[id]/page.ts": 'export const title = (id: string) => "Item " + id;\n',
+    "other/package.json": '{"name": "other", "private": true}\n',
+    "other/index.js": "module.exports = 1;\n",
+    "tools/report.py": "def summarize(rows):\n    return len(rows)\n",
+}
+WEB_PR = {
+    **WEB,
+    "web/src/calc.ts": ("export function clamp(n: number): number {\n  if (n > 100) {\n    return 100;\n  }\n"
+                        "  // Below the cap.\n  return n;\n}\n"),
+    "web/src/calc.test.ts": WEB["web/src/calc.test.ts"].replace("toBe(50);\n", "toBe(50);\n  expect(clamp(7)).toBe(7);\n"),
+    "web/src/untested.ts": 'export function shout(s: string): string {\n  return s + "!";\n}\n',
+    "web/src/routes/[id]/page.ts": 'export const title = (id: string) =>\n  "Item " + id.trim();\n',
+    "web/src/types.d.ts": "export type Cap = number;\n",
+    "other/index.js": "module.exports = 2;\n",
+    "tools/report.py": "def summarize(rows):\n    return len([row for row in rows if row])\n",
+}
+NO_RUNNER = "Whooper did not measure 1 changed file in other, since its package.json names neither Vitest nor Jest: other/index.js."
+WEB_TOOL = ("(cd web && CI=true npm_config_offline=true node_modules/.bin/vitest run --coverage --coverage.reporter=lcov"
+            " --coverage.include=src/calc.ts '--coverage.include=src/routes/\\[id\\]/page.ts'"
+            " --coverage.include=src/untested.ts)")
+# Where npm ci in page/ installs Vitest and its V8 coverage, which the tests run as a PR's own would.
+PAGE_MODULES = ROOT / "page" / "node_modules"
+
+
+def install_vitest(package):
+    """Installs Vitest and its V8 coverage in package's node_modules, as the repo's setup script would: links to the ones
+    in PAGE_MODULES, in a folder of package's own, so Vitest keeps its cache there."""
+    modules = package / "node_modules"
+    (modules / ".bin").mkdir(parents=True)
+    for name in ["vitest", "@vitest"]:
+        (modules / name).symlink_to(PAGE_MODULES / name)
+    (modules / ".bin" / "vitest").symlink_to("../vitest/vitest.mjs")
+
+
+class NodeGapsTest(RunDirTest):
+    """test_gaps on JavaScript and TypeScript changes, on WEB's PR and others."""
+
+    def gaps(self, run, env=None, **options):
+        with mock.patch.dict(os.environ, env or self.env, clear=True):
+            whooper.test_gaps(run, **options)
+        path = run / "test_gaps.json"
+        return json.loads(path.read_text()) if path.exists() else None
+
+    def need_vitest(self):
+        if not shutil.which("node"):
+            self.skipTest("node is not on PATH, so no Vitest can run")
+        if not ((PAGE_MODULES / ".bin" / "vitest").exists() and (PAGE_MODULES / "@vitest" / "coverage-v8").is_dir()):
+            self.skipTest("Vitest and @vitest/coverage-v8 are not installed offline; npm ci in page/ installs both")
+
+    def test_lists_the_changed_lines_no_vitest_test_ran_in_each_package_whose_tests_run_with_it(self):
+        self.need_vitest()
+        run = self.run_dir(WEB, WEB_PR)
+        install_vitest(run / "head" / "web")
+        # In calc.ts, the if (2) ran and the cap (3) did not, and the brace (4) and the comment (5) hold no statement.
+        # page.ts's two statements and untested.ts's one ran in no test, since no test loads either file. The test and
+        # the declaration file are not measured.
+        self.assertEqual(self.gaps(run), {
+            "measured": True,
+            "reason": None,
+            "tool": WEB_TOOL,
+            "lines": [{"path": path, "line": n, "status": "not_run"} for path, n in [
+                ("web/src/calc.ts", 3), ("web/src/routes/[id]/page.ts", 1), ("web/src/routes/[id]/page.ts", 2),
+                ("web/src/untested.ts", 2)]],
+            "summary": {"changed_lines": 5, "run": 1, "not_run": 4},
+            "limits": [NODE_LINES, CHECKED, OWN_TESTS, NO_RUNNER, OTHER_LANGUAGE],
+        })
+        # Vitest wrote nothing in the worktree but its cache in node_modules.
+        status = subprocess.run(["git", "status", "--porcelain", "--ignored", "--untracked-files=all"], cwd=run / "head",
+                                env=self.env, capture_output=True, text=True, check=True).stdout
+        self.assertEqual({line.split("/node_modules/")[0] for line in status.splitlines()}, {"?? web"})
+
+    def test_a_jest_package_and_go_merge_into_one_file_with_each_runs_command(self):
+        # A Go module at the root and a Node package, app, whose tests run with Jest. The fake jest saves its arguments
+        # and environment and writes an LCov report that names calc.js by its absolute path, in two records, as a merged
+        # report can, and exits 1, as Jest does when a test fails. A fake node stands for the one Jest's script needs.
+        base = {"go.mod": GAPS["go.mod"], "calc/calc.go": GAPS["calc/calc.go"], "calc/calc_test.go": GAPS["calc/calc_test.go"],
+                "app/package.json": '{"name": "app", "scripts": {"test": "jest --silent"}}\n',
+                "app/src/calc.js": "exports.cap = (n) => n;\n"}
+        head = {**base, "calc/calc.go": GAPS_PR["calc/calc.go"].split("\n\n// Untested")[0] + "\n",
+                "app/src/calc.js": "exports.cap = (n) => {\n  if (n > 9) {\n    return 9;\n  }\n  return n;\n};\n"}
+        run = self.run_dir(base, head)
+        app = run.resolve() / "head" / "app"
+        fake(app / "node_modules" / ".bin" / "jest", "\n".join([
+            f'printf "%s\\n" "$PWD" "$CI $npm_config_offline" "$@" > "{self.tmp}/jest-args"',
+            'for arg; do case "$arg" in --coverageDirectory=*) out="${arg#*=}" ;; esac; done',
+            f'printf "TN:\\nSF:{app}/src/calc.js\\nDA:1,1\\nDA:2,1\\nDA:3,0\\nend_of_record\\n'
+            f'SF:{app}/src/calc.js\\nDA:3,0\\nDA:5,2\\nend_of_record\\n" > "$out/lcov.info"',
+            "exit 1"]))
+        fake(self.tmp / "fakes" / "node", "exit 0")
+        gaps = self.gaps(run, {**self.env, "PATH": f"{self.tmp / 'fakes'}{os.pathsep}{self.env['PATH']}"})
+        self.assertEqual(gaps["tool"], "GOPROXY=off GOTOOLCHAIN=local go test -count=1 -coverpkg=./calc ./calc; (cd app &&"
+                                       " CI=true npm_config_offline=true node_modules/.bin/jest --coverage"
+                                       " --coverageReporters=lcov --collectCoverageFrom=src/calc.js)")
+        # calc.js's cap (3) and calc.go's cap (7) no test ran, in the diff's order.
+        self.assertEqual({key: gaps[key] for key in ["measured", "reason", "lines", "summary"]}, {
+            "measured": True, "reason": None,
+            "lines": [{"path": "app/src/calc.js", "line": 3, "status": "not_run"},
+                      {"path": "calc/calc.go", "line": 7, "status": "not_run"}],
+            "summary": {"changed_lines": 7, "run": 5, "not_run": 2}})
+        self.assertEqual(gaps["limits"], [AND_LINES, CHECKED, OWN_TESTS, NODE_LINES, "Jest exited with code 1 in app, as it"
+                                          " does when a test fails; the lines the tests ran count as run."])
+        folder, env, *args = (self.tmp / "jest-args").read_text().splitlines()
+        self.assertEqual((Path(folder).resolve(), env), (app, "true true"))
+        self.assertEqual(args[:3] + args[4:], ["--coverage", "--coverageReporters=lcov", "--collectCoverageFrom=src/calc.js",
+                                               "--no-watchman"])
+        self.assertTrue(args[3].startswith("--coverageDirectory="), args[3])
+
+    def test_lcov_counts_give_each_files_lines_with_the_highest_count(self):
+        report = ("TN:\nDA:1,5\nSF:src/a b:c.ts\r\nFN:1,f\nDA:1,0\nDA:2,3,abc123\nBRDA:2,0,0,1\nDA:x,1\nDA:4,-1\nend_of_record\n"
+                  "SF:src/empty.ts\nend_of_record\nSF:src/a b:c.ts\nDA:1,2\nDA:2,1\nDA:3,0\nend_of_record\nSF:src/last.ts\nDA:7,1")
+        self.assertEqual(whooper.lcov_counts(report), {"src/a b:c.ts": {1: 2, 2: 3, 3: 0}, "src/empty.ts": {},
+                                                       "src/last.ts": {7: 1}})
+        self.assertEqual(whooper.lcov_counts(""), {})
+
+    def test_nothing_is_measured_without_a_runner_installed_or_a_package(self):
+        js = {"web/src/a.ts": "export const a = 1;\n"}
+        for name, files, why in [
+            ("no package.json", {}, "Whooper did not measure 1 changed file, since no package.json is above it:"
+                                          " web/src/a.ts."),
+            ("no runner", {"web/package.json": '{"scripts": {"test": "node test.js"}}'},
+             "Whooper did not measure 1 changed file in web, since its package.json names neither Vitest nor Jest:"
+             " web/src/a.ts."),
+            ("not installed", {"web/package.json": '{"devDependencies": {"jest": "30.0.0"}}'},
+             "Whooper did not measure 1 changed file in web, since its dependencies are not installed: Whooper found no"
+             " node_modules/.bin/jest there or in a folder above it, which the repo's setup script would install:"
+             " web/src/a.ts."),
+            ("unreadable", {"web/package.json": "{"}, "Whooper did not measure 1 changed file in web, since its"
+                                                      " package.json cannot be read: "),
+        ]:
+            with self.subTest(name):
+                shutil.rmtree(self.tmp / "run", ignore_errors=True)
+                shutil.rmtree(self.tmp / "origin", ignore_errors=True)
+                run = self.run_dir({**files, "web/src/a.ts": "export const a = 0;\n"}, {**files, **js})
+                gaps = self.gaps(run)
+                self.assertEqual({key: gaps[key] for key in ["measured", "tool", "lines", "summary", "limits"]}, {
+                    "measured": False, "tool": "", "lines": [], "summary": {"changed_lines": 0, "run": 0, "not_run": 0},
+                    "limits": []})
+                self.assertTrue(gaps["reason"].startswith(why), gaps["reason"])
+
+    def test_the_tests_of_a_package_stop_at_the_steps_time_limit_and_the_go_lines_stay_measured(self):
+        self.need_vitest()
+        pid = self.tmp / "test.pid"
+        waits = ('import { writeFileSync } from "node:fs";\nimport { test } from "vitest";\n\n'
+                 f'test("waits", async () => {{\n  writeFileSync({json.dumps(str(pid))}, String(process.pid));\n'
+                 "  await new Promise((resolve) => setTimeout(resolve, 60000));\n}, 120000);\n")
+        base = {"go.mod": GAPS["go.mod"], "calc/calc.go": GAPS["calc/calc.go"], "calc/calc_test.go": GAPS["calc/calc_test.go"],
+                "web/package.json": WEB["web/package.json"], "web/src/calc.ts": WEB["web/src/calc.ts"],
+                "web/src/calc.test.ts": waits}
+        run = self.run_dir(base, {**base, "calc/calc.go": GAPS_PR["calc/calc.go"].split("\n\n// Untested")[0] + "\n",
+                                  "web/src/calc.ts": WEB_PR["web/src/calc.ts"]})
+        install_vitest(run / "head" / "web")
+        # The limit comes once the test runs, however long Vitest takes to start, so it finds the test waiting.
+        with limit_once_the_test_runs(pid, ("vitest", "run")) as limited:
+            gaps = self.gaps(run, seconds=30)
+        [(left, ran_out)] = limited
+        self.assertTrue(0 < left <= 30, left)
+        self.assertLess(monotonic() - ran_out, 10)
+        self.assertEqual({key: gaps[key] for key in ["measured", "lines"]},
+                         {"measured": True, "lines": [{"path": "calc/calc.go", "line": 7, "status": "not_run"}]})
+        self.assertEqual(gaps["limits"][-1], "Whooper did not measure 1 changed file in web, since its tests ran past"
+                                             " Whooper's 30-second limit: web/src/calc.ts.")
+        # The test's process started, and the step stopped it.
+        deadline = monotonic() + 5
+        with self.assertRaises(ProcessLookupError):
+            while monotonic() < deadline:
+                os.kill(int(pid.read_text()), 0)
+                sleep(0.1)
 
 
 # PR 9 of a Go module: Clamp gains a cap at 100, and Half is new. Token, which the PR leaves alone, names each
@@ -3935,8 +4119,8 @@ class RunTest(unittest.TestCase):
                                          'cp "${0%/*}/examples.json" "${0%/*}/whooper_examples_test.go" "$WHOOPER_RUN/"')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads((self.fakes / "seen.json").read_text()), self.PRICES_GAPS)
-        self.assertIn(f"\n- test_gaps.json: {run}/test_gaps.json, the changed Go lines no test ran, which Whooper measured"
-                      " before this run started\n", (run / "prompt.md").read_text())
+        self.assertIn(f"\n- test_gaps.json: {run}/test_gaps.json, the changed Go, JavaScript, and TypeScript lines no test"
+                      " ran, which Whooper measured before this run started\n", (run / "prompt.md").read_text())
         examples = {
             "functions": [{"name": "Clamp", "path": "prices/prices.go", "line": 9}],
             "rows": [example_row("Clamp", "Clamp(50)", "50", "50", "same", "ran_base_and_head"),

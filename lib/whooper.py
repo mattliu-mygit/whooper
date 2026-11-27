@@ -30,7 +30,8 @@ from the user's config file (config_path), never from this code. The bin/ script
                                                                                       overview.json read_overview drops
   whooper.py connections <run dir>                                                 -> connections.json, how the code
                                                                                       the diff changes connects
-  whooper.py test-gaps <run dir>                                                   -> test_gaps.json, the changed Go
+  whooper.py test-gaps <run dir>                                                   -> test_gaps.json, the changed Go,
+                                                                                      JavaScript, and TypeScript
                                                                                       lines no test ran
   whooper.py examples <run dir>                                                    -> examples.json, the run's example
                                                                                       inputs, run at head and base
@@ -1247,7 +1248,7 @@ def connections(run, seconds=CONNECTIONS_SECONDS):
 
 
 # The test-gaps step, test_gaps.json: whooper-review runs it before the review run starts, and it stops after
-# TEST_GAPS_SECONDS, whatever go is doing then.
+# TEST_GAPS_SECONDS, whatever go or a test runner is doing then.
 TEST_GAPS_SECONDS = 600
 # go downloads nothing and runs the Go installed on this Mac, whatever a go.mod asks for.
 GO_OFFLINE = {"GOPROXY": "off", "GOTOOLCHAIN": "local"}
@@ -1257,16 +1258,26 @@ GO_OFFLINE = {"GOPROXY": "off", "GOTOOLCHAIN": "local"}
 COVER_BLOCK = re.compile(r"(.+):(\d+)\.(\d+),(\d+)\.(\d+) \d+ (\d+)")
 # The comment a generated Go file has above its package clause.
 GENERATED_GO = re.compile(r"^// Code generated .* DO NOT EDIT\.$", re.M)
+# The JavaScript and TypeScript files the test-gaps step does not measure: tests, as Vitest and Jest find them by
+# default, a name with .test or .spec before its extension or a file in a folder named __tests__, Jest's mocks in
+# __mocks__, and declaration files, which hold only types.
+JS_NOT_MEASURED = re.compile(r"(?:^|/)(?:__tests__|__mocks__)/|\.(?:test|spec)\.[cm]?[jt]sx?$|\.d\.[cm]?ts$")
+# The test runners the test-gaps step runs a package's JavaScript and TypeScript tests with, by the name a package.json
+# gives each, with the name a person reads. Each runs with NODE_OFFLINE in its environment: CI=true, which keeps Vitest
+# and Jest from asking questions or writing new snapshots in the head's worktree, and npm's offline setting, so a package
+# manager the tests start installs nothing.
+NODE_RUNNERS = {"vitest": "Vitest", "jest": "Jest"}
+NODE_OFFLINE = {"CI": "true", "npm_config_offline": "true"}
 
 
-def run_go(folder, seconds, *args):
-    """Runs go with args in folder, with GO_OFFLINE in its environment, in a process group of its own, and returns
+def run_command(command, folder, seconds, env):
+    """Runs command, a list of arguments, in folder with the environment env, in a process group of its own, and returns
     its exit code, or None once it ran past seconds, with its output and its error output. Nothing it started stays
-    running: the group is killed when go ends, at the time limit, and when Python stops, as at a signal main turns
-    into SystemExit."""
+    running: the group is killed when the command ends, at the time limit, and when Python stops, as at a signal main
+    turns into SystemExit."""
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
-        process = subprocess.Popen(["go", *args], cwd=folder, env={**os.environ, **GO_OFFLINE},
-                                   stdin=subprocess.DEVNULL, stdout=out, stderr=err, start_new_session=True)
+        process = subprocess.Popen(command, cwd=folder, env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+                                   start_new_session=True)
         try:
             code = process.wait(timeout=max(seconds, 0))
         except subprocess.TimeoutExpired:
@@ -1278,6 +1289,11 @@ def run_go(folder, seconds, *args):
         out.seek(0)
         err.seek(0)
         return code, out.read().decode(errors="replace"), err.read().decode(errors="replace")
+
+
+def run_go(folder, seconds, *args):
+    """Runs go with args in folder, with GO_OFFLINE in its environment, as run_command runs a command."""
+    return run_command(["go", *args], folder, seconds, {**os.environ, **GO_OFFLINE})
 
 
 def go_events(output):
@@ -1338,57 +1354,101 @@ def plural(count, one, many):
     return f"{count} {one if count == 1 else many}"
 
 
-def test_gaps(run, seconds=TEST_GAPS_SECONDS):
-    """Writes test_gaps.json in run, a review run's directory, before the run starts, while the head's worktree holds
-    the head as committed: which of the lines the diff adds to the head's Go code no test ran, for whooper-show. A
-    line counts when a block of statements of Go's coverage profile covers it, and blank and comment lines, test files,
-    generated files, and files in testdata do not count. go test runs the changed packages' own tests, with coverage
-    of all of them, from the folder of their module, or of its workspace when go finds a go.work, so a block counts as
-    run when the tests of any of those packages ran it (coverage_counts). A changed file the build on this Mac leaves
-    out, such as one for Windows, is not measured, and limits says so. Nothing is measured, and the file says why,
-    without the go command, when the head does not build, when a test binary ends without recording what it ran, as
-    when a test panics, and when the step passes seconds; a test that fails still measures, and limits names it. A
-    PR whose diff adds no such line gets no file."""
-    item = read_object(run / "run.json")
-    patch = (run / "diff.patch").read_text(errors="replace")
-    head, commit = run.resolve() / "head", item["head_sha"]
-    changed = {}
+# What test_gaps.json says whenever Whooper measured a line, in plain words.
+CHECKED = ("A line that ran is not always checked: a test can run a line without checking what it does. Whooper does not"
+           " yet change lines on purpose to see whether a test catches it (mutation testing).")
+OWN_TESTS = ("Only the tests of the changed packages ran, so a test in another package that runs these lines does not"
+             " count.")
+
+
+def changed_code(head, commit, patch):
+    """The lines patch, a run's diff.patch, adds to the code the test-gaps step measures, in commit, which the worktree
+    head holds, as the Go files and the JavaScript and TypeScript files each by path: the lines that are not blank or
+    comments, of files that are not tests, and for Go not generated or in testdata either, and for JavaScript and
+    TypeScript not declaration files (JS_NOT_MEASURED). A file whose added lines are all blank or comments has none."""
+    changed = {"go": {}, "javascript": {}}
     for path, _, _, added, _ in diff_files(patch):
-        if not added or language_of(path) != "go" or path.endswith("_test.go") or "testdata" in path.split("/"):
+        language = language_of(path)
+        if not added or language not in changed:
+            continue
+        if (path.endswith("_test.go") or "testdata" in path.split("/") if language == "go"
+                else JS_NOT_MEASURED.search(path)):
             continue
         text = committed(head, commit, path)
         # Go counts a file as generated by a comment above its package clause.
-        if text is None or GENERATED_GO.search(re.split(r"^package\s", text, maxsplit=1, flags=re.M)[0]):
+        if text is None or language == "go" and GENERATED_GO.search(re.split(r"^package\s", text, maxsplit=1,
+                                                                             flags=re.M)[0]):
             continue
-        lines = text.split("\n")
+        lines, comment = text.split("\n"), ("//",) if language == "go" else ("//", "/*", "*")
         if code := [n for n in sorted(added) if n <= len(lines) and lines[n - 1].strip()
-                    and not lines[n - 1].strip().startswith("//")]:
-            changed[path] = code
-    if not changed:
-        return
-    others = other_languages(patch)
-    other = [f"Whooper measures only Go code so far, so it left out"
-             f" {plural(len(others), 'changed file in another language', 'changed files in other languages')}:"
-             f" {listed(others)}."] if others else []
+                    and not lines[n - 1].strip().startswith(comment)]:
+            changed[language][path] = code
+    return changed["go"], changed["javascript"]
+
+
+def shown_command(folder, command):
+    """command, words a step runs in folder, a folder of the head's worktree relative to it, as a person would type
+    them at the worktree's root: in parentheses after a cd, so the commands test_gaps.json's tool joins with ; each run
+    in their own folder."""
+    return command if folder in ("", ".") else f"(cd {shlex.quote(folder)} && {command})"
+
+
+def glob_escape(path):
+    """path as a glob that matches only that path, for Vitest's and Jest's coverage settings, which take globs, as for
+    Next.js's routes/[id]/page.tsx."""
+    return re.sub(r"([\\*?\[\]{}()!+@])", r"\\\1", path)
+
+
+def lcov_counts(report):
+    """The lines report, an LCov report, lists for each source file, by the path its SF line gives, each with the highest
+    count the report gives it: a report can cover a file in more than one record, as one merged from several runs does.
+    A DA line may end in a checksum. A line outside a file's record, or that does not parse, counts for no file. Only a
+    newline ends a line, since a path may hold other line breaks."""
+    counts, lines = {}, None
+    for line in report.split("\n"):
+        line = line.removesuffix("\r")
+        if line.startswith("SF:"):
+            lines = counts.setdefault(line[3:], {})
+        elif line == "end_of_record":
+            lines = None
+        elif lines is not None and (entry := re.fullmatch(r"DA:(\d+),(\d+)(?:,.*)?", line)):
+            number, count = int(entry[1]), int(entry[2])
+            lines[number] = max(lines.get(number, 0), count)
+    return counts
+
+
+def node_arguments(runner, files, folder):
+    """The arguments that run a package's tests once with runner, vitest or jest, with coverage of files, globs relative
+    to the package, as an LCov report in folder: those a person reads in test_gaps.json's tool, and the rest. Vitest's
+    --coverage.include and Jest's --collectCoverageFrom name the files a report covers, and each also adds a file no test
+    loads, with every line not run, which a report leaves out otherwise. Vitest writes no report when a test fails unless
+    told to, as Go and Jest do. Jest runs without watchman, which would stay running after it."""
+    if runner == "vitest":
+        return (["run", "--coverage", "--coverage.reporter=lcov", *(f"--coverage.include={file}" for file in files)],
+                [f"--coverage.reportsDirectory={folder}", "--coverage.reportOnFailure"])
+    return (["--coverage", "--coverageReporters=lcov", *(f"--collectCoverageFrom={file}" for file in files)],
+            [f"--coverageDirectory={folder}", "--no-watchman"])
+
+
+def go_coverage(head, changed, run, seconds):
+    """What the test-gaps step measures of changed, the lines it measures of each changed Go file by path (changed_code),
+    in the worktree head, as a part of test_gaps.json (test_gaps), with run, which runs a command and raises TimeLimit at
+    the step's limit of seconds. go test runs the changed packages' own tests, with coverage of all of them, from the
+    folder of their module, or of its workspace when go finds a go.work, so a block counts as run when the tests of any of
+    those packages ran it (coverage_counts). A changed file the build on this Mac leaves out, such as one for Windows, is
+    not measured, and limits says so. Nothing is measured, and reason says why, without the go command, when the head
+    does not build, when a test binary ends without recording what it ran, as when a test panics, and at the time limit;
+    a test that fails still measures, and limits names it."""
     tools = []
 
-    def write(measured, reason, lines=(), ran=0, limits=()):
-        write_file(run / "test_gaps.json", json.dumps({
-            "measured": measured, "reason": reason, "tool": "; ".join(tools) or "go test",
-            "lines": [{"path": path, "line": n, "status": "not_run"} for path, n in lines],
-            "summary": {"changed_lines": ran + len(lines), "run": ran, "not_run": len(lines)},
-            "limits": [*limits, *other]}, indent=2))
-
-    if not shutil.which("go"):
-        return write(False, "The go command is not on PATH.")
-    deadline = monotonic() + seconds
+    def missed(reason):
+        return {"tools": tools, "reason": reason, "missed": f"Whooper did not measure the changed Go lines. {reason}"}
 
     def go(folder, *args):
-        code, out, err = run_go(folder, deadline - monotonic(), *args)
-        if code is None:
-            raise TimeLimit
-        return code, out, err
+        return run(["go", *args], folder, {**os.environ, **GO_OFFLINE})
 
+    if not shutil.which("go"):
+        return missed("The go command is not on PATH.")
     # Each changed package's folder, and the folder go runs in to reach it: its workspace's or its module's.
     folders = {path: head / posixpath.dirname(path) for path in changed}
     roots, unreachable, left_out, failed, keys, counts = {}, [], [], [], {}, {}
@@ -1405,7 +1465,7 @@ def test_gaps(run, seconds=TEST_GAPS_SECONDS):
             patterns = {folder: "." if folder == root else f"./{folder.relative_to(root).as_posix()}" for folder in members}
             code, out, err = go(root, "list", "-e", "-json=ImportPath,Dir,GoFiles,CgoFiles", *patterns.values())
             if code != 0:
-                return write(False, f"go list did not list the changed packages: {build_error([], err)}")
+                return missed(f"go list did not list the changed packages: {build_error([], err)}")
             decoder, at, packages = json.JSONDecoder(), 0, {}
             while (at := re.compile(r"\s*").match(out, at).end()) < len(out):
                 package, at = decoder.raw_decode(out, at)
@@ -1423,9 +1483,8 @@ def test_gaps(run, seconds=TEST_GAPS_SECONDS):
             if not tested:
                 continue
             tested = sorted(tested)
-            cd = "" if root == head else f"cd {shlex.quote(root.relative_to(head).as_posix())} && "
-            tools.append(f"{cd}GOPROXY=off GOTOOLCHAIN=local " + shlex.join(
-                ["go", "test", "-count=1", f"-coverpkg={','.join(tested)}", *tested]))
+            tools.append(shown_command(root.relative_to(head).as_posix(), "GOPROXY=off GOTOOLCHAIN=local " + shlex.join(
+                ["go", "test", "-count=1", f"-coverpkg={','.join(tested)}", *tested])))
             with tempfile.TemporaryDirectory() as scratch:
                 profile = Path(scratch) / "coverage.out"
                 code, out, err = go(root, "test", "-json", "-count=1", f"-coverpkg={','.join(tested)}",
@@ -1433,9 +1492,9 @@ def test_gaps(run, seconds=TEST_GAPS_SECONDS):
                 profile = profile.read_text(errors="replace") if profile.exists() else ""
             events = go_events(out)
             if not events and code != 0:
-                return write(False, f"go test did not run: {build_error([], err)}")
+                return missed(f"go test did not run: {build_error([], err)}")
             if any(e.get("Action") == "build-fail" or e.get("FailedBuild") for e in events):
-                return write(False, f"The Go code at the head does not build: {build_error(events, err)}")
+                return missed(f"The Go code at the head does not build: {build_error(events, err)}")
             # A test binary that ends normally prints its coverage, even one whose tests failed. One that panics, or
             # that go test's own -timeout stops, records none, so its tests' lines would read as not run.
             recorded = {e.get("Package") for e in events
@@ -1443,17 +1502,16 @@ def test_gaps(run, seconds=TEST_GAPS_SECONDS):
             if crashed := next((e["Package"] for e in events if e.get("Action") == "fail" and not e.get("Test")
                                 and e.get("Package") not in recorded), None):
                 panic = first_panic(events, crashed)
-                return write(False, f"The tests of {crashed} stopped before Go recorded what they ran, as when a test"
-                                    f" panics{': ' + panic if panic else ''}.")
+                return missed(f"The tests of {crashed} stopped before Go recorded what they ran, as when a test"
+                              f" panics{': ' + panic if panic else ''}.")
             failed += [f"{e['Test']} in {e['Package']}" for e in events
                        if e.get("Action") == "fail" and e.get("Test") and "/" not in e["Test"]]
             for block, count in coverage_counts(profile).items():
                 counts[block] = max(counts.get(block, 0), count)
     except TimeLimit:
-        return write(False, f"The tests ran past Whooper's {limit_text(seconds)} limit.")
+        return missed(f"The tests ran past Whooper's {limit_text(seconds)} limit.")
     if not tools:
-        return write(False, f"Whooper found no package go test can run for the changed Go files: "
-                            f"{listed(left_out + unreachable)}.")
+        return missed(f"Whooper found no package go test can run for the changed Go files: {listed(left_out + unreachable)}.")
     # Each block's lines: an end at column 1 holds none of its line.
     spans = {}
     for (file, start, _, end, end_column), count in counts.items():
@@ -1467,11 +1525,7 @@ def test_gaps(run, seconds=TEST_GAPS_SECONDS):
                 else:
                     not_run.append((path, n))
     limits = ["Go counts a line as run when any part of it ran: in `a && b`, the line counts as run even when b never"
-              " ran.",
-              "A line that ran is not always checked: a test can run a line without checking what it does. Whooper"
-              " does not yet change lines on purpose to see whether a test catches it (mutation testing).",
-              "Only the tests of the changed packages ran, so a test in another package that runs these lines does not"
-              " count."]
+              " ran.", CHECKED, OWN_TESTS]
     if failed:
         one = len(failed) == 1
         limits.append(f"{plural(len(failed), 'test', 'tests')} failed: {listed(failed)}. Go recorded the lines"
@@ -1482,7 +1536,161 @@ def test_gaps(run, seconds=TEST_GAPS_SECONDS):
     if unreachable:
         limits.append(f"Whooper found no Go module for {plural(len(unreachable), 'changed Go file', 'changed Go files')},"
                       f" so it did not measure {'it' if len(unreachable) == 1 else 'them'}: {listed(unreachable)}.")
-    write(True, None, not_run, ran, limits)
+    return {"tools": tools, "reason": None, "lines": not_run, "ran": ran, "limits": limits}
+
+
+def node_coverage(head, changed, run, seconds):
+    """What the test-gaps step measures of changed, the lines it measures of each changed JavaScript or TypeScript file by
+    path (changed_code), in the worktree head, as parts of test_gaps.json (test_gaps), one for each package: the folder of
+    the package.json nearest above a file. A package's tests run when its package.json names Vitest or Jest, in its test
+    script first and then in its dependencies, and its dependencies are installed, which in the head's worktree only the
+    repo's setup script does: node_modules/.bin, there or in a folder above it, holds the runner. They run once, with run,
+    which runs a command and raises TimeLimit at the step's limit of seconds, with coverage of the package's changed files
+    as an LCov report (node_arguments), with NODE_OFFLINE in their environment. A changed line counts when the report
+    lists it for its file, as run when its count is above 0. Without one of those, without the node command, when the
+    runner writes no report, and at the time limit, the package's files are not measured, and its part says why."""
+    packages = {}
+    for path in changed:
+        folder = posixpath.dirname(path)
+        while not (head / folder / "package.json").is_file():
+            folder = posixpath.dirname(folder) if folder else None
+            if folder is None:
+                break
+        packages.setdefault(folder, []).append(path)
+    parts = []
+    for folder, paths in packages.items():
+        files, tools = listed(paths), []
+        count, them = plural(len(paths), "changed file", "changed files"), "it" if len(paths) == 1 else "them"
+
+        def missed(why):
+            text = (f"Whooper did not measure {count}, since no package.json is above {them}: {files}." if folder is None
+                    else f"Whooper did not measure {count} in {folder or 'the root package'}, since {why}: {files}.")
+            return {"tools": tools, "reason": text, "missed": text}
+
+        top = head / folder if folder is not None else head
+        try:
+            manifest = json.loads((top / "package.json").read_text()) if folder is not None else None
+        except (OSError, ValueError) as e:
+            parts.append(missed(f"its package.json cannot be read: {e}"))
+            continue
+        manifest = manifest if isinstance(manifest, dict) else {}
+        scripts = manifest.get("scripts") if isinstance(manifest.get("scripts"), dict) else {}
+        script = scripts.get("test") if isinstance(scripts.get("test"), str) else ""
+        depends = {name for key in ("dependencies", "devDependencies") if isinstance(manifest.get(key), dict)
+                   for name in manifest[key]}
+        runner = (next((name for name in NODE_RUNNERS if re.search(rf"\b{name}\b", script)), None)
+                  or next((name for name in NODE_RUNNERS if name in depends), None))
+        program = runner and next((bins / runner for bins in (f / "node_modules" / ".bin" for f in [top, *top.parents]
+                                                              if f.is_relative_to(head))
+                                   if os.access(bins / runner, os.X_OK)), None)
+        if folder is None:
+            parts.append(missed(None))
+        elif runner is None:
+            parts.append(missed("its package.json names neither Vitest nor Jest"))
+        elif program is None:
+            parts.append(missed(f"its dependencies are not installed: Whooper found no node_modules/.bin/{runner} there"
+                                " or in a folder above it, which the repo's setup script would install"))
+        elif not shutil.which("node"):
+            parts.append(missed("the node command is not on PATH"))
+        else:
+            name = NODE_RUNNERS[runner]
+            with tempfile.TemporaryDirectory() as scratch:
+                shown, rest = node_arguments(runner, [glob_escape(posixpath.relpath(path, folder or ".")) for path in paths],
+                                             scratch)
+                tools.append(shown_command(folder, " ".join(f"{key}={value}" for key, value in NODE_OFFLINE.items()) + " "
+                                           + shlex.join([os.path.relpath(program, top), *shown])))
+                try:
+                    code, out, err = run([str(program), *shown, *rest], top, {**os.environ, **NODE_OFFLINE})
+                except TimeLimit:
+                    parts.append(missed(f"its tests ran past Whooper's {limit_text(seconds)} limit"))
+                    continue
+                try:
+                    report = (Path(scratch) / "lcov.info").read_text(errors="replace")
+                except OSError:
+                    printed = re.sub(r"\x1b\[[0-9;]*m", "", f"{err}\n{out}").split("\n")
+                    first = next((line.strip() for line in printed if line.strip()), f"it exited with code {code}")
+                    parts.append(missed(f"{name} wrote no coverage report: {first}"))
+                    continue
+            counts = {}
+            for source, lines in lcov_counts(report).items():
+                file = Path(os.path.realpath(top / source))
+                if file.is_relative_to(head):
+                    counts[file.relative_to(head).as_posix()] = lines
+            absent = [path for path in paths if path not in counts]
+            if len(absent) == len(paths):
+                parts.append(missed(f"{name}'s report covers none of {them}, as when the package's coverage settings leave"
+                                    f" {them} out"))
+                continue
+            ran, not_run = 0, []
+            for path in paths:
+                for n in changed[path] if path in counts else []:
+                    if n in counts[path]:
+                        if counts[path][n] > 0:
+                            ran += 1
+                        else:
+                            not_run.append((path, n))
+            limits = [f"{' and '.join(NODE_RUNNERS.values())} count a line as run when a statement that starts on it ran:"
+                      " in `a && b`, the line counts as run even when b never ran, and the other lines of a statement that"
+                      " spans several lines do not count.", CHECKED, OWN_TESTS]
+            if code != 0:
+                limits.append(f"{name} exited with code {code} in {folder or 'the root package'}, as it does when a test"
+                              " fails; the lines the tests ran count as run.")
+            if absent:
+                limits.append(f"{name}'s report in {folder or 'the root package'} covers none of"
+                              f" {plural(len(absent), 'changed file', 'changed files')}, as when the package's coverage"
+                              f" settings leave {'it' if len(absent) == 1 else 'them'} out, so Whooper did not measure"
+                              f" {'it' if len(absent) == 1 else 'them'}: {listed(absent)}.")
+            parts.append({"tools": tools, "reason": None, "lines": not_run, "ran": ran, "limits": limits})
+    return parts
+
+
+def test_gaps(run, seconds=TEST_GAPS_SECONDS):
+    """Writes test_gaps.json in run, a review run's directory, before the run starts, while the head's worktree holds
+    the head as committed: which of the lines the diff adds to the head's Go, JavaScript, and TypeScript code no test
+    ran, for whooper-show (changed_code). The changed Go lines (go_coverage) and each package's changed JavaScript and
+    TypeScript lines (node_coverage) are each a part, measured in that order within one limit of seconds, and the file
+    holds them all: each part says which commands it ran, its tool, and either why it measured nothing, its reason, or
+    the changed lines no test ran, how many a test ran, and what its measure can miss, its limits. The file is measured
+    when a part is, with the reason of each part that is not among its limits, and otherwise not measured, with the
+    first such part's reason. A PR whose diff adds no such line gets no file."""
+    item = read_object(run / "run.json")
+    patch = (run / "diff.patch").read_text(errors="replace")
+    head = run.resolve() / "head"
+    go_changed, node_changed = changed_code(head, item["head_sha"], patch)
+    if not go_changed and not node_changed:
+        return
+    deadline = monotonic() + seconds
+
+    def within_limit(command, folder, env):
+        """Runs command as run_command does, with what is left of the step's seconds, and raises TimeLimit once they
+        ran out, before it starts the command if none are left."""
+        if (left := deadline - monotonic()) <= 0:
+            raise TimeLimit
+        code, out, err = run_command(command, folder, left, env)
+        if code is None:
+            raise TimeLimit
+        return code, out, err
+
+    parts = ([go_coverage(head, go_changed, within_limit, seconds)] if go_changed else []) + node_coverage(
+        head, node_changed, within_limit, seconds)
+    measured = [part for part in parts if part["reason"] is None]
+    missed = [part for part in parts if part["reason"] is not None]
+    order = {path: i for i, (path, *_) in enumerate(diff_files(patch))}
+    lines = sorted((line for part in measured for line in part["lines"]), key=lambda line: (order[line[0]], line[1]))
+    ran = sum(part["ran"] for part in measured)
+    limits = [limit for part in measured for limit in part["limits"]]
+    limits += [part["missed"] for part in (missed if measured else missed[1:])]
+    others = [path for path, _, _, added, _ in diff_files(patch) if added and language_of(path) not in (None, "go", "javascript")]
+    if others:
+        limits.append(f"Whooper measures only Go, JavaScript, and TypeScript code so far, so it left out"
+                      f" {plural(len(others), 'changed file in another language', 'changed files in other languages')}:"
+                      f" {listed(others)}.")
+    write_file(run / "test_gaps.json", json.dumps({
+        "measured": bool(measured), "reason": None if measured else missed[0]["reason"],
+        "tool": "; ".join(tool for part in parts for tool in part["tools"]) or ("go test" if go_changed else ""),
+        "lines": [{"path": path, "line": n, "status": "not_run"} for path, n in lines],
+        "summary": {"changed_lines": ran + len(lines), "run": ran, "not_run": len(lines)},
+        "limits": list(dict.fromkeys(limits))}, indent=2))
 
 
 # The examples step, examples.json: whooper-review runs it once the review run ends, and it stops after
@@ -1686,7 +1894,7 @@ def show_review(data, run_id):
     between the head the review read and the PR's newest head Whooper knows (pr_head), and the files
     that changed together with the PR's in the CO_CHANGE_DAYS days before the review started, in the
     history the PR's merge base ends (co_change). How the changed code connects is connections.json, which
-    whooper-review's connections step writes (connections), the changed Go lines no test ran test_gaps.json
+    whooper-review's connections step writes (connections), the changed lines no test ran test_gaps.json
     (test_gaps), and the example inputs' results examples.json (examples), each once the review ended. Refuses
     a run ID that names no run directory."""
     run, parsed = data / "runs" / run_id, parse_run_id(run_id)
@@ -2834,7 +3042,8 @@ ASK_RECORD = {
     "diff.patch": "the pull request's change, git diff <merge base> HEAD",
     "connections.json": "how the code the diff changes connects: the declarations it adds, changes, or removes, and the"
                         " code that calls them",
-    "test_gaps.json": "which changed Go lines no test ran, as Whooper measured before the review started",
+    "test_gaps.json": "which changed Go, JavaScript, and TypeScript lines no test ran, as Whooper measured before the"
+                      " review started",
     "examples.json": "what the Go functions the review chose returned for its example inputs at the merge base and at"
                      " the head, as Whooper ran them",
     "github.json": "the PR's title, body, reviews, and comments, as the review read them",

@@ -18,7 +18,8 @@ names, at the versions `lib/whooper.py.lock` pins; the first run downloads what 
 [gopls](https://go.dev/gopls/) is optional: with it, a review links changed Go code to its callers with
 Go's own tools rather than by name search ([How a review run works](#how-a-review-run-works)). So is
 the `go` command, with which a review measures which changed Go lines no test ran and runs the example
-inputs its run chose, at the head and at the merge base.
+inputs its run chose, at the head and at the merge base, and `node`, with which it measures the changed
+JavaScript and TypeScript lines of a package whose tests run with Vitest or Jest.
 
 1. Copy `examples/config.example.toml` to `~/.config/whooper/config.toml` and fill it in. Everything
    that identifies you, your company, or your repos lives there: your GitHub login and name, the
@@ -200,10 +201,11 @@ null while the review runs and when the file is missing or cannot be read, as fo
 whooper-review saved it.
 
 `test_gaps` is the `test_gaps.json` whooper-review saved before the review run started
-([How a review run works](#how-a-review-run-works)): which of the lines the diff adds to Go code no test
-ran. `measured` is false when Whooper could not measure, with `reason` saying why in plain words, and
-`reason` is null otherwise; `tool` is the go test command it ran; `lines` lists each changed line no test
-ran, as `path`, `line`, and `status` `not_run`; `summary` counts the changed lines that hold statements
+([How a review run works](#how-a-review-run-works)): which of the lines the diff adds to Go, JavaScript,
+and TypeScript code no test ran. `measured` is false when Whooper could measure nothing, with `reason`
+saying why in plain words, and `reason` is null otherwise; `tool` lists the commands it ran, go test and
+each package's Vitest or Jest, joined by `; `, each that runs in a folder of its own in parentheses after
+a `cd`; `lines` lists each changed line no test ran, as `path`, `line`, and `status` `not_run`; `summary` counts the changed lines that hold statements
 (`changed_lines`) and how many of them a test ran (`run`) or not (`not_run`), all 0 when nothing was
 measured; and `limits` says what the measure can miss, such as that a test can run a line without checking
 what it does. For example, a PR that adds `if n > 100 { n = 100 }` to `Clamp`, whose only test calls
@@ -217,7 +219,7 @@ a function the PR adds, or `not_compared`), and a `note` that says why, or null;
 table can miss. For the same PR, the input `Clamp(101)` reads before `101`, after `100`, `different`, and
 `ran_base_and_head`. Only what the test printed fills a row, never what the run expected. Each is null
 while the review runs and when its file is missing or cannot be read; `test_gaps` is also null for a PR
-that changes no Go code, and `examples` for a run that chose no examples.
+that changes no Go, JavaScript, or TypeScript code, and `examples` for a run that chose no examples.
 
 `safe_to_approve` is true exactly when whooper-submit would approve a review without
 `--approve-anyway` ([Submit a review](#submit-a-review)): its outcome is `reviewed`, its verdict is
@@ -486,9 +488,9 @@ in the head worktree, as `diff.patch`, which stays when the worktrees go. `diff.
 patch whatever your git config says: no external diff tool, textconv filter, or color, `a/` and
 `b/` before the paths, and a submodule's commit lines rather than its log. Then it runs the repo's
 setup script, if the config names one, which may add variables to the run's environment and prints
-a paragraph for the prompt. Then, when the diff adds lines to Go code, a step saves `test_gaps.json`:
-which of those lines no test ran ([See reviews](#see-reviews)). It runs `go test` once with coverage of
-the packages the PR changes, their own tests only, from their module's folder, or their workspace's when
+a paragraph for the prompt. Then, when the diff adds lines to Go, JavaScript, or TypeScript code, a step
+saves `test_gaps.json`: which of those lines no test ran ([See reviews](#see-reviews)). For Go, it runs
+`go test` once with coverage of the packages the PR changes, their own tests only, from their module's folder, or their workspace's when
 `go` finds a `go.work`, with no downloads (`GOPROXY=off GOTOOLCHAIN=local`), and takes for each block of
 statements the highest count any test package gave it, since `go test` writes a block once for each test
 package that covers it. A line counts when such a block covers it, and blank and comment lines, test
@@ -496,7 +498,20 @@ files, generated files, files in `testdata`, and files the build on this Mac lea
 for Windows, do not. A test that fails still measures, but nothing is measured, and `reason` says why,
 without the `go` command, when the head does not build, when the step passes 10 minutes, and when a test
 binary ends without recording what it ran, as one does when a test panics, since the lines only its tests
-ran would read as not run. The facts at the end of the prompt name the file. The run may change it, so
+ran would read as not run. When the diff adds lines to JavaScript or TypeScript code, the same step,
+within the same 10 minutes, runs the tests of each package such a file is in, the folder of the nearest
+`package.json`, once: when its `package.json` names Vitest or Jest, in its test script first and then in
+its dependencies, and the setup script installed its dependencies, so that `node_modules/.bin` there or in
+a folder above it holds the runner. It runs that runner from the package's folder with coverage of the
+package's changed files as an LCov report (Vitest: `vitest run --coverage --coverage.reporter=lcov
+--coverage.include=<file>`; Jest: `jest --coverage --coverageReporters=lcov --collectCoverageFrom=<file>`),
+which also covers a changed file no test loads, with `CI=true`, which keeps both from asking questions or
+writing new snapshots, and `npm_config_offline=true`, so nothing installs. A changed line counts when the
+report lists it for its file, as run when its count is above 0; Vitest and Jest list a statement on the
+line it starts on. Test files (`.test.` or `.spec.` names, `__tests__` and `__mocks__` folders) and
+declaration files do not count. Without a `package.json`, a runner, its installed dependencies, or `node`,
+when the runner writes no report, or at the time limit, that package's files are not measured, and
+`limits` says why; `measured` is false only when nothing was. The facts at the end of the prompt name the file. The run may change it, so
 the copy from before the run replaces it once the run ends. Then the agent that `[jobs] review` names runs from the head worktree
 through its launcher, `agents/<agent>/review`. The run follows `prompts/review.md`, filled in from
 the config with that agent's tool names and saved as `prompt.md` in the run directory, and leaves
@@ -696,7 +711,7 @@ the recheck list while the commands above write to it.
   `devin-config.json` and `stdout.log`) and `stderr.log` are the run, `findings.json` its result
   (`findings.invalid.json` when it did not fit the schema), `overview.json` its overview of the PR
   (`overview.invalid.json`, with why, when whooper-review dropped it), `connections.json` how the
-  code the diff changes connects, `test_gaps.json` the changed Go lines no test ran, `examples.json` the
+  code the diff changes connects, `test_gaps.json` the changed lines no test ran, `examples.json` the
   results of the example inputs the run chose, which it wrote with `whooper_examples_test.go` and which
   whooper-review moved to `examples.request.json`, `failure.txt` the reason
   whooper-review gave when it stopped the run and `failure.json` its cause, `log.md` its evidence

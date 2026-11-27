@@ -225,13 +225,14 @@ export interface Connections {
   limits: string[];
 }
 
-/** Which of the lines a review's diff adds to Go code no test ran (test_gaps.json), from go test with coverage
- * of the changed packages, run before the review run started. */
+/** Which of the lines a review's diff adds to Go, JavaScript, and TypeScript code no test ran (test_gaps.json),
+ * from go test with coverage of the changed packages and one Vitest or Jest run with coverage in each changed
+ * package.json's folder, run before the review run started. */
 export interface TestGaps {
-  /** false when Whooper could not measure, such as when the head does not build; reason then says why. */
+  /** false when Whooper could measure nothing, such as when the head does not build; reason then says why. */
   measured: boolean;
   reason: string | null;
-  /** The go test command Whooper ran. */
+  /** The commands Whooper ran, joined by "; ", each that runs in another folder as (cd <folder> && <command>). */
   tool: string;
   /** Each changed line no test ran, in the head. */
   lines: { path: string; line: number; status: "not_run" }[];

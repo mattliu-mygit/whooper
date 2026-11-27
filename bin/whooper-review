@@ -16,8 +16,9 @@
 # With --as-of, github.json holds only what people could read before that time, for replaying a past
 # review. Then the repo's setup script, if the config names one, prepares anything else the run
 # needs, such as dependencies or databases (examples/setup.example.sh). Then a step of at most 10
-# minutes saves test_gaps.json, which of the lines the diff adds to Go code no test ran, from one go
-# test of the changed packages with coverage (lib/whooper.py's test_gaps). The run may read the file,
+# minutes saves test_gaps.json, which of the lines the diff adds to Go, JavaScript, and TypeScript code
+# no test ran, from one go test of the changed packages with coverage and one run of each changed Node
+# package's Vitest or Jest tests with coverage (lib/whooper.py's test_gaps). The run may read the file,
 # and may change it, so the copy from before the run replaces it once the run ends. The run itself has no
 # GitHub login, and its launcher denies the Slack writes, so it can post nothing. Its findings.json
 # must fit schemas/findings.json, and a run that passes [review] timeout_minutes is stopped. The run
@@ -287,13 +288,13 @@ run_step() {
 }
 
 # Before the run starts, while the head's worktree holds the head as committed, the test-gaps step saves
-# test_gaps.json: which changed Go lines no test ran (lib/whooper.py's test_gaps). The facts name it for the
+# test_gaps.json: which changed Go, JavaScript, and TypeScript lines no test ran (lib/whooper.py's test_gaps). The facts name it for the
 # run, which may also change it, so a copy outside the run directory replaces it once the run ends.
 run_step test-gaps test_gaps.json
 gaps=""
 if [[ -f "$run/test_gaps.json" ]] && cp "$run/test_gaps.json" "$work/test_gaps.json"; then
   gaps="
-- test_gaps.json: $run/test_gaps.json, the changed Go lines no test ran, which Whooper measured before this run started"
+- test_gaps.json: $run/test_gaps.json, the changed Go, JavaScript, and TypeScript lines no test ran, which Whooper measured before this run started"
 fi
 
 untagged=""
