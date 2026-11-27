@@ -12,11 +12,11 @@ export function versionLabel(review: StatusReview, number: number): string {
 /**
  * The open review's header, which Prompting Time drew itself before page protocol 2: its version and
  * the commit it reviewed, the PR's other versions (an earlier one only shows, since only the newest
- * can be submitted), Skip with Undo, Remove, Rerun review (Retry review after a failure), and
- * banners for a removed review, an earlier version, and new commits since the review. Each button
- * runs the manifest's action for the run, and a refusal shows under the bar. It reads the review as
- * whooper-status lists it, so it shows nothing until the status arrives or for a review older than
- * the 30 days whooper-status lists.
+ * can be submitted), Skip with Undo, which also stops a review that runs, Remove, Rerun review (Retry
+ * review after a failure), and banners for a removed review, an earlier version, and new commits since
+ * the review. Each button runs the manifest's action for the run, and a refusal shows under the bar.
+ * It reads the review as whooper-status lists it, so it shows nothing until the status arrives or for
+ * a review older than the 30 days whooper-status lists.
  */
 export function ReviewHeader(props: { store: PageStore }) {
   const store = props.store;
@@ -49,7 +49,8 @@ export function ReviewHeader(props: { store: PageStore }) {
         const removed = () => !earlier() && review().removed_by_user;
         // whooper-retry reads the PR from run.json, which a review stopped before it wrote one lacks.
         const canRerun = () => !earlier() && !running() && review().repo !== null;
-        const canSkip = () => !earlier() && !running() && !removed() && review().submitted === null;
+        // whooper-skip stops a review that runs, and Whooper starts no new review of the PR until Undo.
+        const canSkip = () => !earlier() && !removed() && review().submitted === null;
         const canRemove = () => !earlier() && !running() && !removed();
         const newCommits = () =>
           !earlier() && !running() && review().head_sha !== null && review().pr_head_sha !== null && review().head_sha !== review().pr_head_sha;

@@ -2,7 +2,7 @@
 # Runs one round of Whooper now: whooper-fetch, whooper-poll, and whooper-select, then for each
 # selected item a dry-run whooper-review, whooper-classify, whooper-post --print, and
 # whooper-summary, and runs [schedule] notify as <notify> <title> <message> when that review
-# finishes or fails. Nothing posts to GitHub or Slack. whooper-run runs it on the config's
+# finishes or fails, unless bin/whooper-skip stopped it. Nothing posts to GitHub or Slack. whooper-run runs it on the config's
 # [schedule]; run by hand, it runs a round even while Whooper is paused.
 #
 # When a review stops at a cause that stops every review, such as a setup script that cannot reach
@@ -123,6 +123,10 @@ while IFS= read -r item <&3; do
     "$root/bin/whooper-summary" "$(basename "$run")" < /dev/null
     notify "Whooper reviewed $pr" "$(jq -r '"\(.approval.verdict | gsub("_"; " ")), \(.findings | length) finding(s). \(.approval.reason | .[0:200])"' "$run/findings.json")"
     outcome=reviewed
+  elif [[ -n "$run" && -e "$run/skipped-by-user" ]]; then
+    # bin/whooper-skip stopped the review, so the user knows; it counts as failed.
+    echo "review stopped: skipped by the user"
+    outcome=failed
   else
     echo "review failed"
     notify "Whooper: $pr review failed" "See whooper-round's output."

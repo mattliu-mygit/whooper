@@ -56,7 +56,8 @@ steps below: fetch, poll, and select, then for each selected item a dry-run revi
 `[schedule]` sets when: a round starts `interval_minutes` after the last one ended, the first at
 once, but only between `start` and `end` on the listed `days`, and otherwise whooper-run waits for
 the next start. The defaults are 15 minutes, 10:00 to 18:00, Monday to Friday. When a review
-finishes or fails, whooper-round runs `[schedule] notify`, if the config names one, as
+finishes or fails, unless you skipped it ([Skip a review](#skip-a-review)), whooper-round runs
+`[schedule] notify`, if the config names one, as
 `<notify> <title> <message>`. When a review stops at a cause that stops every review, such as a
 setup script that cannot reach Docker ([See reviews](#see-reviews)), the round starts none of its
 other reviews: each waits for the next round, which reviews it again. Only one copy runs at a time:
@@ -337,11 +338,17 @@ twice.
 `bin/whooper-skip <run-id>` marks a review done without submitting it, and prints what it did: it
 leaves the empty file `skipped-by-user` in the run directory, so whooper-status lists the review with
 `skipped_by_user` true and `needs_you` false, and whooper-show gives `skipped_by_user` true.
-`bin/whooper-skip <run-id> --undo` deletes the file. Nothing else changes: nothing posts to GitHub,
-and the drafts and records stay, so a skipped review can still be submitted. It refuses a run ID that
-names no run directory and a review that is still running. Prompting Time runs it as the manifest's
-`skip` action, adding the run ID, and `--undo` after it to undo; a review's row menu there adds
-`--item` before the run ID, which works too.
+`bin/whooper-skip <run-id> --undo` deletes the file. It also stops reviewing the PR. A review that
+is still running stops as `kill` stops it ([Stop it](#stop-it)): whooper-review saves `the review
+was interrupted`, and whooper-round sends no notice for it. While the run is its PR's newest,
+whooper-select starts no other review of the PR, whatever asks for one, such as new commits or a new
+Slack ask, until `--undo` or `bin/whooper-retry`; a recheck-list item for the PR stays on the list
+meanwhile. For example, after you skip the review of #12 at head `abc1234`, the author pushes
+`def5678`, and every round drops #12 until you undo the skip, after which the next round reviews
+`def5678`. Nothing else changes: nothing posts to GitHub, and the drafts and records stay, so a
+skipped review that finished can still be submitted. It refuses a run ID that names no run
+directory. Prompting Time runs it as the manifest's `skip` action, adding the run ID, and `--undo`
+after it to undo; a review's row menu there adds `--item` before the run ID, which works too.
 
 ## Remove a review
 
@@ -428,8 +435,8 @@ checkout.
 ### Whooper's page
 
 `page/` is the page Prompting Time shows for one of Whooper's reviews or blockers: a review's header,
-with its versions, Skip and Undo, Remove and Restore, Rerun review, and a banner for new commits since
-the review; then the review's diff with Whooper's findings as draft comments under their lines,
+with its versions, Skip, which also stops a review that runs, and Undo, Remove and Restore, Rerun
+review, and a banner for new commits since the review; then the review's diff with Whooper's findings as draft comments under their lines,
 Include in review, Edit, Ask about this, Discard, and one bar that submits the review. A review that
 runs, waits, or failed shows why instead, with whooper-review's reason, the answers to earlier
 questions, and Ask why, and a cause that stops every review lists the reviews it holds back, with
@@ -722,8 +729,9 @@ the recheck list while the commands above write to it.
   count, at the head the PR has now.
   whooper-select drops an item in a repo the config has no `[repos."<owner>/<repo>"]` table for,
   an item whose record is done or running or has failed 3 times, a re-check of a PR that already
-  has 3 re-check records for other heads started today (local time), and an item that asks again for
-  a review you removed ([Remove a review](#remove-a-review)). A recheck-list item counts under that
+  has 3 re-check records for other heads started today (local time), an item that asks again for
+  a review you removed ([Remove a review](#remove-a-review)), and any item of a PR whose newest review
+  you skipped ([Skip a review](#skip-a-review)). A recheck-list item counts under that
   limit too, by the records of its own kind; dropped for it, the item stays on the list for the next
   day. Of these, only the missing table drops an item whose record says retry.
 - `rechecks/<owner>-<repo>-<pr>.json`: the recheck list: a PR whose head whooper-post or

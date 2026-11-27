@@ -611,14 +611,17 @@ class SelectWorkTest(unittest.TestCase):
         return {**work_item(kind="first_review", head=head), "source": "slack_ask", "slack": slack,
                 "reason": "Alex asked for a review."}
 
-    def make_run(self, run_id, item, removed=False):
+    def make_run(self, run_id, item, removed=False, skipped=False):
         """Makes the review run run_id of item, whose run.json is item with the run's own fields, and marks it
-        removed by the user, as bin/whooper-remove does, when removed is true; returns its directory."""
+        removed by the user, as bin/whooper-remove does, when removed is true, and skipped, as
+        bin/whooper-skip does, when skipped is true; returns its directory."""
         run = self.runs / run_id
         run.mkdir(parents=True)
         (run / "run.json").write_text(json.dumps({**item, "run_id": run_id, "agent": "claude"}))
         if removed:
             (run / "removed-by-user").touch()
+        if skipped:
+            (run / "skipped-by-user").touch()
         return run
 
     def test_no_record_is_work(self):
@@ -757,6 +760,31 @@ class SelectWorkTest(unittest.TestCase):
         # Unmarked, as bin/whooper-remove --undo leaves it, the newest run holds nothing back either.
         shutil.rmtree(newer)
         (removed / "removed-by-user").unlink()
+        self.assertEqual(select_work([standing], self.prs, self.now, REPOS, runs_dir=self.runs), ([standing], [], []))
+
+    def test_a_skipped_review_holds_back_every_review_of_its_pr_until_undone(self):
+        # The user skipped the PR's review of head3, which a Slack ask brought in.
+        listed = self.listed_again()
+        skipped = self.make_run("20310801T150000Z-12", listed, skipped=True)
+        standing = {**work_item(kind="first_review"), "source": "github_request"}
+        new_ask = {**listed, "slack": {**listed["slack"], "ts": "1943198437.000200"}}
+        # Unlike a removal, a new request holds back too: new commits, a new Slack post, or another kind.
+        for item in [standing, listed, new_ask, {**standing, "head_sha": "head4"}, {**standing, "kind": "recheck"}]:
+            with self.subTest(item=item):
+                self.assertEqual(select_work([item], self.prs, self.now, REPOS, runs_dir=self.runs),
+                                 ([], [(item, "skipped by the user")], []))
+        # The recheck list's item for the PR stays on the list for after the undo.
+        self.assertEqual(select_work([], self.prs, self.now, REPOS, [listed], runs_dir=self.runs),
+                         ([], [(listed, "skipped by the user")], []))
+        # bin/whooper-retry marks the record at the head retry: the user asked for the review.
+        self.record("head3.first_review.json", "retry")
+        self.assertEqual(select_work([standing], self.prs, self.now, REPOS, runs_dir=self.runs), ([standing], [], []))
+        self.record("head3.first_review.json", "failed", failures=1)
+        # Undone, as bin/whooper-skip --undo leaves it, the run holds nothing back.
+        (skipped / "skipped-by-user").unlink()
+        self.assertEqual(select_work([], self.prs, self.now, REPOS, [listed], runs_dir=self.runs), ([listed], [], []))
+        # Only the PR's newest run counts: a skip of an earlier review holds nothing back.
+        self.make_run("20310801T140000Z-12", listed, skipped=True)
         self.assertEqual(select_work([standing], self.prs, self.now, REPOS, runs_dir=self.runs), ([standing], [], []))
 
 
@@ -4745,6 +4773,44 @@ class RunTest(unittest.TestCase):
         self.assertEqual((review.returncode, self.read(run / "failure.txt")), (130, "the review was interrupted\n"))
         self.assertEqual(json.loads((run / "failure.json").read_text()), CAUSES["unknown"])
 
+    def test_skipping_a_review_a_round_runs_stops_it_quietly_and_holds_back_its_pr_until_undone(self):
+        env, item, _ = self.pull_request()
+        head = json.loads(item.read_text())["head_sha"]
+        agent_pid = Path(self.tmp.name) / "agent.pid"
+        self.fake_review_requests({**pr(number=12, head=head, requested=[LOGIN]),
+                                   "repository": {"nameWithOwner": "sample-org/plain-repo"}, "baseRefName": "main",
+                                   "url": "https://github.com/sample-org/plain-repo/pull/12"})
+        # The review run, which starts in the head worktree, notes its process ID and waits; the poll's
+        # run finds no asks.
+        poll = (self.fakes / "claude").read_text().split("\n", 1)[1]
+        self.script(self.fakes / "claude", f"case \"$PWD\" in */head) echo $$ > '{agent_pid}'; exec sleep 30 ;; esac\n{poll}")
+        round_ = subprocess.Popen([str(ROOT / "bin" / "whooper-round")], env={**self.env, **env}, stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, text=True, start_new_session=True)
+        self.addCleanup(self.stop, round_)
+        self.wait_for(lambda: self.read(agent_pid), "the review run to start")
+        [run] = (self.state / "runs").iterdir()
+        skipped = self.command("whooper-skip", run.name, env=env)
+        self.assertEqual((skipped.returncode, skipped.stdout), (
+            0, f"marked {run.name} (sample-org/plain-repo#12) as skipped, without submitting it, and stopped its review;"
+               f" Whooper starts no other review of the PR until bin/whooper-skip {run.name} --undo unmarks it\n"),
+            skipped.stderr)
+        out, _ = round_.communicate(timeout=60)
+        # The round goes on, and sends no notice of a review the user stopped.
+        self.assertEqual(round_.returncode, 0, out)
+        self.assertIn("review stopped: skipped by the user\n", out)
+        self.assertFalse(self.notifications.exists())
+        self.assertEqual(self.read(run / "failure.txt"), "the review was interrupted\n")
+        [review] = self.status()["reviews"]
+        self.assertEqual((review["outcome"], review["skipped_by_user"], review["needs_you"]), ("failed", True, False))
+        self.assertEqual(self.status()["items"][0]["group"], "done")
+        # The poll still lists the PR, and whooper-select drops it until the skip is undone.
+        select = self.command("whooper-select", env=env)
+        self.assertEqual(select.stdout, "")
+        self.assertIn("dropped sample-org/plain-repo#12 first_review: skipped by the user", select.stderr)
+        self.assertEqual(self.command("whooper-skip", run.name, "--undo", env=env).returncode, 0)
+        select = self.command("whooper-select", env=env)
+        self.assertEqual([json.loads(line)["pr"] for line in select.stdout.splitlines()], [12], select.stderr)
+
     def test_a_review_stopped_by_a_failed_command_saves_a_fixed_reason(self):
         env, item, _ = self.pull_request()
         # origin has no such branch, so the fetch fails once the run directory exists.
@@ -5856,7 +5922,7 @@ class ReviewsTest(unittest.TestCase):
         self.assertEqual(status["items"], [
             item(reviewing, "reviewing", "running",
                  f"example-repo#15 · @alice · reviewing since {short_date(self.local(self.started(reviewing)), now)}",
-                 actions=(), updated=self.started(reviewing)),
+                 actions=("skip",), updated=self.started(reviewing)),
             item(waits, "waiting", "idle", "example-repo#16 · waiting · Docker isn't running",
                  title="example-org/example-repo#16", updated=self.started(waits)),
             item(ready, "ready", "success", "example-repo#12 · @alice · 1 finding"),
@@ -6310,7 +6376,8 @@ class ReviewsTest(unittest.TestCase):
     def test_skipping_a_review_marks_it_done_without_submitting_it_until_undone(self):
         run = self.make_run(timedelta(hours=1))
         self.finish(run, findings=[finding()])
-        undo = f"bin/whooper-skip {run.name} --undo unmarks it"
+        # The run is its PR's newest, so Whooper starts no other review of the PR until the undo.
+        undo = f"Whooper starts no other review of the PR until bin/whooper-skip {run.name} --undo unmarks it"
         skipped = self.skip(run.name)
         self.assertEqual((skipped.returncode, skipped.stdout, skipped.stderr), (
             0, f"marked {run.name} (example-org/example-repo#12) as skipped, without submitting it; {undo}\n", ""))
@@ -6332,7 +6399,8 @@ class ReviewsTest(unittest.TestCase):
                                                                f" skipped, without submitting it; {undo}\n")
         self.assertEqual(self.skip("--item", run.name, "--undo").stdout,
                          f"unmarked {run.name} (example-org/example-repo#12) as skipped\n")
-        # A review whooper-review stopped before it wrote run.json, which names the PR, can be skipped too.
+        # A review whooper-review stopped before it wrote run.json, which names the PR, can be skipped too,
+        # though no PR's next review waits on it.
         stopped = self.make_run(timedelta(hours=2), pr=13, run_json=False)
         self.write(stopped, "failure.txt", "the review stopped at an unexpected error\n", 1)
         self.assertEqual(self.skip(stopped.name).stdout, f"marked {stopped.name} as skipped, without submitting it;"
@@ -6340,7 +6408,30 @@ class ReviewsTest(unittest.TestCase):
         self.assertEqual({r["run_id"]: (r["skipped_by_user"], r["needs_you"]) for r in self.reviews()},
                          {run.name: (False, True), stopped.name: (True, False)})
 
-    def test_skip_refuses_an_unknown_run_and_a_review_still_running(self):
+    def test_skipping_a_review_still_running_stops_its_whooper_review(self):
+        run = self.make_run(timedelta(minutes=5))
+        self.fetched(run)
+        name = f"{run.name} (example-org/example-repo#12)"
+        then = f"Whooper starts no other review of the PR until bin/whooper-skip {run.name} --undo unmarks it"
+        # A stand-in for whooper-review, named so, which notes the TERM a kill sends and stops at it, as
+        # whooper-review's trap does.
+        tmp, term = Path(self.tmp.name), Path(self.tmp.name) / "term"
+        fake(tmp / "review" / "whooper-review",
+             f"trap 'echo TERM > {term}; exit 130' TERM\ntouch {tmp / 'ready'}\nwhile :; do sleep 0.1; done")
+        review = subprocess.Popen([str(tmp / "review" / "whooper-review")])
+        self.addCleanup(lambda: review.poll() is None and review.kill())
+        deadline = monotonic() + 10
+        while not (tmp / "ready").exists() and monotonic() < deadline:
+            sleep(0.05)
+        self.hold(run, review.pid)
+        result = self.skip(run.name)
+        self.assertEqual((result.returncode, result.stdout, result.stderr),
+                         (0, f"marked {name} as skipped, without submitting it, and stopped its review; {then}\n", ""))
+        self.assertEqual(review.wait(timeout=10), 130)
+        self.assertEqual(term.read_text(), "TERM\n")
+        self.assertTrue((run / "skipped-by-user").exists())
+
+    def test_skip_refuses_an_unknown_run_and_signals_no_other_program(self):
         run = self.make_run(timedelta(minutes=5))
         self.fetched(run)
         for run_id in ["20310101T000000Z-1", "..", "../whooper", f"../runs/{run.name}"]:
@@ -6348,13 +6439,16 @@ class ReviewsTest(unittest.TestCase):
                 result = self.skip(run_id)
                 self.assertEqual((result.returncode, result.stdout, result.stderr),
                                  (1, "", f"whooper-skip: no run {run_id} in {self.state / 'runs'}\n"))
-        # A live whooper-review holds the PR's lock for the run; the lock's process is this test.
+        # The PR's lock names the run and a process that exists but is no whooper-review, here this test, as
+        # when the system gave the ID of a killed whooper-review to another program. The mark goes on, and
+        # the process gets no signal, or this test would stop here.
         self.hold(run, os.getpid())
-        for args in [[run.name], [run.name, "--undo"]]:
-            with self.subTest(args=args):
-                result = self.skip(*args)
-                self.assertEqual((result.returncode, result.stdout, result.stderr),
-                                 (1, "", "whooper-skip: the review is still running; skip it once it ends\n"))
+        name = f"{run.name} (example-org/example-repo#12)"
+        then = f"Whooper starts no other review of the PR until bin/whooper-skip {run.name} --undo unmarks it"
+        result = self.skip(run.name)
+        self.assertEqual((result.returncode, result.stdout, result.stderr),
+                         (0, f"marked {name} as skipped, without submitting it; {then}\n", ""))
+        self.assertEqual(self.skip(run.name, "--undo").stdout, f"unmarked {name} as skipped\n")
         for args in [[], ["--undo"], [run.name, run.name], [run.name, "--undo", "--undo"], ["--item"],
                      ["--item", run.name, run.name], [run.name, "--item", run.name]]:
             with self.subTest(args=args):
@@ -6435,6 +6529,9 @@ class ReviewsTest(unittest.TestCase):
         # The next round does not review a removed review, so it no longer waits, though Docker is still down.
         self.assertEqual(self.remove(waits[0].name).returncode, 0)
         self.assertEqual(self.status()["blocked"], {**blocked, "waiting": 1})
+        # Nor a skipped one.
+        self.assertEqual(self.skip(waits[1].name).returncode, 0)
+        self.assertEqual(self.status()["blocked"], {**blocked, "waiting": 0})
 
     def test_show_refuses_an_unknown_run(self):
         run = self.make_run(timedelta(hours=1))
@@ -6489,11 +6586,27 @@ class StatusFormat2Test(unittest.TestCase):
              "waiting", "idle"),
             ({"outcome": "waiting", "verdict": None, "needs_you": False, "cause": CAUSES["unknown"]}, "reviewing", "idle"),
             ({"outcome": "running", "verdict": None, "needs_you": False, "ended_at": None}, "reviewing", "running"),
+            # bin/whooper-skip stopped the review, which ends as an interrupted failure.
+            ({"outcome": "running", "verdict": None, "needs_you": False, "ended_at": None, "skipped_by_user": True},
+             "done", "idle"),
         ]
         for fields, group, dot in cases:
             with self.subTest(fields):
                 [item] = self.status([self.review(5, **fields)])["items"]
                 self.assertEqual((item["group"], item["dot"]), (group, dot))
+
+    def test_a_review_that_runs_offers_only_skip_which_stops_it(self):
+        running = {"outcome": "running", "verdict": None, "needs_you": False, "ended_at": None}
+        cases = [
+            (running, ["skip"]),
+            ({}, ["retry", "skip", "remove"]),
+            ({"skipped_by_user": True, "needs_you": False}, ["retry", "remove"]),
+            ({**running, "skipped_by_user": True}, []),
+        ]
+        for fields, actions in cases:
+            with self.subTest(fields):
+                [item] = self.status([self.review(5, **fields)])["items"]
+                self.assertEqual(item["actions"], actions)
         # A review the user removed is in no group.
         self.assertEqual(self.status([self.review(5, removed_by_user=True, needs_you=False)])["items"], [])
 

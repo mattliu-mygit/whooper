@@ -259,8 +259,8 @@ def read_blocked(reviews):
     read_reviews lists them: while the newest review that ended or waits stopped, or waits, at a cause
     whose scope is all, that cause; since, when the first of the reviews just before it that stopped
     or wait at the same cause ended, or started for one that waits; and waiting, how many PRs' newest
-    review waits for the next round, which one the user removed does not, since the round holds it
-    back (select_work). None otherwise, as once a review succeeds, or stops at a cause of its PR's own,
+    review waits for the next round, which one the user removed or skipped does not, since the round
+    holds it back (select_work). None otherwise, as once a review succeeds, or stops at a cause of its PR's own,
     which shows that the cause no longer holds. A review that runs has not shown either yet, so it is
     passed over."""
     ended = [r for r in reviews if r["outcome"] != "running"]
@@ -275,7 +275,7 @@ def read_blocked(reviews):
     newest, waiting = set(), 0
     for review in reviews:
         if ((review["repo"], review["pr"]) not in newest and review["outcome"] == "waiting"
-                and not review["removed_by_user"]):
+                and not review["removed_by_user"] and not review["skipped_by_user"]):
             waiting += 1
         newest.add((review["repo"], review["pr"]))
     return {**cause, "since": first["ended_at"] or first["started_at"], "waiting": waiting}
@@ -336,8 +336,9 @@ def review_item(review, group, now):
     line that names the PR, its author, and where the review stands, a dot (green when it is ready to
     approve, orange when it needs a look, red when it failed, uncolored while it runs, and none
     otherwise), when it last changed, the route of Whooper's page that shows it, and the row actions
-    that apply: retry, skip, and remove, each of which refuses a review that runs, retry also one
-    without run.json, which alone names the PR's repo, and skip one already submitted or skipped.
+    that apply: retry, skip, and remove, of which retry and remove refuse a review that runs, retry also
+    one without run.json, which alone names the PR's repo, and skip, which stops a review that runs,
+    refuses one already submitted or skipped.
     Whooper knows no checkout of the PR's repo, so project is None."""
     repo, pr, cause = review["repo"], review["pr"], review["cause"]
     name = f"{repo.split('/')[-1]}#{pr}" if repo else f"#{pr}"
@@ -368,7 +369,7 @@ def review_item(review, group, now):
     running = review["outcome"] == "running"
     actions = [action for action, applies in [
         ("retry", not running and repo is not None),
-        ("skip", not running and review["submitted"] is None and not review["skipped_by_user"]),
+        ("skip", review["submitted"] is None and not review["skipped_by_user"]),
         ("remove", not running),
     ] if applies]
     return {
@@ -470,11 +471,12 @@ def parse_run_id(run_id):
 
 
 def running_runs(data):
-    """The IDs of the review runs that a live whooper-review still runs, by whooper-ask's rule: the PR's
-    lock under data/locks names the run in run_id, and the process in its pid exists. A lock whose
-    process is gone, as after a kill -9, is stale. The locks are read for the runs they name, so a
-    review counts as running before it writes run.json, which names its PR and so its lock."""
-    running = set()
+    """The IDs of the review runs that a live whooper-review still runs, each with the process ID its
+    lock names, by whooper-ask's rule: the PR's lock under data/locks names the run in run_id, and the
+    process in its pid exists. A lock whose process is gone, as after a kill -9, is stale. The locks are
+    read for the runs they name, so a review counts as running before it writes run.json, which names
+    its PR and so its lock."""
+    running = {}
     for lock in (data / "locks").glob("*"):
         try:
             pid, run_id = int((lock / "pid").read_text()), (lock / "run_id").read_text().strip()
@@ -482,7 +484,7 @@ def running_runs(data):
             os.kill(pid, 0)
         except (OSError, ValueError):
             continue
-        running.add(run_id)
+        running[run_id] = pid
     return running
 
 
@@ -2843,7 +2845,9 @@ def select_work(items, prs_dir, now, repos, rechecks=(), runs_dir=None):
 
     Whooper does not retry on its own a review the user removed (remove_review): while the newest run
     of an item's PR in runs_dir is marked removed, an item that asks for the same review again
-    (removed_request) is dropped, unless its record says retry.
+    (removed_request) is dropped, unless its record says retry. While the newest run of its PR is marked
+    skipped (skip_review), every item of the PR is dropped, unless its record says retry, and a
+    recheck-list item stays on the list, so the PR's review comes back once the user undoes the skip.
 
     The limit holds a recheck-list item too, counting the records of the item's own kind, and an item
     it drops stays on the list for the next day. A recheck-list item no longer waits once items list
@@ -2879,6 +2883,9 @@ def select_work(items, prs_dir, now, repos, rechecks=(), runs_dir=None):
             # Whooper does not retry the review on its own, so the PR leaves the list.
             if from_list:
                 finished.append(item)
+        elif runs_dir and (newest := newest_run(runs_dir, item["repo"], item["pr"])) and (
+                newest[0] / SKIPPED_BY_USER).exists():
+            reason = "skipped by the user"
         elif item["kind"] == "recheck" or from_list:
             started = [
                 datetime.fromisoformat(json.loads(p.read_text())["started_at"]).astimezone(now.tzinfo).date()
@@ -2971,14 +2978,21 @@ def list_again(data, item, head):
         write_file(path, json.dumps(work | {"head_sha": head}))
 
 
-def run_to_change(data, run_id, command, verb):
-    """The directory of the review run run_id under data, for command, such as whooper-skip, which
-    changes what the run means: exits with command's message for a run ID that names no run directory,
-    and for a review a live whooper-review still runs, as verb, such as skip, says."""
+def run_dir(data, run_id, command):
+    """The directory of the review run run_id under data, for command, such as whooper-skip: exits with
+    command's message for a run ID that names no run directory."""
     run = data / "runs" / run_id
     # A run ID names a directory right under runs, so a path such as ../x reads nothing outside it.
     if parse_run_id(run_id) is None or not run.is_dir():
         raise SystemExit(f"{command}: no run {run_id} in {data / 'runs'}")
+    return run
+
+
+def run_to_change(data, run_id, command, verb):
+    """The directory of the review run run_id under data, for command, such as whooper-remove, which
+    changes what the run means: exits with command's message for a run ID that names no run directory,
+    and for a review a live whooper-review still runs, as verb, such as remove, says."""
+    run = run_dir(data, run_id, command)
     if run_id in running_runs(data):
         raise SystemExit(f"{command}: the review is still running; {verb} it once it ends")
     return run
@@ -3007,10 +3021,12 @@ def retry(data, run_id, head_now, now):
 def skip_review(data, run_id, undo=False):
     """Marks the review run run_id under data skipped by the user, for whooper-skip, or with undo
     unmarks it: the empty file SKIPPED_BY_USER in its directory, which makes whooper-status count the
-    review as done without its being submitted, so it needs the user no more. Nothing else changes,
-    the drafts and records included. Refuses a run ID that names no run directory and a review a live
-    whooper-review still runs. Returns the line whooper-skip prints."""
-    run = run_to_change(data, run_id, "whooper-skip", "skip")
+    review as done without its being submitted, so it needs the user no more. While the run is its
+    PR's newest, select_work starts no other review of the PR. A review a live whooper-review still runs
+    is stopped, as a kill of the process its lock names stops it: whooper-review saves "the review was
+    interrupted" as its failure and counts a failure in its record. Nothing else changes, the drafts
+    included. Refuses a run ID that names no run directory. Returns the line whooper-skip prints."""
+    run = run_dir(data, run_id, "whooper-skip")
     item = read_object(run / "run.json") or {}
     name = f"{run_id} ({item['repo']}#{item['pr']})" if "repo" in item and "pr" in item else run_id
     mark = run / SKIPPED_BY_USER
@@ -3019,11 +3035,22 @@ def skip_review(data, run_id, undo=False):
             return f"{name} is not marked as skipped"
         mark.unlink()
         return f"unmarked {name} as skipped"
-    if mark.exists():
+    pid = running_runs(data).get(run_id)
+    if mark.exists() and pid is None:
         return f"{name} is already marked as skipped"
-    # The file stays empty, so a program watching the folder has nothing to read half of.
+    # The mark comes first, so whooper-status never lists the stopped review as a failure that needs the
+    # user. The file stays empty, so a program watching the folder has nothing to read half of.
     mark.touch()
-    return f"marked {name} as skipped, without submitting it; bin/whooper-skip {run_id} --undo unmarks it"
+    # The lock outlives a process killed with kill -9, and the system may give its ID to another
+    # program, which must not get the signal.
+    stopped = pid is not None and "whooper-review" in subprocess.run(
+        ["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout
+    if stopped:
+        os.kill(pid, signal.SIGTERM)
+    newest = "repo" in item and newest_run(data / "runs", item["repo"], item["pr"])
+    return (f"marked {name} as skipped, without submitting it" + (", and stopped its review" if stopped else "")
+            + ("; Whooper starts no other review of the PR until" if newest and newest[0] == run else ";")
+            + f" bin/whooper-skip {run_id} --undo unmarks it")
 
 
 def remove_review(data, run_id, undo=False):

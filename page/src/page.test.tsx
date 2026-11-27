@@ -171,6 +171,17 @@ describe("Whooper's page with the fake host", () => {
     expect(host.calls("remove")).toEqual([[RUN], [RUN, "--undo"]]);
   }, 30_000);
 
+  it("skips a review that still runs, which stops it", async () => {
+    const running = "20310727T014000Z-120";
+    const host = renderWithFakeHost({ openOnReady: `/reviews/${running}` });
+    expect(await screen.findByRole("heading", { name: "Reviewing…" })).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "Skip" }));
+    expect(await screen.findByText("Skipped")).toBeInTheDocument();
+    expect(host.calls("skip")).toEqual([[running]]);
+    // Remove still waits for the review to end.
+    expect(screen.queryByRole("button", { name: "Remove" })).not.toBeInTheDocument();
+  });
+
   it("shows a failed review: why it failed, earlier answers, Ask why, and Retry review", async () => {
     const failed = "20310727T005510Z-109";
     const host = renderWithFakeHost({ openOnReady: `/reviews/${failed}` });

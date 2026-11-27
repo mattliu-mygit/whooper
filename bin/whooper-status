@@ -114,8 +114,8 @@
 #     project     null: Whooper knows no checkout of the PR's repo
 #     updated_at  when the review was submitted, or else ended, or else started
 #     route       /reviews/<run-id>, where Whooper's page shows the review
-#     actions     those of retry, skip, and remove that apply: none while the review runs, no retry
-#                 without the repo, and no skip once submitted or skipped
+#     actions     those of retry, skip, and remove that apply: only skip, which stops it, while the
+#                 review runs, no retry without the repo, and no skip once submitted or skipped
 #   truncated   whether items left any out to stay within 50
 #
 # Times are local, in ISO 8601 with the offset. bin/whooper-show <run-id> --json prints one review

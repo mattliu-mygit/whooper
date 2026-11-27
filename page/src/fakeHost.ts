@@ -170,7 +170,9 @@ export function createFakeHost(send: (message: HostMessage) => void, options: Fa
   /** Marks or unmarks a run as whooper-skip and whooper-remove do, and prints what it did. */
   function mark(marks: Set<string>, command: string, word: string, runId: string, ...flags: string[]): string {
     const r = record(runId, command);
-    if (r.outcome === "running") throw new Error(`${command}: the review is still running; ${command.slice(8)} it once it ends`);
+    // whooper-skip stops a review that runs; the fake has no review to stop.
+    if (r.outcome === "running" && command !== "whooper-skip")
+      throw new Error(`${command}: the review is still running; ${command.slice(8)} it once it ends`);
     const name = `${runId} (${r.repo}#${r.pr})`;
     if (flags.includes("--undo")) {
       if (!marks.delete(runId)) return `${name} is not marked as ${word}`;
