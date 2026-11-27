@@ -154,6 +154,8 @@ ul {
 
 .w-files-pane {
   display: grid;
+  /* As wide as the pane, never wider, so a long line scrolls in its diff (see .walk-column). */
+  grid-template-columns: minmax(0, 1fr);
   align-content: start;
   gap: var(--s-space-8);
   overflow: auto;

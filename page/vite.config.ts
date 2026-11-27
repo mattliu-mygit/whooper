@@ -15,5 +15,7 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
+    // The page's own CSS reaches a test as text (`?raw`), for the layout checks in src/test/layout.ts.
+    css: { include: [/src\/app\.css/, /src\/review\/review\.css/] },
   },
 });

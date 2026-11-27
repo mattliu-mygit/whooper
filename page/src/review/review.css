@@ -359,8 +359,12 @@
   overflow-y: auto;
 }
 
+/* One track as wide as the column, never wider: an auto track would grow to its widest child's
+   min-content, such as a code excerpt's longest line, and center the prose in that wider track, off
+   to the right and clipped. A child that is wider scrolls itself instead. */
 .walk-column {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--s-space-24);
   inline-size: min(100%, 72rem);
   margin-inline: auto;
@@ -722,6 +726,7 @@
 
 .walk-layer {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--s-space-12);
 }
 
@@ -1197,6 +1202,7 @@ body.review-dimming .w-review-header {
 
 .map-code {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--s-space-8);
   max-block-size: 26rem;
   overflow: auto;
@@ -1305,6 +1311,7 @@ body.review-dimming .w-review-header {
 
 .full-view-column {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--s-space-24);
   inline-size: min(100%, 72rem);
   margin-inline: auto;
@@ -1335,6 +1342,7 @@ body.review-dimming .w-review-header {
    known, and its diff cut to them. j and k mark the current file with a line on its left, at once. */
 .gaps-file {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--s-space-8);
   padding-inline-start: var(--s-space-12);
   border-inline-start: 2px solid transparent;
