@@ -3230,20 +3230,48 @@ class SubmitTest(unittest.TestCase):
         self.assertEqual(self.submit().returncode, 0)
         self.assertEqual(len(self.posted()), 1)
 
-    def test_a_review_without_comments_posts_only_as_an_approval(self):
-        # The run is not safe to approve, so its review starts as a comment with nothing included; a
-        # message alone does not count.
-        for change in [None, ("message", "Looks fine.")]:
-            with self.subTest(change=change):
-                if change:
-                    self.draft(*change)
-                empty = self.submit()
-                self.assertEqual(empty.returncode, 1)
-                self.assertIn("nothing to submit", empty.stderr)
-        self.draft("approve")
-        result = self.submit("--approve-anyway")
+    def test_a_review_without_comments_posts_its_message(self):
+        # A run with no finding is safe to approve, so its review starts as an approval, and the run setUp
+        # writes is not, so its review starts as a comment. Neither includes a comment.
+        cases = [
+            # (name, the run's verdict, its findings, the message the user set, the event that posts)
+            ("an approval", "approve_once_ci_passes", [], "lgtm", "APPROVE"),
+            ("a comment", "look_first", [self.BUG, self.QUESTION, self.NIT], "Thanks, nothing from me.", "COMMENT"),
+        ]
+        for name, verdict, findings, message, event in cases:
+            with self.subTest(name):
+                self.setUp()
+                self.write_findings(verdict, findings)
+                self.draft("message", message)
+                result = self.submit()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.posted(), [{"commit_id": "h1", "event": event, "body": message, "comments": []}])
+
+    def test_a_comment_without_comments_or_a_message_has_nothing_to_submit(self):
+        # The run is not safe to approve, so its review starts as a comment with nothing included, and a
+        # message of blanks says nothing either.
+        for name, message in [("no message", None), ("a blank message", " \n")]:
+            with self.subTest(name):
+                if message is not None:
+                    self.draft("message", message)
+                for flags in [[], ["--print"]]:
+                    refused = self.submit(*flags)
+                    self.assertEqual(refused.returncode, 1, refused.stderr)
+                    self.assertIn("nothing to submit", refused.stderr)
+        self.assertEqual(self.posted(), [])
+        self.assertEqual(sorted(p.name for p in self.run.iterdir()), ["drafts.json", "findings.json", "run.json"])
+
+    def test_print_shows_a_review_of_only_a_message_and_its_fingerprint(self):
+        # The run is not safe to approve, so its review starts as a comment with nothing included.
+        self.draft("message", "Thanks, nothing from me.")
+        confirmed = self.shown()
+        request = {"commit_id": "h1", "event": "COMMENT", "body": "Thanks, nothing from me.", "comments": []}
+        text = (self.run / "submit-request.json").read_bytes()
+        self.assertEqual((json.loads(text), hashlib.sha256(text).hexdigest()), (request, confirmed))
+        self.assertEqual(self.posted(), [])
+        result = self.submit("--expect", confirmed)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.posted(), [{"commit_id": "h1", "event": "APPROVE", "body": "Looks fine.", "comments": []}])
+        self.assertEqual(self.posted(), [request])
 
     def test_a_safe_run_starts_as_an_approval_of_its_nits_and_posts_it(self):
         self.write_findings("approve_once_ci_passes", [self.NIT, self.OTHER_NIT])

@@ -308,7 +308,9 @@ verdict, has no drafts; whooper-draft names the first part that does not fit.
 at the head the run reviewed. Each comment is `AI comment (vetted)`, a blank line, and the text,
 which keeps the Conventional Comments label it opens with, such as `**nit:**`; a text without one
 gets its finding kind's. An approval without a message says `Pre-approving to unblock` when it
-includes comments and nothing when it includes none; a message the user set posts as written.
+includes comments and nothing when it includes none; a message the user set posts as written. A
+review that includes no comment posts its message alone: an approval with the message `lgtm` posts
+an approval that says `lgtm`, and a comment review posts only what the user wrote.
 
 Prompting Time's Submit button and Whooper's agent both run whooper-submit after Prompting Time's
 confirmation, which shows the exact request that `whooper-submit <run-id> --print` writes to
@@ -331,8 +333,8 @@ Any other failure exits 1, or with gh's or jq's own code, none of which is 10 to
 someone wrote on the same line since the review, and a link outside the configured orgs, do not
 stop it. It refuses a review that is still running, since a Devin review may still change its
 `findings.json`, a review that did not finish, a run whose `run.json` it cannot read, a review that
-includes no comment and does not approve, and a run it already submitted, so a review never posts
-twice.
+includes no comment, has no message, and does not approve, and a run it already submitted, so a
+review never posts twice.
 
 ## Skip a review
 

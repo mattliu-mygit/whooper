@@ -4102,9 +4102,11 @@ def main(command, *args):
                    " bin/whooper-round runs that round now.")
         drafts = read_drafts(run)
         comments = vetted_comments(result["findings"], drafts)
-        if not comments and drafts["event"] == "COMMENT":
-            raise SystemExit("whooper-submit: nothing to submit: the drafts include no comment and do not approve;"
-                             " change them with bin/whooper-draft")
+        # A review that includes no comment posts its message alone. An approval may leave it empty, but
+        # a comment review with neither would post nothing.
+        if not comments and drafts["event"] == "COMMENT" and not drafts["message"].strip():
+            raise SystemExit("whooper-submit: nothing to submit: the drafts include no comment, have no message, and"
+                             " do not approve; change them with bin/whooper-draft")
         message = drafts["message"]
         if drafts["event"] == "APPROVE" and not message.strip():
             message = PRE_APPROVAL if comments else ""

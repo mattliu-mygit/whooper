@@ -15,7 +15,8 @@
 # "AI comment (vetted)", a blank line, then the user's text or else the finding's draft, opened
 # with its Conventional Comments label, or with its finding kind's when it has none. An approval
 # whose message is empty says "Pre-approving to unblock" when it includes comments, and nothing
-# when it includes none.
+# when it includes none. A review that includes no comment posts its message alone, such as an
+# approval that says "lgtm", or a comment review that says only what the user wrote.
 #
 # It first re-reads the PR's head. Each refusal Prompting Time handles its own way posts nothing and
 # exits with its own code:
@@ -39,7 +40,8 @@
 # stop it. It refuses a review that is still running, which a live whooper-review holds the PR's lock
 # for, since a Devin review may still change the findings.json it wrote; a review that did not
 # finish, which left no findings.json or one that does not fit schemas/findings.json; a run whose
-# run.json it cannot read; and a review that includes no comment and does not approve.
+# run.json it cannot read; and a review that includes no comment, has no message, and does not
+# approve.
 #
 # Before it posts, it writes <run dir>/submit.json saying posting, and after, GitHub's response,
 # so the file records the request and the response, and a second call refuses: a review never posts
