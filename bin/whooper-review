@@ -35,7 +35,9 @@
 # for Go functions the PR changes, which it wrote as examples.json beside its test, whooper_examples_test.go,
 # and which move to examples.request.json as soon as it ends, a step of at most 5 minutes runs the test once
 # at the head and twice at the merge base, without the run's edits, and saves what it printed as
-# examples.json (lib/whooper.py's examples). Whatever each step finds, and even if it fails, the review goes
+# examples.json (lib/whooper.py's examples). Then a step of at most 15 minutes has gremlins change each changed Go line
+# tests ran, one small change at a time, and adds to test_gaps.json which lines survived, the tests still passing, and
+# which were caught (lib/whooper.py's mutation). Whatever each step finds, and even if it fails, the review goes
 # on as it would without its file. bin/whooper-classify <run dir> then applies rule v1 to its findings.
 #
 # While it runs, this script holds the PR's lock, <state>/locks/<owner>-<repo>-<pr>/, with its
@@ -359,6 +361,11 @@ run_step connections connections.json
 # chose return for the inputs it chose, from its test run once at the head and twice at the merge base,
 # without the run's edits (lib/whooper.py's examples).
 run_step examples examples.json
+# Then, when test_gaps.json measured changed Go lines, the mutation step has gremlins change each changed Go line tests ran,
+# one small change at a time, and adds to test_gaps.json which lines survived, every test still passing, and which were
+# caught (lib/whooper.py's mutation). It first puts back the committed text of each Go file the run changed in the head's
+# worktree, so gremlins changes the reviewed commit, and it stops after 15 minutes.
+run_step mutation "survived or caught lines in test_gaps.json"
 
 # Each check names its own step, which failure.json names the cause by.
 step=time-limit

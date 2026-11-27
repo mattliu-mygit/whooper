@@ -17,6 +17,9 @@ through `lib/python`, which has uv supply Python 3.11 or later and the packages 
 names, at the versions `lib/whooper.py.lock` pins; the first run downloads what is missing.
 [gopls](https://go.dev/gopls/) is optional: with it, a review links changed Go code to its callers with
 Go's own tools rather than by name search ([How a review run works](#how-a-review-run-works)). So is
+[gremlins](https://github.com/go-gremlins/gremlins) is optional too (`go install
+github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0`): with it, a review checks whether the tests notice a
+small change to the changed Go lines they run. So is
 the `go` command, with which a review measures which changed Go lines no test ran and runs the example
 inputs its run chose, at the head and at the merge base, and `node`, with which it measures the changed
 JavaScript and TypeScript lines of a package whose tests run with Vitest or Jest.
@@ -205,9 +208,12 @@ whooper-review saved it.
 and TypeScript code no test ran. `measured` is false when Whooper could measure nothing, with `reason`
 saying why in plain words, and `reason` is null otherwise; `tool` lists the commands it ran, go test and
 each package's Vitest or Jest, joined by `; `, each that runs in a folder of its own in parentheses after
-a `cd`; `lines` lists each changed line no test ran, as `path`, `line`, and `status` `not_run`; `summary` counts the changed lines that hold statements
+a `cd`; `lines` lists each changed line no test ran, as `path`, `line`, and `status` `not_run`, and, after the
+review run, each changed Go line tests ran that Whooper changed with gremlins, with `status` `survived` when
+every test of its package still passed and `caught` when one failed, and `change` saying what changed, such as
+`` `>` to `>=` ``, at most 7 such lines a file, survived first; gremlins does not say which test caught a change; `summary` counts the changed lines that hold statements
 (`changed_lines`) and how many of them a test ran (`run`) or not (`not_run`), all 0 when nothing was
-measured; and `limits` says what the measure can miss, such as that a test can run a line without checking
+measured, and, once the mutation step ran, how many lines it lists as `survived` and `caught`; and `limits` says what the measure can miss, such as that a test can run a line without checking
 what it does. For example, a PR that adds `if n > 100 { n = 100 }` to `Clamp`, whose only test calls
 `Clamp(50)`, lists the line `n = 100` as not run, and counts the `if` line as run. `examples` is the
 `examples.json` whooper-review saved after the run: what the Go functions the run chose return for the
@@ -546,6 +552,21 @@ the edits or probes the run left in the worktrees, and gopls downloads nothing (
 keeps at most 40 nodes, the changed code first, and the step stops looking after 2 minutes, and says so in
 `limits`. Like the overview, it never changes how a review ends: when it fails, the review has no
 `connections.json`.
+
+After the examples step below, while the worktrees still exist, a mutation step adds to `test_gaps.json`
+which changed Go lines that tests ran still pass their tests when changed. It first puts back the committed
+text of each Go file the run changed in the head's worktree, and removes those it added, so gremlins reads the
+reviewed commit. Then it runs `gremlins unleash --diff <merge base> --workers 2 --timeout-coefficient 10` once
+in the folder of each changed Go file, but for one inside another such folder, with `GOPROXY=off
+GOTOOLCHAIN=local` and git set to `diff.relative=true`, `diff.context=0`, and `color.diff=false`, since
+gremlins compares paths relative to its folder, takes each hunk's added lines as one range, and cannot read
+color. gremlins runs the folder's tests with coverage, then for each changed line they run makes one small
+change at a time, such as `>` to `>=`, in a copy of the module, and runs the line's package's tests again.
+Whooper keeps only lines the diff adds and `test_gaps.json` does not list as not run, a surviving change first,
+one change a line, and at most 7 lines a file, and leaves out changes that ran out of time or did not compile.
+It stops after 15 minutes, keeping the folders gremlins finished, and `limits` says what it did not do: without
+gremlins, at the time limit, and when gremlins stops, as when a test fails before it changes anything. Like the
+other steps, it never changes how a review ends.
 
 When the PR changes Go functions whose results a caller sees and that write no data, the run also
 chooses at most 3 of them and at most 12 inputs, and writes `whooper_examples_test.go`, a test that prints

@@ -66,7 +66,9 @@
 #              measured, false when Whooper could measure nothing, with reason saying why, such as that the
 #              head does not build, and null otherwise; tool, the commands it ran, go test and each Node
 #              package's Vitest or Jest, joined by ; ; lines, each changed line no test ran, as {path,
-#              line, status (not_run)}; summary, {changed_lines, run, not_run}, the changed lines that
+#              line, status (not_run)}, and each changed Go line tests ran that gremlins changed, as
+#              {path, line, status (survived or caught), change}; summary, {changed_lines, run, not_run,
+#              survived, caught}, the changed lines that
 #              hold statements and how many of them a test ran, all 0 when nothing was measured; and
 #              limits, what the measure can miss, in plain words, such as that a line a test ran may be
 #              one no test checks

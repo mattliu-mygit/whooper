@@ -234,10 +234,13 @@ export interface TestGaps {
   reason: string | null;
   /** The commands Whooper ran, joined by "; ", each that runs in another folder as (cd <folder> && <command>). */
   tool: string;
-  /** Each changed line no test ran, in the head. */
-  lines: { path: string; line: number; status: "not_run" }[];
-  /** The changed lines that hold statements, and how many of them a test ran; all 0 when nothing was measured. */
-  summary: { changed_lines: number; run: number; not_run: number };
+  /** Each changed line no test ran, in the head, and each changed Go line tests ran that Whooper changed with
+   * gremlins: survived when every test of its package still passed, caught when one failed, with change saying what
+   * changed, such as "`>` to `>=`". At most 7 survived or caught lines a file; gremlins names no test. */
+  lines: { path: string; line: number; status: "not_run" | "survived" | "caught"; change?: string }[];
+  /** The changed lines that hold statements, and how many of them a test ran; all 0 when nothing was measured.
+   * survived and caught count those lines, once the mutation step ran. */
+  summary: { changed_lines: number; run: number; not_run: number; survived?: number; caught?: number };
   /** What the measure can miss, in plain words, such as that a test can run a line without checking it. */
   limits: string[];
 }

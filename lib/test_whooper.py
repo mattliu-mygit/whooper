@@ -1582,7 +1582,7 @@ class ConnectionsTest(RunDirTest):
     @classmethod
     def setUpClass(cls):
         # Found in the user's own environment, before a test moves HOME.
-        cls.gopls, _ = whooper.find_gopls()
+        cls.gopls, _ = whooper.find_go_tool("gopls")
 
     def connections(self, run, env, **options):
         """What connections writes for run in the environment env, given options such as seconds."""
@@ -1717,8 +1717,7 @@ class ConnectionsTest(RunDirTest):
 
 # The limits test_gaps.json gives whenever it measures, in plain words.
 AND_LINES = "Go counts a line as run when any part of it ran: in `a && b`, the line counts as run even when b never ran."
-CHECKED = ("A line that ran is not always checked: a test can run a line without checking what it does. Whooper does not"
-           " yet change lines on purpose to see whether a test catches it (mutation testing).")
+CHECKED = "A line that ran is not always checked: a test can run a line without checking what it does."
 OWN_TESTS = ("Only the tests of the changed packages ran, so a test in another package that runs these lines does not"
              " count.")
 # PR 7 of a Go module: in calc, Clamp gains a cap its test never reaches, Allowed gains `&& quota > 0`, which its
@@ -2032,6 +2031,150 @@ class NodeGapsTest(RunDirTest):
         self.assertEqual(gaps["limits"][-1], "Whooper did not measure 1 changed file in web, since its tests ran past"
                                              " Whooper's 30-second limit: web/src/calc.ts.")
         # The test's process started, and the step stopped it.
+        deadline = monotonic() + 5
+        with self.assertRaises(ProcessLookupError):
+            while monotonic() < deadline:
+                os.kill(int(pid.read_text()), 0)
+                sleep(0.1)
+
+
+# The limits test_gaps.json gives once the mutation step ran, in plain words.
+MUTATED = ("Whooper changed each changed Go line that tests ran with gremlins, one small change at a time, such as `>` to"
+           " `>=`, and ran the tests of the line's package again: survived when every test still passed, caught when one"
+           " failed. gremlins changes only arithmetic, comparisons, increments, and negative signs, so other lines, and"
+           " lines only another package's tests run, show neither.")
+NO_GREMLINS = ("Whooper found no gremlins on PATH or where go install puts it, go env GOBIN or GOPATH/bin, so Whooper did"
+               " not change the changed Go lines on purpose to see whether a test catches the change (mutation testing).")
+# PR 5 of a Go module: Clamp gains a cap, whose test checks 50 and 150 but not 100, so gremlins' `>` to `>=` survives
+# while its `>` to `<=` is caught; F subtracts where it added and adds 2, which its test catches either way, and F's middle
+# line stays as it was between two changed lines. The test sleeps a little, so gremlins gives each change's tests time.
+MUT = {
+    "go.mod": "module example.com/mut\n\ngo 1.21\n",
+    "calc/calc.go": ("package calc\n\n// Clamp keeps n at or under 100.\nfunc Clamp(n int) int {\n\treturn n\n}\n\n"
+                     "// F adds and doubles.\nfunc F(n int) int {\n\ta := n + 1\n\tb := a * 2\n\treturn b\n}\n"),
+    "calc/calc_test.go": ('package calc\n\nimport (\n\t"testing"\n\t"time"\n)\n\nfunc TestClamp(t *testing.T) {\n'
+                          "\ttime.Sleep(300 * time.Millisecond)\n\tif Clamp(50) != 50 || Clamp(150) != 100 {\n"
+                          '\t\tt.Fatal("clamp")\n\t}\n}\n\nfunc TestF(t *testing.T) {\n\tif F(1) != 2 {\n\t\tt.Fatal(F(1))\n'
+                          "\t}\n}\n"),
+}
+MUT_PR = {**MUT, "calc/calc.go": ("package calc\n\n// Clamp keeps n at or under 100.\nfunc Clamp(n int) int {\n"
+                                  "\tif n > 100 {\n\t\treturn 100\n\t}\n\treturn n\n}\n\n// F adds and doubles.\n"
+                                  "func F(n int) int {\n\ta := n - 1\n\tb := a * 2\n\treturn b + 2\n}\n")}
+
+
+class MutationTest(RunDirTest):
+    """mutation, the step whooper-review runs once a review run ends, after the examples step."""
+
+    @classmethod
+    def setUpClass(cls):
+        # Found in the user's own environment, before a test moves HOME.
+        cls.gremlins, _ = whooper.find_go_tool("gremlins")
+
+    def with_gremlins(self):
+        if not self.gremlins:
+            self.skipTest("gremlins is not installed; go install github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0")
+        return {**self.env, "PATH": f"{Path(self.gremlins).parent}{os.pathsep}{self.env['PATH']}"}
+
+    def mutation(self, run, env, **options):
+        with mock.patch.dict(os.environ, env, clear=True):
+            whooper.mutation(run, **options)
+        return json.loads((run / "test_gaps.json").read_text())
+
+    def test_marks_each_changed_line_tests_ran_survived_or_caught_with_its_change(self):
+        env = self.with_gremlins()
+        run = self.run_dir(MUT, MUT_PR)
+        with mock.patch.dict(os.environ, env, clear=True):
+            whooper.test_gaps(run)
+        # The review run then left an edit to Clamp and a probe that does not compile in the head's worktree, which the
+        # step takes back, so gremlins changes the reviewed commit.
+        calc = run / "head" / "calc" / "calc.go"
+        calc.write_text(calc.read_text().replace("n > 100", "n >= 100"))
+        (run / "head" / "calc" / "probe_test.go").write_text("package calc\n\nfunc broken( {\n")
+        merge_base = json.loads((run / "run.json").read_text())["merge_base"]
+        self.assertEqual(self.mutation(run, env), {
+            "measured": True,
+            "reason": None,
+            "tool": "GOPROXY=off GOTOOLCHAIN=local go test -count=1 -coverpkg=./calc ./calc; (cd calc && GOPROXY=off"
+                    f" GOTOOLCHAIN=local gremlins unleash --diff {merge_base} --workers 2 --timeout-coefficient 10)",
+            # F's middle line, which the PR leaves alone, shows nothing.
+            "lines": [{"path": "calc/calc.go", "line": 5, "status": "survived", "change": "`>` to `>=`"},
+                      {"path": "calc/calc.go", "line": 13, "status": "caught", "change": "`-` to `+`"},
+                      {"path": "calc/calc.go", "line": 15, "status": "caught", "change": "`+` to `-`"}],
+            "summary": {"changed_lines": 4, "run": 4, "not_run": 0, "survived": 1, "caught": 2},
+            "limits": [AND_LINES, CHECKED, OWN_TESTS, MUTATED],
+        })
+        self.assertIn("n > 100", calc.read_text())
+        self.assertFalse((run / "head" / "calc" / "probe_test.go").exists())
+
+    def test_keeps_lines_the_diff_adds_one_change_a_line_and_7_lines_a_file_survived_first(self):
+        # A fake gremlins reports a caught change on each of 9 changed lines, a surviving one on a tenth, one on a line
+        # the PR leaves alone, one that ran out of time, and one that did not compile.
+        base = {"go.mod": MUT["go.mod"], "calc/sum.go": "package calc\n\nfunc Sum(n int) int {\n\treturn n\n}\n",
+                "calc/sum_test.go": 'package calc\n\nimport "testing"\n\nfunc TestSum(t *testing.T) {\n\tSum(1)\n}\n'}
+        run = self.run_dir(base, {**base, "calc/sum.go": "package calc\n\nfunc Sum(n int) int {\n\ts := n\n"
+                                  + "\ts = s + 1\n" * 10 + "\treturn s\n}\n"})
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            whooper.test_gaps(run)
+
+        def mutant(line, status, kind="ARITHMETIC_BASE"):
+            return {"type": kind, "status": status, "line": line, "column": 8}
+
+        report = [mutant(n, "KILLED") for n in range(5, 14)] + [
+            mutant(14, "LIVED", "CONDITIONALS_BOUNDARY"), mutant(3, "LIVED"), mutant(4, "TIMED OUT"),
+            mutant(15, "NOT VIABLE")]
+        (self.tmp / "report.json").write_text(json.dumps({"files": [{"file_name": "sum.go", "mutations": report}]}))
+        fake(self.tmp / "fakes" / "gremlins", "\n".join([
+            f'printf "%s\\n" "$PWD" "$GOPROXY $GOTOOLCHAIN $GIT_CONFIG_COUNT $GIT_CONFIG_KEY_0=$GIT_CONFIG_VALUE_0'
+            f' $GIT_CONFIG_KEY_1=$GIT_CONFIG_VALUE_1 $GIT_CONFIG_KEY_2=$GIT_CONFIG_VALUE_2" "$@" > "{self.tmp}/args"',
+            'while [ $# -gt 1 ]; do [ "$1" = --output ] && out="$2"; shift; done',
+            f'cp "{self.tmp}/report.json" "$out"']))
+        gaps = self.mutation(run, {**self.env, "PATH": f"{self.tmp / 'fakes'}{os.pathsep}{self.env['PATH']}"})
+        # The surviving change's operator is not one its kind changes, so it shows by its kind.
+        self.assertEqual(gaps["lines"], [
+            *({"path": "calc/sum.go", "line": n, "status": "caught", "change": "`+` to `-`"} for n in range(5, 11)),
+            {"path": "calc/sum.go", "line": 14, "status": "survived",
+             "change": "gremlins's CONDITIONALS_BOUNDARY change at column 8"}])
+        self.assertEqual(gaps["summary"], {"changed_lines": 12, "run": 12, "not_run": 0, "survived": 1, "caught": 6})
+        self.assertEqual(gaps["limits"][-1], "Whooper shows at most 7 survived or caught lines a file, survived first, so"
+                                             " it left out 3 lines of calc/sum.go.")
+        folder, settings, *args = (self.tmp / "args").read_text().splitlines()
+        merge_base = json.loads((run / "run.json").read_text())["merge_base"]
+        self.assertEqual((Path(folder).resolve(), settings), (run.resolve() / "head" / "calc",
+                                                             "off local 3 diff.relative=true diff.context=0 color.diff=false"))
+        self.assertEqual([args[:3], args[5:]], [["unleash", "--diff", merge_base],
+                                                ["--workers", "2", "--timeout-coefficient", "10"]])
+
+    def test_without_gremlins_limits_say_so_and_nothing_else_changes(self):
+        run = self.run_dir(MUT, MUT_PR)
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            whooper.test_gaps(run)
+        before = json.loads((run / "test_gaps.json").read_text())
+        gaps = self.mutation(run, {**without_gopls(self.env, self.tmp / "gobin"), "PATH": os.pathsep.join(
+            folder for folder in self.env["PATH"].split(os.pathsep) if not os.access(Path(folder) / "gremlins", os.X_OK))})
+        self.assertEqual(gaps, {**before, "summary": {**before["summary"], "survived": 0, "caught": 0},
+                                "limits": [*before["limits"], NO_GREMLINS]})
+
+    def test_the_step_stops_at_its_time_limit_and_leaves_no_test_running(self):
+        env = self.with_gremlins()
+        pid = self.tmp / "test.pid"
+        tests = MUT["calc/calc_test.go"].replace('\t"testing"', '\t"os"\n\t"strconv"\n\t"testing"').replace(
+            "\ttime.Sleep(300 * time.Millisecond)\n",
+            f'\tos.WriteFile("{pid}", []byte(strconv.Itoa(os.Getpid())), 0o644)\n\ttime.Sleep(time.Minute)\n')
+        run = self.run_dir(MUT, {**MUT_PR, "calc/calc_test.go": tests})
+        # The test-gaps step would wait for the test too, so the file stands for what it measured.
+        (run / "test_gaps.json").write_text(json.dumps({"measured": True, "reason": None, "tool": "go test", "lines": [],
+                                                        "summary": {"changed_lines": 4, "run": 4, "not_run": 0},
+                                                        "limits": []}))
+        # The limit comes once gremlins's coverage run started the test, however long go takes to build it.
+        with limit_once_the_test_runs(pid, ("gremlins", "unleash")) as waits:
+            gaps = self.mutation(run, env, seconds=20)
+        [(left, ran_out)] = waits
+        self.assertTrue(0 < left <= 20, left)
+        self.assertLess(monotonic() - ran_out, 10)
+        self.assertEqual({key: gaps[key] for key in ["lines", "summary"]}, {
+            "lines": [], "summary": {"changed_lines": 4, "run": 4, "not_run": 0, "survived": 0, "caught": 0}})
+        self.assertEqual(gaps["limits"], ["gremlins ran past Whooper's 20-second limit, so Whooper has no survived or"
+                                          " caught lines in calc."])
         deadline = monotonic() + 5
         with self.assertRaises(ProcessLookupError):
             while monotonic() < deadline:
@@ -4042,7 +4185,7 @@ class RunTest(unittest.TestCase):
 
     def test_a_review_saves_how_the_changed_code_connects_before_its_worktrees_go_and_show_prints_it(self):
         env, item = self.shop_pull_request()
-        gopls, _ = whooper.find_gopls()
+        gopls, _ = whooper.find_go_tool("gopls")
         # Without gopls, and with it when it is installed. A run ID names its start to the second, so each review
         # starts in a second of its own.
         for found_by, path in [("name_search", env["PATH"]),
@@ -4081,6 +4224,9 @@ class RunTest(unittest.TestCase):
         "summary": {"changed_lines": 3, "run": 0, "not_run": 3},
         "limits": [AND_LINES, CHECKED, OWN_TESTS],
     }
+    # The same once the mutation step ran without gremlins, which a review finds nowhere in these tests.
+    PRICES_GAPS_MUTATED = {**PRICES_GAPS, "summary": {**PRICES_GAPS["summary"], "survived": 0, "caught": 0},
+                           "limits": [*PRICES_GAPS["limits"], NO_GREMLINS]}
 
     def prices_review(self, claude, env=None):
         """Makes PR 12 of sample-org/plain-repo PRICES' PR in a local origin and the cache's clone of it, reviews it
@@ -4131,7 +4277,7 @@ class RunTest(unittest.TestCase):
         self.assertEqual(json.loads((run / "examples.request.json").read_text()), request)
         self.assertFalse((run / "head").exists() or (run / "base").exists())
         self.assertEqual(self.shown_fields(run, "outcome", "test_gaps", "examples"),
-                         {"outcome": "reviewed", "test_gaps": self.PRICES_GAPS, "examples": examples})
+                         {"outcome": "reviewed", "test_gaps": self.PRICES_GAPS_MUTATED, "examples": examples})
 
     def test_the_run_can_neither_change_its_test_gaps_nor_write_its_examples_results(self):
         forged = {"functions": [], "limits": [],
@@ -4140,7 +4286,7 @@ class RunTest(unittest.TestCase):
         result, run = self.prices_review('echo "{}" > "$WHOOPER_RUN/test_gaps.json"\n'
                                          'cp "${0%/*}/forged.json" "$WHOOPER_RUN/examples.json"')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads((run / "test_gaps.json").read_text()), self.PRICES_GAPS)
+        self.assertEqual(json.loads((run / "test_gaps.json").read_text()), self.PRICES_GAPS_MUTATED)
         self.assertEqual(json.loads((run / "examples.json").read_text()), {
             "functions": [], "rows": [], "limits": ["Whooper could not read the examples the review run chose, so it ran"
                                                     " none: examples.json lacks package, inputs."]})
@@ -4180,6 +4326,16 @@ class RunTest(unittest.TestCase):
         self.assertEqual(self.shown_fields(run, "outcome", "failure", "test_gaps"),
                          {"outcome": "reviewed", "failure": None, "test_gaps": None})
         self.assertFalse((run / "test_gaps.json").exists())
+
+    def test_a_review_goes_on_when_the_mutation_step_fails(self):
+        # A gremlins that kills the step that started it, which then writes nothing.
+        self.script(self.fakes / "gremlins", "kill -9 $PPID")
+        result, run = self.prices_review("true", env={"PATH": self.env["PATH"]})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("whooper-review: the mutation step failed, so the review has no survived or caught lines in"
+                      " test_gaps.json\n", result.stderr)
+        self.assertEqual(self.shown_fields(run, "outcome", "failure", "test_gaps"),
+                         {"outcome": "reviewed", "failure": None, "test_gaps": self.PRICES_GAPS})
 
     def test_show_gives_the_commits_since_the_review_and_the_files_that_change_with_the_prs_from_the_clone(self):
         env = {**self.git_env(), "TZ": "America/Los_Angeles"}

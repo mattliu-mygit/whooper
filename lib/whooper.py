@@ -35,6 +35,8 @@ from the user's config file (config_path), never from this code. The bin/ script
                                                                                       lines no test ran
   whooper.py examples <run dir>                                                    -> examples.json, the run's example
                                                                                       inputs, run at head and base
+  whooper.py mutation <run dir>                                                    -> test_gaps.json's survived and
+                                                                                      caught Go lines (gremlins)
   whooper.py retry <data dir> <run-id> <head now>                                  -> queues another review
   whooper.py wait <data dir> <work-item.json> <failure.json>                      -> a waiting run, the recheck list
   whooper.py skip <data dir> <run-id> [--undo]                                    -> marks the run skipped, or not
@@ -924,20 +926,20 @@ def edited_go_files(tree):
     return paths
 
 
-def find_gopls():
-    """The gopls Whooper runs, and why there is none: gopls on PATH, or where go install puts it, GOBIN or
-    the bin folder of the first GOPATH folder, and none without the go command, which gopls runs to load
-    packages."""
+def find_go_tool(name):
+    """The program name, a Go tool such as gopls or gremlins, that Whooper runs, and why there is none: name on PATH,
+    or where go install puts it, GOBIN or the bin folder of the first GOPATH folder, and none without the go command,
+    which both run."""
     if not shutil.which("go"):
-        return None, "The go command, which gopls needs, is not on PATH"
-    if found := shutil.which("gopls"):
+        return None, f"The go command, which {name} needs, is not on PATH"
+    if found := shutil.which(name):
         return found, None
     gobin, gopath, *_ = subprocess.run(["go", "env", "GOBIN", "GOPATH"], capture_output=True,
                                        text=True).stdout.split("\n") + ["", ""]
     folder = Path(gobin) if gobin else Path(gopath.split(os.pathsep)[0]) / "bin" if gopath else None
-    if folder and folder.is_absolute() and os.access(folder / "gopls", os.X_OK):
-        return str(folder / "gopls"), None
-    return None, "Whooper found no gopls on PATH or where go install puts it, go env GOBIN or GOPATH/bin"
+    if folder and folder.is_absolute() and os.access(folder / name, os.X_OK):
+        return str(folder / name), None
+    return None, f"Whooper found no {name} on PATH or where go install puts it, go env GOBIN or GOPATH/bin"
 
 
 class GoplsError(Exception):
@@ -1089,7 +1091,7 @@ def connections(run, seconds=CONNECTIONS_SECONDS):
     root = run.resolve()
     sides = {"head": (root / "head", item["head_sha"]), "base": (root / "base", item["merge_base"])}
     checkouts = {"head": "the head's checkout", "base": "the merge base's checkout"}
-    program, no_gopls = find_gopls()
+    program, no_gopls = find_go_tool("gopls")
     sessions, cache, problems, reported, used = {}, {}, [], [], set()
 
     def session(side):
@@ -1355,8 +1357,7 @@ def plural(count, one, many):
 
 
 # What test_gaps.json says whenever Whooper measured a line, in plain words.
-CHECKED = ("A line that ran is not always checked: a test can run a line without checking what it does. Whooper does not"
-           " yet change lines on purpose to see whether a test catches it (mutation testing).")
+CHECKED = "A line that ran is not always checked: a test can run a line without checking what it does."
 OWN_TESTS = ("Only the tests of the changed packages ran, so a test in another package that runs these lines does not"
              " count.")
 
@@ -1881,6 +1882,152 @@ def examples(run, seconds=EXAMPLES_SECONDS):
                       f" {plural(len(others), 'changed file in another language', 'changed files in other languages')}:"
                       f" {listed(others)}.")
     write(functions, rows, limits)
+
+
+# The mutation step, which adds survived and caught lines to test_gaps.json: whooper-review runs it once the review run
+# ended, after the examples step, and it stops after MUTATION_SECONDS. test_gaps.json shows at most
+# MUTATION_LINES_PER_FILE such lines a file. gremlins gives each changed line's tests its coverage run's time times
+# MUTATION_TIMEOUT_COEFFICIENT: its coverage run reuses Go's build cache, while each change compiles its package again in
+# a copy, so gremlins' own 3 ran out on every change in a small package here, and 10 did not. Each of MUTATION_WORKERS
+# copies the whole module.
+MUTATION_SECONDS, MUTATION_LINES_PER_FILE, MUTATION_TIMEOUT_COEFFICIENT, MUTATION_WORKERS = 900, 7, 10, 2
+# What gremlins 0.6.0 changes each operator to, by the name its report gives each kind of change it makes by default.
+MUTATIONS = {
+    "ARITHMETIC_BASE": {"+": "-", "-": "+", "*": "/", "/": "*", "%": "*"},
+    "CONDITIONALS_BOUNDARY": {">": ">=", ">=": ">", "<": "<=", "<=": "<"},
+    "CONDITIONALS_NEGATION": {"==": "!=", "!=": "==", ">": "<=", ">=": "<", "<": ">=", "<=": ">"},
+    "INCREMENT_DECREMENT": {"++": "--", "--": "++"},
+    "INVERT_NEGATIVES": {"-": "+"},
+}
+# git settings for the git diff gremlins runs to find the changed lines, in the folder it starts in: paths relative to
+# that folder, which gremlins compares with paths relative to it; no lines around each change, since gremlins takes a
+# hunk's lines as one range from its first added line, so with context it would change unchanged lines and miss later
+# changed ones; and no color, which gremlins cannot read, so it would change every line.
+MUTATION_GIT = {"diff.relative": "true", "diff.context": "0", "color.diff": "false"}
+
+
+def mutation_change(text, line, column, kind):
+    """What gremlins changed at line and column, a byte offset counted from 1, of text, a Go file, in a change of kind,
+    in words, such as `>` to `>=`, or the kind's name when Whooper does not know what it changes there."""
+    table, lines = MUTATIONS.get(kind, {}), text.split("\n")
+    at = lines[line - 1].encode()[max(column - 1, 0):].decode(errors="replace") if 0 < line <= len(lines) else ""
+    operator = next((op for op in sorted(table, key=len, reverse=True) if at.startswith(op)), None)
+    return f"`{operator}` to `{table[operator]}`" if operator else f"gremlins's {kind} change at column {column}"
+
+
+def mutation(run, seconds=MUTATION_SECONDS):
+    """Adds to test_gaps.json in run, a review run's directory, once the run ended, while its worktrees exist, which of the
+    changed Go lines tests ran gremlins changed in one small way, such as `>` to `>=`, with the tests of the line's package
+    passing all the same, survived, or one failing, caught, each with the change. gremlins runs once in the folder of each
+    changed Go file (changed_code), but for one inside another such folder, which the other's run covers, with --diff at
+    the merge base and MUTATION_GIT, so it changes only lines the diff adds, and only those its own coverage run finds a
+    test runs; before that, the Go files the run changed or added in the head's worktree (edited_go_files) get their
+    committed text back, or go, so gremlins reads the reviewed commit. A line the diff does not add, or that
+    test_gaps.json lists as not run, counts for none, and a change that ran out of time or did not compile neither. A
+    line shows one change, a surviving one first, and a file at most MUTATION_LINES_PER_FILE lines, survived first. The
+    step stops after seconds, keeping the folders gremlins finished, and limits says what it did not do. Without a
+    test_gaps.json that measured lines, or without changed Go lines, it changes nothing."""
+    gaps = read_object(run / "test_gaps.json")
+    if not isinstance(gaps, dict) or gaps.get("measured") is not True:
+        return
+    item = read_object(run / "run.json")
+    patch = (run / "diff.patch").read_text(errors="replace")
+    head, commit = run.resolve() / "head", item["head_sha"]
+    changed, node_changed = changed_code(head, commit, patch)
+    if not changed:
+        return
+    program, missing = find_go_tool("gremlins")
+    folders = sorted({posixpath.dirname(path) for path in changed})
+    folders = [folder for folder in folders if not any(other != folder and (not other or folder.startswith(f"{other}/"))
+                                                       for other in folders)]
+    tools, problems, results = [], [], []
+    if program:
+        for edited in edited_go_files(head):
+            shown = subprocess.run(["git", "-C", str(head), "--no-lazy-fetch", "cat-file", "blob", f"{commit}:{edited}"],
+                                   capture_output=True)
+            if shown.returncode == 0:
+                (head / edited).write_bytes(shown.stdout)
+            else:
+                (head / edited).unlink(missing_ok=True)
+        deadline = monotonic() + seconds
+        env = {**os.environ, **GO_OFFLINE, "GIT_CONFIG_COUNT": str(len(MUTATION_GIT)),
+               **{f"GIT_CONFIG_{kind}_{i}": value for i, pair in enumerate(MUTATION_GIT.items())
+                  for kind, value in zip(("KEY", "VALUE"), pair)}}
+        options = ["--workers", str(MUTATION_WORKERS), "--timeout-coefficient", str(MUTATION_TIMEOUT_COEFFICIENT)]
+        with tempfile.TemporaryDirectory() as scratch:
+            for i, folder in enumerate(folders):
+                where = folder or "the repository's root"
+                if (left := deadline - monotonic()) <= 0:
+                    problems.append(f"gremlins ran past Whooper's {limit_text(seconds)} limit, so Whooper has no survived"
+                                    f" or caught lines in {where}.")
+                    continue
+                report = Path(scratch) / f"{i}.json"
+                tools.append(shown_command(folder, "GOPROXY=off GOTOOLCHAIN=local " + shlex.join(
+                    ["gremlins", "unleash", "--diff", item["merge_base"], *options])))
+                code, out, err = run_command([program, "unleash", "--diff", item["merge_base"], "--output", str(report),
+                                              *options], head / folder, left, env)
+                if code is None:
+                    problems.append(f"gremlins ran past Whooper's {limit_text(seconds)} limit, so Whooper has no survived"
+                                    f" or caught lines in {where}.")
+                    continue
+                try:
+                    found = json.loads(report.read_text())
+                    results += [(posixpath.normpath(posixpath.join(folder, file["file_name"])), mutant)
+                                for file in found["files"] for mutant in file["mutations"]]
+                except FileNotFoundError:
+                    # gremlins writes no report when it finds nothing to change.
+                    if code != 0:
+                        error = next((line.removeprefix("ERROR: ") for line in reversed(err.split("\n"))
+                                      if line.startswith("ERROR: ")), None) or next(
+                            (line.strip() for line in reversed(f"{out}\n{err}".split("\n")) if line.strip()),
+                            f"it exited with code {code}")
+                        failed = next((line.strip() for line in out.split("\n") if line.startswith("--- FAIL: ")), None)
+                        problems.append(f"gremlins stopped in {where} before it changed a line: {error}"
+                                        f"{f' ({failed})' if failed else ''}.")
+                except (OSError, ValueError, KeyError, TypeError) as e:
+                    problems.append(f"Whooper could not read gremlins's report for {where}: {e}.")
+    added = {path: lines for path, _, _, lines, _ in diff_files(patch)}
+    not_run = {(line.get("path"), line.get("line")) for line in gaps.get("lines", []) if isinstance(line, dict)}
+    texts, best = {}, {}
+    for path, mutant in results:
+        line, status = mutant.get("line"), {"LIVED": "survived", "KILLED": "caught"}.get(mutant.get("status"))
+        if status is None or path not in changed or line not in added.get(path, ()) or (path, line) in not_run:
+            continue
+        rank = (status != "survived", mutant.get("column", 0))
+        if (path, line) not in best or rank < best[path, line][0]:
+            text = texts.setdefault(path, committed(head, commit, path) or "")
+            best[path, line] = rank, status, mutation_change(text, line, mutant.get("column", 0), mutant.get("type", ""))
+    by_file = {}
+    for (path, line), (rank, status, change) in best.items():
+        by_file.setdefault(path, []).append((rank[0], line, status, change))
+    lines, limits = [], []
+    for path, entries in by_file.items():
+        entries.sort()
+        lines += [{"path": path, "line": line, "status": status, "change": change}
+                  for _, line, status, change in entries[:MUTATION_LINES_PER_FILE]]
+        if len(entries) > MUTATION_LINES_PER_FILE:
+            limits.append(f"Whooper shows at most {MUTATION_LINES_PER_FILE} survived or caught lines a file, survived"
+                          f" first, so it left out {plural(len(entries) - MUTATION_LINES_PER_FILE, 'line', 'lines')} of"
+                          f" {path}.")
+    if missing:
+        limits.append(f"{missing}, so Whooper did not change the changed Go lines on purpose to see whether a test catches"
+                      " the change (mutation testing).")
+    elif len(problems) < len(folders):
+        limits.insert(0, "Whooper changed each changed Go line that tests ran with gremlins, one small change at a time,"
+                         " such as `>` to `>=`, and ran the tests of the line's package again: survived when every test"
+                         " still passed, caught when one failed. gremlins changes only arithmetic, comparisons, increments,"
+                         " and negative signs, so other lines, and lines only another package's tests run, show neither.")
+    if node_changed:
+        limits.append("Whooper changes only Go lines on purpose, so JavaScript and TypeScript lines show neither survived"
+                      " nor caught.")
+    order = {path: i for i, (path, *_) in enumerate(diff_files(patch))}
+    gaps["lines"] = sorted([*gaps.get("lines", []), *lines], key=lambda line: (order.get(line.get("path"), len(order)),
+                                                                                line.get("line", 0)))
+    gaps["tool"] = "; ".join([gaps["tool"], *tools]) if gaps.get("tool") else "; ".join(tools)
+    gaps["summary"] = {**gaps.get("summary", {}), "survived": sum(line["status"] == "survived" for line in lines),
+                       "caught": sum(line["status"] == "caught" for line in lines)}
+    gaps["limits"] = [*gaps.get("limits", []), *limits, *problems]
+    write_file(run / "test_gaps.json", json.dumps(gaps, indent=2))
 
 
 def show_review(data, run_id):
@@ -3043,7 +3190,8 @@ ASK_RECORD = {
     "connections.json": "how the code the diff changes connects: the declarations it adds, changes, or removes, and the"
                         " code that calls them",
     "test_gaps.json": "which changed Go, JavaScript, and TypeScript lines no test ran, as Whooper measured before the"
-                      " review started",
+                      " review started, and which changed Go lines tests ran still passed their tests when Whooper"
+                      " changed them",
     "examples.json": "what the Go functions the review chose returned for its example inputs at the merge base and at"
                      " the head, as Whooper ran them",
     "github.json": "the PR's title, body, reviews, and comments, as the review read them",
@@ -3310,13 +3458,13 @@ def main(command, *args):
         # whooper-review runs this as soon as the run ends, in a process group of its own, and the review then goes
         # on as it would without connections.json, whatever this finds and even if it fails.
         connections(Path(args[0]))
-    elif command in ("test-gaps", "examples"):
+    elif command in ("test-gaps", "examples", "mutation"):
         # whooper-review runs each in a process group of its own, as it runs connections, and the review then goes on
         # as it would without the step's file, whatever this finds and even if it fails. Its cleanup stops a step with
         # SIGTERM, which raises SystemExit here, so the step kills the go it started on its way out (run_go).
         for stop in (signal.SIGTERM, signal.SIGHUP):
             signal.signal(stop, lambda signum, frame: sys.exit(128 + signum))
-        (test_gaps if command == "test-gaps" else examples)(Path(args[0]))
+        {"test-gaps": test_gaps, "examples": examples, "mutation": mutation}[command](Path(args[0]))
     elif command == "retry":
         data, run_id, head_now = args
         print(retry(Path(data), run_id, head_now, datetime.now(timezone.utc)))
