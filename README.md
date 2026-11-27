@@ -438,11 +438,19 @@ checkout.
 
 ### Whooper's page
 
-`page/` is the page Prompting Time shows for Whooper and for one of its reviews or blockers. Its
-home, which Prompting Time opens at `/` when you click Whooper's name, shows Whooper's agent row,
-such as `Paused` or `Running · next poll 3:45 PM`, each cause that stops every review, and the
-reviews in the groups status format 2 puts them in, those that need you first and Done folded, each
-opening its review. A review shows its header, with its versions, Skip, which also stops a review
+`page/` is the page Prompting Time shows for Whooper and for one of its reviews or blockers. While
+it shows, Prompting Time folds its own sidebar to a rail, so the page draws its own: Whooper's name
+and agent row, such as `Paused` or `Running · next poll 3:45 PM`, then three tabs, each at its route.
+Reviews, at `/`, which Prompting Time opens when you click Whooper's name, lists the newest review of
+each pull request in the groups status format 2 puts them in, those that wait on you first, with a
+search by title, repo, PR number, or author, and a chip per group with its count. Each row opens its
+review, and its ⋯ menu opens it, skips it or undoes the skip, removes it from the list, with Undo, or
+retries it. Past reviews, at `/past`, lists the reviews you removed, which its ⋯ menu restores, and
+earlier reviews of a pull request that a newer one replaced. Causes, at `/causes`, lists each cause
+that stops every review with the reviews it holds back. Each tab's header has Pause or Resume and
+Poll now; Start and Stop stay in Prompting Time, which runs `bin/whooper-run`, and so does the
+settings form. A review Prompting Time opens marks the tab whose list holds it. A review shows Back
+to the list, which keeps the list's search and filter, then its header, with its versions, Skip, which also stops a review
 that runs, and Undo, Remove and Restore, Rerun review, and a banner for new commits since the
 review; then the review's diff with Whooper's findings as draft comments under their lines, Include
 in review, Edit, Ask about this, Discard, and one bar that submits the review. When whooper-submit
@@ -452,14 +460,14 @@ refuses the submit because the run is not safe to approve (exit 11) or the revie
 tells the refusals apart by the exit code Prompting Time passes back, and shows whooper-submit's
 stderr as the reason. Only such a press sends a mention: whooper-post, which Whooper runs on its
 own, still holds back each comment that @-mentions someone. After you press an action button (Skip,
-Remove, Rerun review, Poll now, Submit review, the two refusal buttons, or Ask), the page disables
+Remove, Rerun review, Pause, Resume, Submit review, the two refusal buttons, or Ask), the page disables
 the action buttons until 600 ms after the action's reply, and 600 ms more when Prompting Time opens
 another item in that time, so a second click can't act on the item Prompting Time moved on to.
 While Ask waits for Whooper's agent, which can take a long time, only the Ask buttons are disabled;
-the 600 ms hold of every button starts at its reply. A
+the 600 ms hold of every button starts at its reply. Poll now, whose round can take minutes,
+disables only the Poll now buttons, which say Polling… while whooper-status says a round runs. A
 review that runs, waits, or failed shows why instead, with whooper-review's reason, the answers to
-earlier questions, and Ask why, and a cause that stops every review lists the reviews it holds back,
-with Poll now.
+earlier questions, and Ask why.
 
 A finished review that wrote an overview opens on its walkthrough instead, and the header's
 Walkthrough | Diff switches to the diff above. The verdict banner comes first, green when the run
@@ -480,7 +488,7 @@ It is a Solid 2.0 app built on Prompting Time's shared UI library,
 `@prompting-time/ui`. Prompting Time shows it in an iframe sandboxed to scripts only, so the page reaches nothing but its host, through page protocol 2
 in `page/src/protocol.ts`: it says `ready`, Prompting Time sends `open` with the route the user
 opened, `/`, or the route of an item or blocker, `/reviews/<run-id>` or `/causes/<cause-id>` ([See
-reviews](#see-reviews)), and the page reads and changes everything with `call`s of the manifest's
+reviews](#see-reviews)); `/past` and `/causes` the page opens itself. The page reads and changes everything with `call`s of the manifest's
 actions, such as `status`, `show-review`, `draft`, `ask`, `skip`, `retry`, and `submit`, which
 Prompting Time confirms before `whooper-submit` posts. When files in the state folder change,
 Prompting Time sends `changed` with their paths, and the page reads the status again, and the open
@@ -497,8 +505,9 @@ npm run build   # page/dist, which the repo does not track
 ```
 
 The fake host runs the page's calls on invented reviews in `page/src/fixtures.ts` the way Whooper's
-commands would, and reaches no Whooper, GitHub, or model; `/dev/` opens the first of its reviews,
-`/dev/?review=<run id>` another, and `/dev/?route=/causes/docker_unavailable` a cause.
+commands would, and reaches no Whooper, GitHub, or model; `/dev/` opens the Reviews tab,
+`/dev/?review=<run id>` a review, and `/dev/?route=<route>` any route, such as `/past` or
+`/causes/docker_unavailable`.
 The page installs `@prompting-time/ui` from its built tarball, `prompting-time-ui-0.1.0.tgz`, which
 Prompting Time's `scripts/pack-ui.sh` writes. Until Prompting Time attaches that tarball to a GitHub
 release, the page installs it from a Prompting Time checkout beside this one,
