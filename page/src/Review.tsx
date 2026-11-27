@@ -183,7 +183,8 @@ function SubmitBar(props: { store: PageStore }) {
   // What lets the refused submit through. Prompting Time shows whooper-submit's refusal in its
   // confirmation and tells the page only that nothing ran, so the page finds the reason in the drafts
   // by whooper-submit's rules, in its order: an approval of a run that is not safe to approve (exit
-  // 11), then an @-mention (exit 12). Whatever Whooper posts on its own still never @-mentions anyone.
+  // 11), then an @-mention (exit 12). whooper-post, which Whooper runs on its own, still holds back
+  // each comment that @-mentions someone.
   const override = () => {
     if (!refused() || locked()) return null;
     if (event() === "APPROVE" && !store.state.shown?.safe_to_approve && !flags().includes("--approve-anyway"))
@@ -193,13 +194,16 @@ function SubmitBar(props: { store: PageStore }) {
     return null;
   };
 
-  async function run(work: () => Promise<unknown>) {
+  /** Runs work, shows its error, if any, under the bar, and resolves with whether it succeeded. */
+  async function run(work: () => Promise<unknown>): Promise<boolean> {
     setBusy(true);
     try {
       await work();
       setError("");
+      return true;
     } catch (e) {
       setError((e as Error).message);
+      return false;
     } finally {
       setBusy(false);
     }
@@ -217,8 +221,7 @@ function SubmitBar(props: { store: PageStore }) {
     const next = flag ? [...flags(), flag] : [];
     setFlags(next);
     setRefused(false);
-    await run(() => store.submit(next));
-    setRefused(error() !== "");
+    setRefused(!(await run(() => store.submit(next))));
   }
 
   // What posts when the message stays empty (whooper-submit): an approval with comments says
