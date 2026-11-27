@@ -1057,6 +1057,11 @@ class Gopls:
     def close(self):
         self.process.kill()
         self.process.wait()
+        self.process.stdout.close()
+        # A request the time limit cut off can leave bytes to flush, which gopls, now gone, cannot read. close still
+        # closes the pipe then.
+        with suppress(BrokenPipeError):
+            self.process.stdin.close()
 
 
 class TimeLimit(Exception):

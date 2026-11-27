@@ -81,19 +81,17 @@ CAUSES = {
 
 
 def setUpModule():
-    config = Path(tempfile.mkdtemp()) / "config.toml"
+    # The made-up config and the build cache live in one folder, which goes once the module's tests end.
+    folder = Path(tempfile.mkdtemp())
+    unittest.addModuleCleanup(shutil.rmtree, folder, ignore_errors=True)
+    config = folder / "config.toml"
     config.write_text(CONFIG)
-    (config.parent / "notes.md").write_text("Run `make test` from the service's directory.")
+    (folder / "notes.md").write_text("Run `make test` from the service's directory.")
     os.environ["WHOOPER_CONFIG"] = str(config)
     # Every test that runs go shares one build cache, so only the first compiles the standard library.
-    os.environ["GOCACHE"] = GO_CACHE
+    os.environ["GOCACHE"] = str(folder / "go-build")
 
 
-def tearDownModule():
-    shutil.rmtree(GO_CACHE, ignore_errors=True)
-
-
-GO_CACHE = tempfile.mkdtemp()
 # How the review bots appear as GraphQL review authors.
 BOTS = {"ci-review-bot", "assistant-bot"}
 
@@ -1546,8 +1544,8 @@ def limit_once_the_test_runs(pid):
 
 class RunDirTest(unittest.TestCase):
     """A step of whooper-review, run on a throwaway origin's PR and a run directory with its head and base
-    worktrees, with HOME in a throwaway folder, so git reads only the config a test writes there, and go and
-    gopls keep their caches there, but for the build cache the tests share."""
+    worktrees, with HOME and TMPDIR in a throwaway folder, so git reads only the config a test writes there, and go
+    and gopls keep their caches and temporary files there, but for the build cache the tests share."""
 
     def setUp(self):
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -1555,9 +1553,12 @@ class RunDirTest(unittest.TestCase):
         home.mkdir()
         # git config that changes what git grep prints, which name search must read all the same.
         (home / ".gitconfig").write_text("[grep]\n\tcolumn = true\n\tpatternType = perl\n[color]\n\tui = always\n")
+        # Temporary files go in the throwaway folder too, as whooper-review puts a step's in the run directory, so
+        # those of a go the step kills at its time limit go with the folder.
+        (self.tmp / "tmp").mkdir()
         self.env = {**os.environ, "HOME": str(home), "GIT_CONFIG_GLOBAL": str(home / ".gitconfig"),
                     "GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "Sam", "GIT_AUTHOR_EMAIL": "sam@example.com",
-                    "GIT_COMMITTER_NAME": "Sam", "GIT_COMMITTER_EMAIL": "sam@example.com"}
+                    "GIT_COMMITTER_NAME": "Sam", "GIT_COMMITTER_EMAIL": "sam@example.com", "TMPDIR": str(self.tmp / "tmp")}
 
     def run_dir(self, base, head):
         """A review run's directory for the PR that changes base's files, by path, to head's, as whooper-review
@@ -2038,7 +2039,7 @@ class PostTest(unittest.TestCase):
     auto_post finding on orders.go:88 and one digest finding."""
 
     def setUp(self):
-        self.data = Path(tempfile.mkdtemp())
+        self.data = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.run = self.data / "runs" / "20310727T010246Z-12"
         self.run.mkdir(parents=True)
         # run.json is the work item the review got, with the run's own fields.
