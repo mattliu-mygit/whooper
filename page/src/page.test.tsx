@@ -282,40 +282,6 @@ describe("Whooper's page with the fake host", () => {
     expect(screen.queryByRole("button", { name: "Remove" })).not.toBeInTheDocument();
   });
 
-  it("shows Whooper's home at /: the agent, what stops every review, and the reviews by group", async () => {
-    const host = renderWithFakeHost({ openOnReady: "/" });
-    expect(await screen.findByRole("heading", { name: "Whooper" })).toBeInTheDocument();
-    expect(screen.getByText("Can't review · Docker isn't running")).toBeInTheDocument();
-    expect(host.calls("status")).toEqual([[]]);
-    expect(host.calls("show-review")).toEqual([]);
-    // What stops every review first, then the groups that need the user, then the rest; Done has nothing yet.
-    expect(screen.getAllByRole("list").map((list) => list.getAttribute("aria-label"))).toEqual([
-      "Stops every review",
-      "Ready to approve",
-      "Needs a look",
-      "Review failed",
-      "Reviewing",
-      "Waiting",
-    ]);
-    expect(screen.getByRole("heading", { name: "Needs a look · 1" })).toBeInTheDocument();
-    expect(screen.queryByText(/^Done/)).not.toBeInTheDocument();
-
-    fireEvent.click(within(screen.getByRole("list", { name: "Ready to approve" })).getByRole("button", { name: /refactor\(cache\)/ }));
-    await thread("config_test.go:18");
-    fireEvent.click(await screen.findByRole("button", { name: "Skip" }));
-    expect(await screen.findByText("Skipped")).toBeInTheDocument();
-
-    host.open("/");
-    const done = (await screen.findByText("Done · 1")).closest("details") as HTMLDetailsElement;
-    // Done stays folded until the user opens it.
-    expect(done.open).toBe(false);
-    expect(within(done).getByRole("button", { name: /refactor\(cache\)/ })).toBeInTheDocument();
-    expect(within(screen.getByRole("list", { name: "Ready to approve" })).queryByRole("button", { name: /refactor\(cache\)/ })).not.toBeInTheDocument();
-
-    fireEvent.click(within(screen.getByRole("list", { name: "Stops every review" })).getByRole("button", { name: /Docker isn't running/ }));
-    expect(await screen.findByRole("list", { name: "Reviews it holds back" })).toBeInTheDocument();
-  }, 30_000);
-
   it("shows a failed review: why it failed, earlier answers, Ask why, and Retry review", async () => {
     const failed = "20310727T005510Z-109";
     const host = renderWithFakeHost({ openOnReady: `/reviews/${failed}` });

@@ -1,8 +1,9 @@
 import { createSignal, For, Show, untrack } from "solid-js";
 import { Button, Markdown, StatusDot, Textarea } from "@prompting-time/ui";
+import { newestAtCause } from "./Causes";
 import type { Shown } from "./protocol";
 import type { PageStore } from "./store";
-import { shortDate, shortSha, waitingText } from "./text";
+import { shortSha, waitingText } from "./text";
 
 /** The PR as a heading names it: its title, or <owner>/<repo>#<number> without one. */
 function prTitle(shown: Shown): string {
@@ -150,93 +151,6 @@ export function RunningReview(props: { shown: Shown }) {
           {props.shown.head_sha ? ` at ${shortSha(props.shown.head_sha)}` : ""}. Its findings open here when it finishes.
         </p>
       </section>
-    </section>
-  );
-}
-
-/** The newest review of each PR that waits or failed at cause, which stops every review, newest first,
- * leaving out one the user removed: the reviews the cause holds back. */
-export function newestAtCause(store: PageStore, cause: string) {
-  const seen = new Set<string>();
-  return (store.state.status?.reviews ?? []).filter((review) => {
-    const pr = `${review.repo}#${review.pr}`;
-    if (seen.has(pr)) return false;
-    seen.add(pr);
-    return (
-      !review.removed_by_user &&
-      review.submitted === null &&
-      !review.skipped_by_user &&
-      (review.outcome === "waiting" || review.outcome === "failed") &&
-      review.cause?.id === cause
-    );
-  });
-}
-
-/**
- * A cause that stops every review, which Prompting Time lists as a blocker of whooper-status's status
- * format 2 and opens at /causes/<id>: what it is, since when, the reviews it holds back, each of which
- * opens here, and Poll now, which runs a round that reviews them again.
- */
-export function CauseScreen(props: { store: PageStore; cause: string }) {
-  const store = props.store;
-  const [busy, setBusy] = createSignal(false);
-  const [note, setNote] = createSignal<string | null>(null);
-  const [error, setError] = createSignal<string | null>(null);
-  const reviews = () => newestAtCause(store, props.cause);
-  const blocked = () => (store.state.status?.blocked?.id === props.cause ? store.state.status.blocked : null);
-  const summary = () => blocked()?.summary ?? reviews()[0]?.cause?.summary ?? props.cause;
-
-  async function poll() {
-    setBusy(true);
-    setError(null);
-    try {
-      setNote((await store.round()) || "Whooper ran a round.");
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <section class="w-column" aria-labelledby="cause-title">
-      <header>
-        <h1 id="cause-title">
-          <StatusDot status="error" />
-          {summary()}
-        </h1>
-        <p class="w-meta">
-          Stops every review{blocked()?.since ? ` · since ${shortDate(blocked()!.since)}` : ""} · {waitingText(reviews().length)}
-        </p>
-      </header>
-      <div class="w-thread-actions">
-        <Button variant="primary" disabled={busy() || store.held()} onClick={poll}>
-          {busy() ? "Polling…" : "Poll now"}
-        </Button>
-        <span class="w-hint">A round reviews the waiting pull requests again once the cause is fixed.</span>
-      </div>
-      <Show when={note()}>{(text) => <p role="status">{text()}</p>}</Show>
-      <Show when={error()}>
-        {(text) => (
-          <p class="w-error" role="alert">
-            {text()}
-          </p>
-        )}
-      </Show>
-      <ul class="w-cause-reviews" aria-label="Reviews it holds back">
-        <For each={reviews()}>
-          {(review) => (
-            <li>
-              <button type="button" class="w-cause-review" onClick={() => store.open(`/reviews/${review.run_id}`)}>
-                <span>{review.title ?? `${review.repo}#${review.pr}`}</span>
-                <span class="w-hint">
-                  {review.repo}#{review.pr}
-                </span>
-              </button>
-            </li>
-          )}
-        </For>
-      </ul>
     </section>
   );
 }

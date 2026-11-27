@@ -79,7 +79,7 @@ describe("a review's walkthrough", () => {
     await walkthrough();
     fireEvent.click(await screen.findByRole("button", { name: "Hide until the pull request gets new commits" }, SLOW));
     host.open("/");
-    await screen.findByRole("heading", { name: "Whooper" });
+    await screen.findByRole("heading", { name: "Reviews" });
     host.open(`/reviews/${RUN}`);
     await walkthrough();
     await screen.findByRole("button", { name: "Walkthrough" }, SLOW);

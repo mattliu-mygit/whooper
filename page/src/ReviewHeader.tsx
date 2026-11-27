@@ -1,5 +1,5 @@
 import { createSignal, For, Show } from "solid-js";
-import { Button, Menu, type MenuItem } from "@prompting-time/ui";
+import { ArrowLeftIcon, Button, Menu, type MenuItem } from "@prompting-time/ui";
 import type { Review, StatusReview } from "./protocol";
 import type { ReviewMode } from "./review/OverviewReview";
 import { REVIEW_VIEWS, viewHasData, viewListed, type ReviewViews } from "./review/views";
@@ -21,10 +21,11 @@ export function versionLabel(review: StatusReview, number: number): string {
  * It reads the review as whooper-status lists it, so it shows nothing until the status arrives or for
  * a review older than the 30 days whooper-status lists. For a review with an overview, `modes` adds
  * Walkthrough | Diff and the Views menu, and the since notice under the verdict says what the
- * new-commits banner would.
+ * new-commits banner would. Back to the list comes first, also before the status arrives.
  */
 export function ReviewHeader(props: {
   store: PageStore;
+  back: () => void;
   modes?: { mode: ReviewMode; onMode(mode: ReviewMode): void; views: ReviewViews };
 }) {
   const store = props.store;
@@ -41,8 +42,22 @@ export function ReviewHeader(props: {
     }
   }
 
+  const back = () => (
+    <Button class="w-back" onClick={() => props.back()}>
+      <ArrowLeftIcon />
+      Back to the list
+    </Button>
+  );
+
   return (
-    <Show when={store.entry()}>
+    <Show
+      when={store.entry()}
+      fallback={
+        <header class="w-review-header">
+          <div class="w-review-header-bar">{back()}</div>
+        </header>
+      }
+    >
       {(review) => {
         const versions = () => store.versions();
         const number = () => versions().findIndex((r) => r.run_id === review().run_id) + 1;
@@ -73,6 +88,7 @@ export function ReviewHeader(props: {
         return (
           <header class="w-review-header">
             <div class="w-review-header-bar">
+              {back()}
               <Show when={versions().length > 1} fallback={<span class="w-hint">{versionLabel(review(), Math.max(number(), 1))}</span>}>
                 <select
                   class="w-versions"

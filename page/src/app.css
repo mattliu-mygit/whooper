@@ -428,31 +428,297 @@ ul {
   background: var(--s-surface-elevated);
 }
 
-/* Home */
-.w-home-agent,
-.w-home-blocker {
+/* The page's frame: its own sidebar of tabs, which stands in for Prompting Time's folded one, and the
+   open tab or review beside it. The sidebar shares the page's background, as Prompting Time's does,
+   behind a border, and its words sit one step dimmer than the content's. */
+.w-app {
+  display: grid;
+  grid-template-columns: 13.5rem minmax(0, 1fr);
+  block-size: 100%;
+}
+
+.w-nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-space-12);
+  min-block-size: 0;
+  padding: var(--s-space-12) var(--s-space-8);
+  overflow-y: auto;
+  border-inline-end: var(--s-border-thin) var(--s-border-style) var(--s-border);
+}
+
+.w-nav-head {
+  display: grid;
+  gap: var(--s-space-4);
+  padding-inline: var(--s-space-8);
+}
+
+.w-nav-name {
+  font-size: var(--s-size-sm);
+  font-weight: var(--s-weight-semibold);
+}
+
+.w-nav-status {
   display: flex;
   align-items: center;
-  gap: var(--s-space-4);
-}
-
-.w-home-agent {
-  color: var(--s-text-muted);
+  gap: var(--s-space-8);
+  color: var(--s-text-secondary);
   font-size: var(--s-size-xs);
+  line-height: var(--s-leading-tight);
 }
 
-.w-home-group {
+.w-nav-tabs {
   display: grid;
   gap: var(--s-space-4);
 }
 
-.w-home-group h2,
-.w-home-group summary {
-  color: var(--s-text-muted);
-  font-size: var(--s-size-xs);
+.w-nav-tab {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s-space-8);
+  inline-size: 100%;
+  padding: var(--s-space-8);
+  border: 0;
+  border-radius: var(--s-sidebar-item-radius);
+  background: transparent;
+  color: var(--s-text-secondary);
+  font-size: var(--s-size-sm);
+  text-align: start;
+  cursor: pointer;
+}
+
+.w-nav-tab:hover,
+.w-nav-tab[aria-current="page"] {
+  background: var(--s-surface-elevated);
+  color: var(--s-text);
+}
+
+.w-nav-tab[aria-current="page"] {
   font-weight: var(--s-weight-medium);
 }
 
-.w-home-group summary {
+.w-nav-count {
+  color: var(--s-text-secondary);
+  font-weight: var(--s-weight-normal);
+}
+
+.w-main {
+  --w-tab-width: 60rem;
+  display: flex;
+  flex-direction: column;
+  min-inline-size: 0;
+  min-block-size: 0;
+}
+
+.w-main > .w-page {
+  flex: 1;
+  min-block-size: 0;
+}
+
+/* A tab: its header with Whooper's controls, then its list in a centered column. */
+/* The header's border spans the tab; its title and buttons line up with the centered list below. */
+.w-tab-header {
+  display: grid;
+  gap: var(--s-space-4);
+  padding-block: var(--s-space-12);
+  padding-inline: max(var(--s-space-24), calc((100% - var(--w-tab-width)) / 2 + var(--s-space-24)));
+  border-block-end: var(--s-border-thin) var(--s-border-style) var(--s-border-muted);
+}
+
+.w-tab-header-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-12);
+}
+
+.w-tab-header h1 {
+  font-size: var(--s-size-lg);
+  font-weight: var(--s-weight-semibold);
+}
+
+.w-tab-words {
+  color: var(--s-text-secondary);
+  font-size: var(--s-size-sm);
+}
+
+.w-tab-body {
+  display: grid;
+  flex: 1;
+  align-content: start;
+  gap: var(--s-space-12);
+  inline-size: 100%;
+  max-inline-size: var(--w-tab-width);
+  min-block-size: 0;
+  margin-inline: auto;
+  padding: var(--s-space-16) var(--s-space-24) var(--s-space-32);
+  overflow-y: auto;
+  font-size: var(--s-size-sm);
+}
+
+.w-tab-hint,
+.w-empty {
+  color: var(--s-text-secondary);
+}
+
+.w-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-space-12);
+}
+
+.w-search {
+  position: relative;
+  display: flex;
+  flex: 0 1 20rem;
+  align-items: center;
+}
+
+.w-search > svg {
+  position: absolute;
+  inset-inline-start: var(--s-space-8);
+  inline-size: var(--s-space-16);
+  block-size: var(--s-space-16);
+  color: var(--s-text-secondary);
+  pointer-events: none;
+}
+
+/* Room for the search icon inside the field, as in Prompting Time's sidebar search. */
+.w-search .pt-input {
+  padding-inline-start: calc(var(--s-space-16) + var(--s-space-16));
+}
+
+.w-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-space-8);
+}
+
+.w-chip {
+  padding: var(--s-space-4) var(--s-space-12);
+  border: var(--s-border-thin) var(--s-border-style) var(--s-border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--s-text-secondary);
+  font-size: var(--s-size-sm);
   cursor: pointer;
+}
+
+.w-chip:hover {
+  color: var(--s-text);
+}
+
+.w-chip[aria-pressed="true"] {
+  border-color: var(--s-border-interactive);
+  background: var(--s-surface-elevated);
+  color: var(--s-text);
+}
+
+.w-notice {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-12);
+  padding: var(--s-space-8) var(--s-space-12);
+  border: var(--s-border-thin) var(--s-border-style) var(--s-border);
+  border-radius: var(--s-radius-sm);
+}
+
+.w-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--s-text);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* One review per row: its status as a dot and a word, its title, and one line of detail, with its
+   ⋯ menu at the end. */
+.w-rows {
+  display: grid;
+  gap: var(--s-space-4);
+}
+
+.w-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-8);
+  border-radius: var(--s-radius-sm);
+}
+
+.w-row:hover,
+.w-row:focus-within {
+  background: var(--s-surface);
+}
+
+.w-row-open {
+  display: grid;
+  flex: 1;
+  grid-template-columns: 9.5rem minmax(0, 1fr);
+  column-gap: var(--s-space-16);
+  row-gap: var(--s-space-4);
+  min-inline-size: 0;
+  padding: var(--s-space-12);
+  border: 0;
+  background: transparent;
+  color: var(--s-text);
+  font-size: var(--s-size-sm);
+  text-align: start;
+  cursor: pointer;
+}
+
+.w-row-status {
+  display: flex;
+  grid-row: 1 / span 2;
+  align-items: center;
+  align-self: start;
+  gap: var(--s-space-8);
+  block-size: calc(var(--s-size-sm) * var(--s-leading-normal));
+  color: var(--s-text-secondary);
+  white-space: nowrap;
+}
+
+.w-row-title,
+.w-row-open .w-row-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.w-row-title {
+  font-weight: var(--s-weight-medium);
+}
+
+.w-row-detail {
+  color: var(--s-text-secondary);
+  font-size: var(--s-size-sm);
+}
+
+.w-row .pt-icon-button {
+  margin-inline-end: var(--s-space-8);
+  border-color: transparent;
+  background: transparent;
+}
+
+/* Causes */
+.w-cause {
+  display: grid;
+  gap: var(--s-space-8);
+  padding: var(--s-space-12) var(--s-space-16);
+  border: var(--s-card-border);
+  border-radius: var(--s-card-radius);
+  background: var(--s-surface);
+}
+
+.w-cause h2 {
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-8);
+  font-size: var(--s-size-sm);
+  font-weight: var(--s-weight-medium);
+}
+
+.w-cause .w-cause-review {
+  padding: var(--s-space-8);
+  font-size: var(--s-size-sm);
 }
