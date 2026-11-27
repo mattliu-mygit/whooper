@@ -456,7 +456,24 @@ While Ask waits for Whooper's agent, which can take a long time, only the Ask bu
 the 600 ms hold of every button starts at its reply. A
 review that runs, waits, or failed shows why instead, with whooper-review's reason, the answers to
 earlier questions, and Ask why, and a cause that stops every review lists the reviews it holds back,
-with Poll now. It is a Solid 2.0 app built on Prompting Time's shared UI library,
+with Poll now.
+
+A finished review that wrote an overview opens on its walkthrough instead, and the header's
+Walkthrough | Diff switches to the diff above. The verdict banner comes first, green when the run
+is safe to approve, orange when it needs a look, red on a failed or waiting review's screen, then
+"Changes since you last looked", one folded line with the commits since the review, which × hides
+for that version of the pull request, with Undo. The walkthrough then reads top to bottom: what the
+PR does, before and after; the places to look, each a numbered mark in the code that j and k step
+through; the calls before and after; what Whooper checked and didn't, and the files that usually
+change with these; then the change layer by layer, each folded once you mark it read. The decision
+waits as Decide… in the corner until you click it or reach the end, and offers Comment or Approve
+and Submit review, with the same refusal buttons as the diff's bar. The header's Views menu turns
+each extra view off or on: how the changed code connects, changes no test would catch, and example
+inputs before and after each show a summary where its question comes up and open in full in the
+walkthrough's place. The page remembers what you last opened, hid, marked read, and turned off only
+while Prompting Time keeps it loaded: its sandbox gives it no localStorage.
+
+It is a Solid 2.0 app built on Prompting Time's shared UI library,
 `@prompting-time/ui`. Prompting Time shows it in an iframe sandboxed to scripts only, so the page reaches nothing but its host, through page protocol 2
 in `page/src/protocol.ts`: it says `ready`, Prompting Time sends `open` with the route the user
 opened, `/`, or the route of an item or blocker, `/reviews/<run-id>` or `/causes/<cause-id>` ([See
