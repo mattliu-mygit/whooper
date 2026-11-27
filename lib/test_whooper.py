@@ -5910,9 +5910,9 @@ class ReviewsTest(unittest.TestCase):
         waits = self.waiting(timedelta(minutes=30), 16)
         status = self.status()
         schema = json.loads((ROOT / "schemas" / "prompting-time-status.json").read_text())
-        # The schema lists format 2's fields only; format 1's stay beside them until Prompting Time
-        # reads format 2 alone.
-        check_schema({key: status[key] for key in schema["properties"]}, schema, "status")
+        # The schema allows other top-level fields, such as format 1's, which stay beside format 2's
+        # until Prompting Time reads format 2 alone.
+        check_schema(status, schema, "status")
 
         def item(run, group, dot, detail, actions=("retry", "skip", "remove"), title=self.TITLE, updated=None):
             return {"id": run.name, "group": group, "title": title, "detail": detail, "dot": dot, "project": None,
@@ -7097,10 +7097,9 @@ class ManifestTest(unittest.TestCase):
     def test_status_names_the_groups_whooper_status_puts_items_in_and_row_actions_it_declares(self):
         status = self.MANIFEST["status"]
         # Prompting Time's sections for Whooper before status format 2, in their order.
-        self.assertEqual([(g["id"], g["needs_you"], g.get("folded", False)) for g in sorted(status["groups"],
-                                                                                          key=lambda g: g["order"])], [
-            ("ready", True, False), ("look", True, False), ("failed", True, False), ("reviewing", False, False),
-            ("waiting", False, False), ("done", False, True)])
+        self.assertEqual([(g["id"], g["needs_you"]) for g in sorted(status["groups"], key=lambda g: g["order"])], [
+            ("ready", True), ("look", True), ("failed", True), ("reviewing", False), ("waiting", False),
+            ("done", False)])
         names = {a["name"]: a for a in self.MANIFEST["actions"]}
         for name in status["item_actions"]:
             with self.subTest(name):

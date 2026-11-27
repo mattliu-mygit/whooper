@@ -8,6 +8,9 @@ import type { PageStore } from "./store";
  * first, then by their order. */
 const GROUPS = [...manifest.status.groups].sort((a, b) => Number(b.needs_you) - Number(a.needs_you) || a.order - b.order);
 
+/** The group whose section starts closed, since it holds the reviews nothing waits on any more. */
+const FOLDED_GROUP = "done";
+
 /**
  * Whooper's home, which Prompting Time opens at / when the user clicks Whooper's name: Whooper's agent
  * row, such as "Paused" or "Running · next poll 3:45 PM", each cause that stops every review, and the
@@ -77,7 +80,7 @@ export function Home(props: { store: PageStore }) {
                 </ul>
               );
               const heading = () => `${group.title} · ${itemsIn(group.id).length}`;
-              return group.folded ? (
+              return group.id === FOLDED_GROUP ? (
                 <details class="w-home-group">
                   <summary>{heading()}</summary>
                   {rows()}

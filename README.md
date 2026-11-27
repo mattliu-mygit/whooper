@@ -149,9 +149,10 @@ then Reviewing, Waiting, which holds the reviews a cause that stops every review
 For example, a review that ended with an `approve_once_ci_passes` verdict and one nit is in group
 `ready` with a green dot, the line `example-repo#12 · @alice · 1 finding`, the route
 `/reviews/<run-id>`, where Whooper's page shows it, and the row actions retry, skip, and remove.
-Prompting Time builds its "Needs you" list, its other sections, and its menu bar from them. The
-format 1 fields stay until Prompting Time reads format 2 alone; whooper-status's header lists each
-field of both.
+Prompting Time draws Whooper's row and its menu bar from `agent`, lists the blockers and the items of
+the groups that wait on you in its Needs you inbox, and reaches every item through Whooper's page and
+Command-K. The format 1 fields, which the schema allows beside format 2's, stay until Prompting Time
+reads format 2 alone; whooper-status's header lists each field of both.
 
 ```sh
 bin/whooper-show <run-id> --json   # one review in full, for its review screen
