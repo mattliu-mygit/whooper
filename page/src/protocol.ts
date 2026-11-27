@@ -220,7 +220,7 @@ export interface Connections {
     lines_changed: number;
   }[];
   /** From the code that calls or uses a node to that node. */
-  edges: { from: string; to: string; kind: "calls" | "uses"; found_by: "gopls" | "name_search" }[];
+  edges: { from: string; to: string; kind: "calls" | "uses"; found_by: "gopls" | "typescript" | "name_search" }[];
   /** What the graph can miss, in plain words, such as that it keeps at most 40 nodes. */
   limits: string[];
 }
