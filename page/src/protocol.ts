@@ -11,8 +11,9 @@
 //                                       findings.json, diff.patch, and the drafts
 //                                       `bin/whooper-draft <run_id>` prints, and from
 //                                       `bin/whooper-show <run_id> --json`, the overview, the commits
-//                                       since the review, the files that change with the PR's, and how
-//                                       the changed code connects, which the host may leave out.
+//                                       since the review, the files that change with the PR's, how the
+//                                       changed code connects, the changed Go lines no test ran, and the
+//                                       example inputs' results, which the host may leave out.
 //   change-draft {run_id, change}       The host runs `bin/whooper-draft <run_id> <op> [<finding>] [<text>]`
 //                                       and answers with drafts, the JSON it prints.
 //   submit {run_id}                     The host runs `bin/whooper-submit <run_id> --print`, shows the
@@ -224,6 +225,44 @@ export interface Connections {
   limits: string[];
 }
 
+/** Which of the lines a review's diff adds to Go code no test ran (test_gaps.json), from go test with coverage
+ * of the changed packages, run before the review run started. */
+export interface TestGaps {
+  /** false when Whooper could not measure, such as when the head does not build; reason then says why. */
+  measured: boolean;
+  reason: string | null;
+  /** The go test command Whooper ran. */
+  tool: string;
+  /** Each changed line no test ran, in the head. */
+  lines: { path: string; line: number; status: "not_run" }[];
+  /** The changed lines that hold statements, and how many of them a test ran; all 0 when nothing was measured. */
+  summary: { changed_lines: number; run: number; not_run: number };
+  /** What the measure can miss, in plain words, such as that a test can run a line without checking it. */
+  limits: string[];
+}
+
+/** What the Go functions a review run chose return for the inputs it chose (examples.json), from the test it
+ * wrote, which Whooper ran once at the head and twice at the merge base. Only what the test printed fills a row. */
+export interface Examples {
+  /** In the head. */
+  functions: { name: string; path: string; line: number }[];
+  rows: {
+    function: string;
+    input: string;
+    /** What the test printed at the merge base and at the head, or null. */
+    before: string | null;
+    after: string | null;
+    /** flaky when the two runs at the merge base printed different results, error when a run printed none. */
+    status: "same" | "different" | "flaky" | "error";
+    /** ran_head_only for a function the PR adds. */
+    label: "ran_base_and_head" | "ran_head_only" | "not_compared";
+    /** Why the row is not compared or is new, or null. */
+    note: string | null;
+  }[];
+  /** What the table can miss, in plain words. */
+  limits: string[];
+}
+
 export interface Review {
   run_id: string;
   /** <owner>/<repo> */
@@ -244,6 +283,10 @@ export interface Review {
   co_change?: CoChange[];
   /** null when the review saved no connections.json. */
   connections?: Connections | null;
+  /** null when the PR changes no Go code or the review saved no test_gaps.json. */
+  test_gaps?: TestGaps | null;
+  /** null when the review run chose no examples. */
+  examples?: Examples | null;
 }
 
 /** One whooper-draft change: include <id>, leave-out <id>, text <id> <text>, approve, comment, or message <text>. */
