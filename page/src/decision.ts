@@ -49,8 +49,8 @@ export function createDecision(store: PageStore) {
     busy,
     error,
     run,
-    /** Whether there is nothing to submit: no comment, and no approval. */
-    nothing: () => comments() === 0 && event() === "COMMENT",
+    /** Whether there is nothing to submit: no comment, no message, and no approval. */
+    nothing: () => comments() === 0 && event() === "COMMENT" && !drafts().message.trim(),
     override: () => (store.locked() ? null : refusal()),
     async choose(next: "APPROVE" | "COMMENT") {
       setPendingEvent(next);

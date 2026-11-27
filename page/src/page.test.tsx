@@ -173,6 +173,31 @@ describe("Whooper's page with the fake host", () => {
     expect(host.calls("submit")).toEqual([[newest], [newest, "--approve-anyway"], [newest, "--approve-anyway", "--allow-mentions"]]);
   }, 30_000);
 
+  it("submits a comment review without comments once its message is saved", async () => {
+    const newest = "20310727T011502Z-107";
+    const confirmSubmit = vi.fn().mockResolvedValue(true);
+    const host = renderWithFakeHost({ openOnReady: `/reviews/${newest}`, confirmSubmit });
+    const bar = await screen.findByRole("region", { name: "Submit review" }, SLOW);
+    // The run has a question, so it is not safe to approve, and its drafts start as a comment with
+    // nothing included: there is nothing to submit, and a message of blanks changes nothing.
+    expect(within(bar).getByText("0 comments")).toBeInTheDocument();
+    expect(within(bar).getByRole("button", { name: "Submit review" })).toBeDisabled();
+    const message = within(bar).getByRole("textbox", { name: "Review message" });
+    fireEvent.input(message, { target: { value: "  " } });
+    fireEvent.change(message, { target: { value: "  " } });
+    await waitFor(() => expect(changes(host)).toEqual([[newest, "message", "  "]]));
+    expect(within(bar).getByRole("button", { name: "Submit review" })).toBeDisabled();
+
+    fireEvent.input(message, { target: { value: "Thanks, nothing from me." } });
+    fireEvent.change(message, { target: { value: "Thanks, nothing from me." } });
+    fireEvent.click(await enabled(() => within(bar).getByRole("button", { name: "Submit review" })));
+    expect(await within(bar).findByText(/posted the review/)).toBeInTheDocument();
+    // The confirmation showed whooper-submit's request: the message alone, as a comment review.
+    const shown = confirmSubmit.mock.calls[0][0] as string;
+    const request = JSON.parse(shown.slice(shown.indexOf("{")));
+    expect([request.event, request.body, request.comments]).toEqual(["COMMENT", "Thanks, nothing from me.", []]);
+  }, 30_000);
+
   it("keeps a half-typed draft when the diff rebuilds", async () => {
     const host = renderWithFakeHost(OPEN);
     const first = await thread("config_test.go:18");

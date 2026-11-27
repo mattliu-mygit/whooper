@@ -175,9 +175,9 @@ export function createFakeHost(send: (message: HostMessage) => void, options: Fa
         const body = /^\*\*[A-Za-z]+(?: \([^)]*\))?:\*\*/.test(text) ? text : `${LABELS[f.kind]} ${text}`;
         return { path: f.path, line: f.line, side: f.side, body: `${VETTED}\n\n${body}` };
       });
-    if (comments.length === 0 && choices.event === "COMMENT")
+    if (comments.length === 0 && choices.event === "COMMENT" && !choices.message.trim())
       throw new Error(
-        "whooper-submit: nothing to submit: the drafts include no comment and do not approve; change them with bin/whooper-draft",
+        "whooper-submit: nothing to submit: the drafts include no comment, have no message, and do not approve; change them with bin/whooper-draft",
       );
     const message =
       choices.event === "APPROVE" && !choices.message.trim() ? (comments.length > 0 ? PRE_APPROVAL : "") : choices.message;
