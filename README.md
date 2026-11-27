@@ -319,8 +319,8 @@ SHA-256 of that file, as its last line, `fingerprint: <hex>`, and the submit aft
 confirmation passes it back as `--expect <hex>`, so drafts changed after the confirmation post
 nothing the user did not see.
 
-whooper-submit re-reads the PR's head first. Each refusal posts nothing and exits with its own
-code, so Prompting Time can tell them apart:
+whooper-submit first runs the checks that need nothing from GitHub, then re-reads the PR's head.
+Each refusal posts nothing and exits with its own code, so Prompting Time can tell them apart:
 
 | Exit | Why | What then |
 | --- | --- | --- |
@@ -328,8 +328,9 @@ code, so Prompting Time can tell them apart:
 | 11 | The review approves, and the run is not safe to approve. | It lists why: a review that failed and the reason in its `failure.txt`, a review the run skipped and why, the verdict and its reason, and the findings that are not nits. `--approve-anyway` approves after the user has looked. |
 | 12 | An included comment or the message @-mentions someone. | It lists each mention, and `--allow-mentions` posts them. |
 | 13 | The request is not the one whose fingerprint `--expect` gives, because the drafts changed since `--print` showed it. | `--print` shows the new request for another confirmation. |
+| 14 | An included comment is on a line outside the PR's diff, as its finding's `in_diff` says, where GitHub takes no comment, so it would refuse the whole review. | It lists each such comment, and reads nothing from GitHub first. Leaving them out with `bin/whooper-draft` lets the review post, and the review's message can make their point. |
 
-Any other failure exits 1, or with gh's or jq's own code, none of which is 10 to 13. A comment
+Any other failure exits 1, or with gh's or jq's own code, none of which is 10 to 14. A comment
 someone wrote on the same line since the review, and a link outside the configured orgs, do not
 stop it. It refuses a review that is still running, since a Devin review may still change its
 `findings.json`, a review that did not finish, a run whose `run.json` it cannot read, a review that

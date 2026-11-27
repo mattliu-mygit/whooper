@@ -2927,11 +2927,11 @@ class SubmitTest(unittest.TestCase):
     """bin/whooper-submit, and whooper.py draft, which bin/whooper-draft runs, on a review run of
     example-org/example-repo#12 at head h1 in a throwaway state folder; a few tests run
     bin/whooper-classify and bin/whooper-post on it too, and one runs whooper.py status and show. gh
-    is a fake: it reports the PR's head from the file head and the CI checks on it from checks.json,
-    lists a teammate's comment on finding 1's line written after the review started, records the body
-    of each review it is asked to post in posted.jsonl, and fails any other call, so no test can reach
-    GitHub. Unless a test changes it, the run is not safe to approve: its verdict is look_first, and of
-    its findings BUG, QUESTION, and NIT, only NIT is a nit."""
+    is a fake: it records each call in calls.log, reports the PR's head from the file head and the CI
+    checks on it from checks.json, lists a teammate's comment on finding 1's line written after the
+    review started, records the body of each review it is asked to post in posted.jsonl, and fails any
+    other call, so no test can reach GitHub. Unless a test changes it, the run is not safe to approve:
+    its verdict is look_first, and of its findings BUG, QUESTION, and NIT, only NIT is a nit."""
 
     # What GitHub answers a review it created with, in part.
     RESPONSE = {"id": 7001, "html_url": "https://github.com/example-org/example-repo/pull/12#pullrequestreview-7001"}
@@ -2958,6 +2958,7 @@ class SubmitTest(unittest.TestCase):
         gh.write_text("\n".join([
             "#!/bin/sh",
             'fakes="${0%/*}"',
+            'echo "$*" >> "$fakes/calls.log"',
             'case "$*" in',
             '  "api repos/example-org/example-repo/pulls/12 --jq .head.sha") cat "$fakes/head" ;;',
             '  "pr view 12 --repo example-org/example-repo --json headRefOid,statusCheckRollup")',
@@ -3016,6 +3017,11 @@ class SubmitTest(unittest.TestCase):
         """The body of each review the fake gh was asked to post."""
         path = self.fakes / "posted.jsonl"
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def gh_calls(self):
+        """The arguments of each call of the fake gh, joined by spaces."""
+        path = self.fakes / "calls.log"
+        return path.read_text().splitlines() if path.exists() else []
 
     def shown(self, *flags):
         """Runs whooper-submit --print with flags, as Prompting Time's confirmation does, and returns
@@ -3272,6 +3278,35 @@ class SubmitTest(unittest.TestCase):
         result = self.submit("--expect", confirmed)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.posted(), [request])
+
+    def test_a_comment_outside_the_diff_stops_the_review_before_it_reads_github(self):
+        # GitHub takes an inline comment only on a line inside a hunk of the PR's diff, and refuses the
+        # whole review for one comment elsewhere. The review run says which lines are inside with in_diff.
+        outside = finding(id="5", kind="question", path="services/orders/internal/api/client.go", line=12,
+                          in_diff=False, title="Does the gateway retry too?",
+                          draft="**question:** Does the gateway retry this call too?")
+        self.write_findings("look_first", [self.BUG, self.QUESTION, {**self.NIT, "in_diff": False}, outside])
+        for finding_id in ["1", "3", "5"]:
+            self.draft("include", finding_id)
+        for flags in [[], ["--print"]]:
+            with self.subTest(flags=flags):
+                refused = self.submit(*flags)
+                self.assertEqual(refused.returncode, 14, refused.stderr)
+                self.assertEqual([line.strip() for line in refused.stderr.splitlines() if line.startswith("  ")],
+                                 ["finding 3: Old flag name (services/orders/README.md:3)",
+                                  "finding 5: Does the gateway retry too? (services/orders/internal/api/client.go:12)"])
+                self.assertIn("bin/whooper-draft", refused.stderr)
+        # It refused before any call to GitHub, even the one that reads the PR's head.
+        self.assertEqual(self.gh_calls(), [])
+        self.assertEqual(self.posted(), [])
+        self.assertEqual(sorted(p.name for p in self.run.iterdir()), ["drafts.json", "findings.json", "run.json"])
+        # A comment outside the diff that the review leaves out stops nothing.
+        for finding_id in ["3", "5"]:
+            self.draft("leave-out", finding_id)
+        result = self.submit()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        [request] = self.posted()
+        self.assertEqual([c["line"] for c in request["comments"]], [88])
 
     def test_a_safe_run_starts_as_an_approval_of_its_nits_and_posts_it(self):
         self.write_findings("approve_once_ci_passes", [self.NIT, self.OTHER_NIT])

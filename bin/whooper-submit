@@ -18,8 +18,8 @@
 # when it includes none. A review that includes no comment posts its message alone, such as an
 # approval that says "lgtm", or a comment review that says only what the user wrote.
 #
-# It first re-reads the PR's head. Each refusal Prompting Time handles its own way posts nothing and
-# exits with its own code:
+# It first runs the checks that need nothing from GitHub, then re-reads the PR's head. Each refusal
+# Prompting Time handles its own way posts nothing and exits with its own code:
 #
 #   10  The PR has new commits since the review. The reviewed head's record says stale and the PR
 #       goes on the recheck list, as whooper-post does, so the next round reviews the new commits
@@ -34,8 +34,11 @@
 #       --allow-mentions posts them.
 #   13  The request is not the one whose fingerprint --expect gives, because the drafts changed
 #       since --print showed it.
+#   14  An included comment is on a line outside the PR's diff, as its finding's in_diff says, where
+#       GitHub takes no comment, so it would refuse the whole review. It lists each such comment,
+#       and refuses before it reads anything from GitHub. Leaving them out lets the review post.
 #
-# Any other failure exits 1, or with gh's or jq's own code, none of which is 10 to 13. A comment
+# Any other failure exits 1, or with gh's or jq's own code, none of which is 10 to 14. A comment
 # someone wrote on the same line since the review, and a link outside the configured orgs, do not
 # stop it. It refuses a review that is still running, which a live whooper-review holds the PR's lock
 # for, since a Devin review may still change the findings.json it wrote; a review that did not
@@ -90,9 +93,13 @@ work=""
 trap 'rm -rf "$work"' EXIT
 trap 'exit 130' INT TERM HUP
 work="$(trap '' INT TERM HUP; mktemp -d)"
+# The checks that need nothing from GitHub, such as that each included comment is on a line of the
+# diff, come first, so a review they refuse reads nothing from GitHub either.
+"$root/lib/python" "$root/lib/whooper.py" submit-check "$data" "$run"
 head_now="$(gh api "repos/$repo/pulls/$pr" --jq .head.sha)"
-# lib/whooper.py runs the checks and writes the request to submit-request.json. Without --print it
-# then writes submit.json saying posting, which only one whooper-submit can create.
+# lib/whooper.py runs those checks again, since the drafts may have changed meanwhile, then the rest,
+# and writes the request to submit-request.json. Without --print it then writes submit.json saying
+# posting, which only one whooper-submit can create.
 "$root/lib/python" "$root/lib/whooper.py" submit "$data" "$run" "$head_now" ${print:+"$print"} \
   ${allow_mentions:+"$allow_mentions"} ${approve_anyway:+"$approve_anyway"} ${expect:+"$expect"}
 [[ -z "$print" ]] || exit 0

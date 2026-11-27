@@ -102,9 +102,10 @@ VETTED = "AI comment (vetted)"
 PRE_APPROVAL = "Pre-approving to unblock"
 # whooper-submit's exit codes for the refusals Prompting Time handles each its own way: the PR has
 # new commits since the review, the review approves a run that is not safe to approve, it
-# @-mentions someone, and its request is not the one --print showed. Any other failure exits 1, or
-# with gh's or jq's own code, and neither uses 10 to 13.
-NEW_COMMITS_EXIT, NOT_SAFE_EXIT, MENTIONS_EXIT, CHANGED_EXIT = 10, 11, 12, 13
+# @-mentions someone, its request is not the one --print showed, and it includes a comment on a line
+# outside the PR's diff. Any other failure exits 1, or with gh's or jq's own code, and neither uses
+# 10 to 14.
+NEW_COMMITS_EXIT, NOT_SAFE_EXIT, MENTIONS_EXIT, CHANGED_EXIT, OUTSIDE_DIFF_EXIT = 10, 11, 12, 13, 14
 # The review skills open each draft with its Conventional Comments label, such as **nit:** or
 # **suggestion (non-blocking):**, and whooper-submit keeps the label a comment opens with. A comment
 # that opens with none, such as one the user rewrote, gets the label of its finding's kind.
@@ -3670,6 +3671,39 @@ def refuse(code, message):
     raise SystemExit(code)
 
 
+def review_to_submit(data, run):
+    """The review whooper-submit would post from the run in run, as the run's findings.json, its drafts,
+    and the comments the drafts include (vetted_comments), after the checks that need nothing from
+    GitHub. bin/whooper-submit runs them before it reads the PR's head, so a review they refuse reads
+    nothing from GitHub, and again as it submits, since the drafts may change in between.
+
+    It refuses a review a live whooper-review still runs, a run whose review was submitted or is
+    posting, a review that did not finish (read_valid_findings), and, with OUTSIDE_DIFF_EXIT, a review
+    that includes a comment on a line outside the PR's diff, which it lists."""
+    # A Devin review writes findings.json itself and may change it until it ends, so nothing of a
+    # review a live whooper-review still runs posts, neither an approval nor a comment.
+    if run.name in running_runs(data):
+        raise SystemExit("whooper-submit: the review is still running; submit it once it ends")
+    # bin/whooper-submit writes submit.json saying posting before it posts, and adds GitHub's
+    # response after, so a run that has the file may have its review on GitHub.
+    if (run / "submit.json").exists():
+        if json.loads((run / "submit.json").read_text())["status"] == "posting":
+            raise SystemExit(f"whooper-submit: another submit of {run} is posting or did not finish, so its review"
+                             " may be on GitHub; check the PR, then delete submit.json to submit again")
+        raise SystemExit(f"whooper-submit: {run} was already submitted; see its submit.json")
+    result = read_valid_findings(run, "submit")
+    drafts = read_drafts(run)
+    comments = vetted_comments(result["findings"], drafts)
+    # GitHub takes an inline comment only on a line inside a hunk of the PR's diff, and refuses the
+    # whole review for one comment elsewhere. The review run says which lines are inside with in_diff.
+    if outside := [f for f, _ in comments if not f["in_diff"]]:
+        refuse(OUTSIDE_DIFF_EXIT, "whooper-submit: nothing posted: these included comments are on lines outside the"
+               " PR's diff, where GitHub takes no comment, so it would refuse the whole review:\n"
+               + "".join(f"  finding {f['id']}: {f['title']} ({f['path']}:{f['line']})\n" for f in outside)
+               + "Leave them out with bin/whooper-draft, or make their point in the review's message.")
+    return result, drafts, comments
+
+
 APPROVAL_TEXT = {"approve_once_ci_passes": "Approve once CI passes", "look_first": "Look first"}
 
 
@@ -4080,28 +4114,17 @@ def main(command, *args):
         # Drafts start from the run's findings (read_drafts), which only a finished review has.
         read_valid_findings(run, command)
         print(json.dumps(change_drafts(run, *change) if change else read_drafts(run), indent=2))
+    elif command == "submit-check":
+        review_to_submit(Path(args[0]), Path(args[1]).resolve())
     elif command == "submit":
         data, run, head_now, flags = Path(args[0]), Path(args[1]).resolve(), args[2], args[3:]
-        # A Devin review writes findings.json itself and may change it until it ends, so nothing of a
-        # review a live whooper-review still runs posts, neither an approval nor a comment.
-        if run.name in running_runs(data):
-            raise SystemExit("whooper-submit: the review is still running; submit it once it ends")
-        # bin/whooper-submit writes submit.json saying posting before it posts, and adds GitHub's
-        # response after, so a run that has the file may have its review on GitHub.
-        if (run / "submit.json").exists():
-            if load(run / "submit.json")["status"] == "posting":
-                raise SystemExit(f"whooper-submit: another submit of {run} is posting or did not finish, so its review"
-                                 " may be on GitHub; check the PR, then delete submit.json to submit again")
-            raise SystemExit(f"whooper-submit: {run} was already submitted; see its submit.json")
-        result = read_valid_findings(run, command)
+        result, drafts, comments = review_to_submit(data, run)
         item = load(run / "run.json")
         if head_now != item["head_sha"]:
             mark_new_commits(data, item, head_now, datetime.now(timezone.utc))
             refuse(NEW_COMMITS_EXIT, f"whooper-submit: nothing posted: the PR has new commits since the review (head"
                    f" {item['head_sha'][:12]}, now {head_now[:12]}). Whooper reviews them in its next round;"
                    " bin/whooper-round runs that round now.")
-        drafts = read_drafts(run)
-        comments = vetted_comments(result["findings"], drafts)
         # A review that includes no comment posts its message alone. An approval may leave it empty, but
         # a comment review with neither would post nothing.
         if not comments and drafts["event"] == "COMMENT" and not drafts["message"].strip():
