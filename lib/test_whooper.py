@@ -1524,6 +1524,26 @@ def without_go(env):
                                            if not os.access(Path(folder) / "go", os.X_OK))}
 
 
+@contextmanager
+def limit_once_the_test_runs(pid):
+    """Has each go test that a step waits for with a time limit, as run_go does, run out of time as soon as the test
+    binary has written its process ID to the file pid, however long go takes to build it, rather than when the
+    seconds pass: Popen.wait with a timeout waits for the file, or for go to end, and then times out at once. Yields,
+    for each such go test, the seconds the step gave it and when they ran out, by monotonic."""
+    wait, waits = subprocess.Popen.wait, []
+
+    def wait_for_the_test(process, timeout=None):
+        if timeout is not None and process.args[:2] == ["go", "test"]:
+            while process.poll() is None and not (pid.exists() and pid.read_text()):
+                sleep(0.01)
+            waits.append((timeout, monotonic()))
+            timeout = 0
+        return wait(process, timeout)
+
+    with mock.patch.object(subprocess.Popen, "wait", wait_for_the_test):
+        yield waits
+
+
 class RunDirTest(unittest.TestCase):
     """A step of whooper-review, run on a throwaway origin's PR and a run directory with its head and base
     worktrees, with HOME in a throwaway folder, so git reads only the config a test writes there, and go and
@@ -1665,23 +1685,28 @@ class ConnectionsTest(RunDirTest):
                       " rest and their links.", graph["limits"])
 
     def test_the_step_stops_at_its_time_limit_and_keeps_what_it_found(self):
-        # A gopls that never answers. report.py comes first in the diff, so the step reads it before it waits
-        # for gopls.
+        # A gopls that never answers. Once it reads the step's first request, when the step has started it and waits
+        # for its answer, it writes its process ID and sends the step SIGALRM, as the step's timer would at its limit:
+        # the limit finds the step waiting for gopls however slow the machine is, and the timer itself never runs
+        # out. report.py comes first in the diff, so the step has read it by then.
         fakes = self.tmp / "fakes"
-        fake(fakes / "gopls", f"echo $$ > '{self.tmp}/gopls.pid'\nexec sleep 30")
+        fake(fakes / "gopls", f"read -r request\necho $$ > '{self.tmp}/gopls.pid'\nkill -ALRM $PPID\nexec sleep 30")
         base = {"a/report.py": "def summarize(rows):\n    return len(rows)\n",
                 "b/total.go": "package b\n\nfunc Total() int {\n\treturn 1\n}\n"}
         head = {"a/report.py": "def summarize(rows):\n    return 0\n",
                 "b/total.go": "package b\n\nfunc Total() int {\n\treturn 2\n}\n"}
         run = self.run_dir(base, head)
         started = monotonic()
-        graph = self.connections(run, {**self.env, "PATH": f"{fakes}{os.pathsep}{self.env['PATH']}"}, seconds=1)
+        with mock.patch("signal.setitimer", wraps=signal.setitimer) as timer:
+            graph = self.connections(run, {**self.env, "PATH": f"{fakes}{os.pathsep}{self.env['PATH']}"}, seconds=60)
         self.assertLess(monotonic() - started, 10)
+        # The step set its timer to the limit, and stopped it as it ended.
+        self.assertEqual(timer.call_args_list, [mock.call(signal.ITIMER_REAL, 60), mock.call(signal.ITIMER_REAL, 0)])
         self.assertEqual(graph, {
             "nodes": [{"id": "a/report.py:summarize", "name": "summarize", "kind": "func", "path": "a/report.py",
                        "line": 1, "change": "changed", "lines_changed": 2}],
             "edges": [],
-            "limits": [ONE_LEVEL, PATTERNS, "Whooper stopped looking at its 1-second limit, so changed code and"
+            "limits": [ONE_LEVEL, PATTERNS, "Whooper stopped looking at its 60-second limit, so changed code and"
                        " callers may be missing."],
         })
         # The step stopped the gopls it started.
@@ -1806,9 +1831,13 @@ class TestGapsTest(RunDirTest):
         wait = f'\tos.WriteFile("{pid}", []byte(strconv.Itoa(os.Getpid())), 0o644)\n\ttime.Sleep(time.Minute)'
         tests = gaps_tests(wait).replace('\t"testing"', '\t"os"\n\t"strconv"\n\t"testing"')
         run = self.run_dir(GAPS, {**GAPS_PR, "calc/calc_test.go": tests})
-        started = monotonic()
-        gaps = self.gaps(run, seconds=10)
-        self.assertLess(monotonic() - started, 20)
+        # The limit comes once the test binary runs, however long go takes to build it, so it finds the test running.
+        with limit_once_the_test_runs(pid) as waits:
+            gaps = self.gaps(run, seconds=10)
+        [(left, ran_out)] = waits
+        # go test had what was left of the step's 10 seconds, and the step ended soon after they ran out.
+        self.assertTrue(0 < left <= 10, left)
+        self.assertLess(monotonic() - ran_out, 10)
         self.assertEqual({key: gaps[key] for key in ["measured", "reason", "lines"]},
                          {"measured": False, "reason": "The tests ran past Whooper's 10-second limit.", "lines": []})
         # The test binary started, and the step stopped it.
@@ -1980,10 +2009,14 @@ class ExamplesTest(RunDirTest):
         test = ('package prices\n\nimport (\n\t"os"\n\t"strconv"\n\t"testing"\n\t"time"\n)\n\n'
                 f'func TestWhooperExamples(t *testing.T) {{\n\tos.WriteFile("{pid}", []byte(strconv.Itoa(os.Getpid())), 0o644)\n'
                 "\ttime.Sleep(time.Minute)\n}\n")
-        started = monotonic()
-        result = self.examples(self.run_dir(PRICES, PRICES_PR), examples_request([("Clamp", 9)], [("Clamp", "Clamp(50)")]),
-                               test, seconds=8)
-        self.assertLess(monotonic() - started, 20)
+        run = self.run_dir(PRICES, PRICES_PR)
+        # The limit comes once the test binary runs, however long go takes to build it, so it finds the test running.
+        with limit_once_the_test_runs(pid) as waits:
+            result = self.examples(run, examples_request([("Clamp", 9)], [("Clamp", "Clamp(50)")]), test, seconds=8)
+        [(left, ran_out)] = waits
+        # go test had what was left of the step's 8 seconds, and the step ended soon after they ran out.
+        self.assertTrue(0 < left <= 8, left)
+        self.assertLess(monotonic() - ran_out, 10)
         self.assertEqual(result["rows"], [example_row("Clamp", "Clamp(50)", None, None, "error", "not_compared",
                                                       "The test ran past Whooper's 8-second limit at the PR head.")])
         deadline = monotonic() + 5
