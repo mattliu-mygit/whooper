@@ -1,0 +1,38 @@
+{
+  "type": "object",
+  "description": "The example inputs a review run chooses for Go functions the PR changes, which it writes as examples.json in its run directory beside whooper_examples_test.go, the test that prints what each function returns for each input. As soon as the run ends, whooper-review moves the file to examples.request.json, runs the test once at the head and twice at the merge base, and writes what the test printed as examples.json.",
+  "required": ["package", "functions", "inputs"],
+  "additionalProperties": false,
+  "properties": {
+    "package": { "type": "string", "description": "The folder of the functions' package, from the repository's root, such as services/prices." },
+    "functions": {
+      "type": "array",
+      "maxItems": 3,
+      "description": "The functions the test calls, which the PR changes and which write no data.",
+      "items": {
+        "type": "object",
+        "required": ["name", "path", "line"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "description": "As Go code names it, such as Clamp, or Cart.Total for a method." },
+          "path": { "type": "string", "description": "Its file, from the repository's root, in the package's folder." },
+          "line": { "type": "integer", "minimum": 1, "description": "Its line in the head." }
+        }
+      }
+    },
+    "inputs": {
+      "type": "array",
+      "maxItems": 12,
+      "description": "The inputs, in the order a reader should see them.",
+      "items": {
+        "type": "object",
+        "required": ["function", "input"],
+        "additionalProperties": false,
+        "properties": {
+          "function": { "type": "string", "description": "The name of one of the functions." },
+          "input": { "type": "string", "description": "The input as the test prints it, such as Clamp(101)." }
+        }
+      }
+    }
+  }
+}

@@ -15,7 +15,10 @@
 # a plain patch whatever the user's git config says.
 # With --as-of, github.json holds only what people could read before that time, for replaying a past
 # review. Then the repo's setup script, if the config names one, prepares anything else the run
-# needs, such as dependencies or databases (examples/setup.example.sh). The run itself has no
+# needs, such as dependencies or databases (examples/setup.example.sh). Then a step of at most 10
+# minutes saves test_gaps.json, which of the lines the diff adds to Go code no test ran, from one go
+# test of the changed packages with coverage (lib/whooper.py's test_gaps). The run may read the file,
+# and may change it, so the copy from before the run replaces it once the run ends. The run itself has no
 # GitHub login, and its launcher denies the Slack writes, so it can post nothing. Its findings.json
 # must fit schemas/findings.json, and a run that passes [review] timeout_minutes is stopped. The run
 # also writes its overview of the PR as overview.json. As soon as the run ends, an overview the run
@@ -27,9 +30,12 @@
 # it would without one. Then, before the worktrees go, a step of at most 2 minutes saves
 # connections.json, how the code the diff changes connects: the declarations it adds, changes, or
 # removes, the code that calls them, one level up, and how each link was found, by gopls for Go files
-# and name search for the rest (lib/whooper.py's connections). Whatever it finds, and even if it fails,
-# the review goes on as it would without it. bin/whooper-classify <run dir> then applies rule v1 to its
-# findings.
+# and name search for the rest (lib/whooper.py's connections). Then, when the run chose example inputs
+# for Go functions the PR changes, which it wrote as examples.json beside its test, whooper_examples_test.go,
+# and which move to examples.request.json as soon as it ends, a step of at most 5 minutes runs the test once
+# at the head and twice at the merge base, without the run's edits, and saves what it printed as
+# examples.json (lib/whooper.py's examples). Whatever each step finds, and even if it fails, the review goes
+# on as it would without its file. bin/whooper-classify <run dir> then applies rule v1 to its findings.
 #
 # While it runs, this script holds the PR's lock, <state>/locks/<owner>-<repo>-<pr>/, with its
 # process ID in pid and the run ID in run_id. On exit, finished or not, the repo's teardown script
@@ -110,7 +116,7 @@ finished=false
 # What failure.txt says when the review stops without die's reason: a command failed under set -e,
 # unless the trap below records that a signal stopped the review.
 stop_reason="the review stopped at an unexpected error; see whooper-review's error output"
-work="" agent_group="" watchdog_pid="" connections_group=""
+work="" agent_group="" watchdog_pid="" step_group=""
 cleanup() {
   local status=$?
   # bash 3.2, macOS's /bin/bash, runs this with $? at 0 when set -u stops the script on an unset
@@ -131,8 +137,8 @@ cleanup() {
     save_failure "$stop_reason" || true
   fi
   # The run and everything it started share one process group, so this also stops a server a
-  # probe left running. The connections step has a group of its own too.
-  for group in "$agent_group" "$connections_group"; do
+  # probe left running. Each step has a group of its own too.
+  for group in "$agent_group" "$step_group"; do
     if [[ -n "$group" ]]; then
       kill -TERM -- "-$group" 2>/dev/null || true
       wait "$group" 2>/dev/null || true
@@ -262,6 +268,34 @@ if [[ -n "$WHOOPER_REPO_SETUP" ]]; then
 fi
 step=review step_log=""
 
+# Each step runs lib/whooper.py <step> <run directory> to save one file for the review screen, and stops at
+# a time limit of its own. Whatever it finds, and even if it fails, the review goes on as it would without
+# the file. A step runs in a process group of its own, as the run does, so an interrupt reaches the cleanup
+# at once and the cleanup stops everything the step started, and with the run's environment, since a step
+# may run the PR's tests: no GitHub login, and temporary files in the run directory. Its output goes to the
+# error output, so this script's output stays the run directory alone.
+run_step() {
+  (
+    exec env GH_TOKEN=disabled GIT_SSH_COMMAND=false GIT_TERMINAL_PROMPT=0 TMPDIR="$run/tmp" \
+      "$root/lib/python" -c 'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
+      "$root/lib/python" "$root/lib/whooper.py" "$1" "$run" < /dev/null >&2
+  ) &
+  step_group=$!
+  wait "$step_group" || echo "whooper-review: the $1 step failed, so the review has no $2" >&2
+  kill -TERM -- "-$step_group" 2>/dev/null || true
+  step_group=""
+}
+
+# Before the run starts, while the head's worktree holds the head as committed, the test-gaps step saves
+# test_gaps.json: which changed Go lines no test ran (lib/whooper.py's test_gaps). The facts name it for the
+# run, which may also change it, so a copy outside the run directory replaces it once the run ends.
+run_step test-gaps test_gaps.json
+gaps=""
+if [[ -f "$run/test_gaps.json" ]] && cp "$run/test_gaps.json" "$work/test_gaps.json"; then
+  gaps="
+- test_gaps.json: $run/test_gaps.json, the changed Go lines no test ran, which Whooper measured before this run started"
+fi
+
 untagged=""
 if [[ "$source" == slack_ask && "$tagged" == false ]]; then
   untagged="
@@ -279,7 +313,7 @@ fi
 - Merge base: $merge_base, checked out in $run/base.
 - Run directory: $run. Write log.md and overview.json there.
 - github.json: $github
-- Repository setup: $setup
+- Repository setup: $setup$gaps
 EOF
 } > "$run/prompt.md"
 
@@ -305,6 +339,13 @@ wait "$agent_group" || agent_exit=$?
 kill "$watchdog_pid" 2>/dev/null || true
 watchdog_pid=""
 
+# Only Whooper's own runs fill test_gaps.json and examples.json: the copy from before the run replaces the
+# first, whatever the run did to it, and the examples the run chose, which it wrote as examples.json, move to
+# examples.request.json, where the examples step below reads them.
+rm -rf "$run/test_gaps.json" || true
+[[ ! -e "$work/test_gaps.json" ]] || mv "$work/test_gaps.json" "$run/test_gaps.json" || true
+[[ ! -e "$run/examples.json" ]] || mv -f "$run/examples.json" "$run/examples.request.json" || rm -rf "$run/examples.json" || true
+
 # The overview is checked as soon as the run ends, even one past its time limit, after an overview the
 # run wrote inside findings.json leaves that file, so it cannot fail the findings' check below.
 # Whatever the check finds, and even if it fails, the review goes on as it would without an overview.
@@ -312,18 +353,11 @@ watchdog_pid=""
 
 # Then, while the worktrees exist, the connections step writes connections.json: how the code the diff
 # changes connects, from gopls for Go files and name search for the rest (lib/whooper.py's connections).
-# It stops looking at its own time limit, and it runs in a process group of its own, as the run does, so
-# an interrupt reaches the cleanup at once and the cleanup stops everything the step started. Its output
-# goes to the error output, so this script's output stays the run directory alone. Whatever it finds,
-# and even if it fails, the review goes on as it would without it.
-(
-  exec "$root/lib/python" -c 'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
-    "$root/lib/python" "$root/lib/whooper.py" connections "$run" < /dev/null >&2
-) &
-connections_group=$!
-wait "$connections_group" || echo "whooper-review: the connections step failed, so the review has no connections.json" >&2
-kill -TERM -- "-$connections_group" 2>/dev/null || true
-connections_group=""
+run_step connections connections.json
+# Then, when the run chose examples, the examples step writes examples.json: what the Go functions the run
+# chose return for the inputs it chose, from its test run once at the head and twice at the merge base,
+# without the run's edits (lib/whooper.py's examples).
+run_step examples examples.json
 
 # Each check names its own step, which failure.json names the cause by.
 step=time-limit

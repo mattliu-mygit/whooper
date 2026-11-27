@@ -30,6 +30,10 @@ from the user's config file (config_path), never from this code. The bin/ script
                                                                                       overview.json read_overview drops
   whooper.py connections <run dir>                                                 -> connections.json, how the code
                                                                                       the diff changes connects
+  whooper.py test-gaps <run dir>                                                   -> test_gaps.json, the changed Go
+                                                                                      lines no test ran
+  whooper.py examples <run dir>                                                    -> examples.json, the run's example
+                                                                                      inputs, run at head and base
   whooper.py retry <data dir> <run-id> <head now>                                  -> queues another review
   whooper.py wait <data dir> <work-item.json> <failure.json>                      -> a waiting run, the recheck list
   whooper.py skip <data dir> <run-id> [--undo]                                    -> marks the run skipped, or not
@@ -48,7 +52,7 @@ from the user's config file (config_path), never from this code. The bin/ script
   whooper.py settings get | set <json>                                             -> settings JSON | saves the given ones
 """
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import datetime, timedelta, timezone
 import fcntl
 import hashlib
@@ -57,6 +61,7 @@ import json
 import keyword
 import os
 from pathlib import Path
+import posixpath
 import re
 import shlex
 import shutil
@@ -64,6 +69,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+from time import monotonic
 import tomllib
 import urllib.parse
 
@@ -902,6 +908,21 @@ def name_search(tree, commit, name, language):
     return sites
 
 
+def edited_go_files(tree):
+    """The .go files git status lists in the worktree tree, by path: those a review run changed, added, or deleted
+    there, such as a probe's test."""
+    status = subprocess.run(["git", "-C", str(tree), "--no-optional-locks", "status", "--porcelain", "-z",
+                             "--untracked-files=all"], capture_output=True, text=True, check=True).stdout
+    entries, paths = iter(status.split("\0")), []
+    for entry in entries:
+        # A rename or copy names the path it came from next.
+        if entry[:1] in ("R", "C"):
+            next(entries, None)
+        if entry.endswith(".go"):
+            paths.append(entry[3:])
+    return paths
+
+
 def find_gopls():
     """The gopls Whooper runs, and why there is none: gopls on PATH, or where go install puts it, GOBIN or
     the bin folder of the first GOPATH folder, and none without the go command, which gopls runs to load
@@ -942,22 +963,15 @@ class Gopls:
             self.call("initialize", {"processId": os.getpid(), "rootUri": uri, "workspaceFolders": [{"uri": uri, "name": tree.name}],
                                      "capabilities": {"textDocument": {"documentSymbol": {"hierarchicalDocumentSymbolSupport": True}}}})
             self.send({"method": "initialized", "params": {}})
-            status = subprocess.run(["git", "-C", str(tree), "--no-optional-locks", "status", "--porcelain", "-z",
-                                     "--untracked-files=all"], capture_output=True, text=True, check=True).stdout
-            entries = iter(status.split("\0"))
-            for entry in entries:
-                # A rename or copy names the path it came from next.
-                if entry[:1] in ("R", "C"):
-                    next(entries, None)
-                if entry.endswith(".go"):
-                    text = committed(tree, commit, entry[3:])
-                    if text is None:
-                        try:
-                            clause = re.search(r"^package\s+\w+", (tree / entry[3:]).read_text(errors="replace"), re.M)
-                        except OSError:
-                            clause = None
-                        text = f"{clause[0]}\n" if clause else ""
-                    self.open(entry[3:], text)
+            for path in edited_go_files(tree):
+                text = committed(tree, commit, path)
+                if text is None:
+                    try:
+                        clause = re.search(r"^package\s+\w+", (tree / path).read_text(errors="replace"), re.M)
+                    except OSError:
+                        clause = None
+                    text = f"{clause[0]}\n" if clause else ""
+                self.open(path, text)
         except BaseException:
             self.close()
             raise
@@ -1046,8 +1060,8 @@ class Gopls:
 
 
 class TimeLimit(Exception):
-    """The connections step reached its time limit. It is no OSError, as TimeoutError is, so no handler of a
-    failed command takes it for one."""
+    """A step of whooper-review reached its time limit, such as the connections step. It is no OSError, as
+    TimeoutError is, so no handler of a failed command takes it for one."""
 
 
 def stop_at_time_limit(signum, frame):
@@ -1227,6 +1241,435 @@ def connections(run, seconds=CONNECTIONS_SECONDS):
     }, indent=2))
 
 
+# The test-gaps step, test_gaps.json: whooper-review runs it before the review run starts, and it stops after
+# TEST_GAPS_SECONDS, whatever go is doing then.
+TEST_GAPS_SECONDS = 600
+# go downloads nothing and runs the Go installed on this Mac, whatever a go.mod asks for.
+GO_OFFLINE = {"GOPROXY": "off", "GOTOOLCHAIN": "local"}
+# A block of statements in a Go coverage profile: its file, as <import path>/<file name>, its start and its end, each
+# <line>.<column>, where the end's column is the one after its last character, its number of statements, and how
+# many times it ran, or with -covermode=set whether it ran.
+COVER_BLOCK = re.compile(r"(.+):(\d+)\.(\d+),(\d+)\.(\d+) \d+ (\d+)")
+# The comment a generated Go file has above its package clause.
+GENERATED_GO = re.compile(r"^// Code generated .* DO NOT EDIT\.$", re.M)
+
+
+def run_go(folder, seconds, *args):
+    """Runs go with args in folder, with GO_OFFLINE in its environment, in a process group of its own, and returns
+    its exit code, or None once it ran past seconds, with its output and its error output. Nothing it started stays
+    running: the group is killed when go ends, at the time limit, and when Python stops, as at a signal main turns
+    into SystemExit."""
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        process = subprocess.Popen(["go", *args], cwd=folder, env={**os.environ, **GO_OFFLINE},
+                                   stdin=subprocess.DEVNULL, stdout=out, stderr=err, start_new_session=True)
+        try:
+            code = process.wait(timeout=max(seconds, 0))
+        except subprocess.TimeoutExpired:
+            code = None
+        finally:
+            with suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+        out.seek(0)
+        err.seek(0)
+        return code, out.read().decode(errors="replace"), err.read().decode(errors="replace")
+
+
+def go_events(output):
+    """The events go test -json printed, one JSON object a line."""
+    events = []
+    for line in output.splitlines():
+        with suppress(ValueError):
+            if isinstance(event := json.loads(line), dict):
+                events.append(event)
+    return events
+
+
+def build_error(events, err):
+    """The first line of the error that stopped go from building, from go test -json's events, or else from its error
+    output."""
+    lines = [e.get("Output", "").strip() for e in events if e.get("Action") == "build-output"]
+    lines += err.splitlines()
+    return next((line.strip() for line in lines if line.strip() and not line.startswith("# ")), "go printed no error")
+
+
+def first_panic(events, package):
+    """The first line of a panic or fatal error the tests of package printed, or None."""
+    return next((e["Output"].strip() for e in events if e.get("Package") == package and e.get("Action") == "output"
+                 and e.get("Output", "").startswith(("panic: ", "fatal error: "))), None)
+
+
+def coverage_counts(profile):
+    """The blocks of profile, a Go coverage profile, each with the highest count the profile gives it: go test writes a
+    block once for each test binary that covers its package, in the order the binaries end, so a block one test
+    package ran can read 0 for another. Each block as (file, start line, start column, end line, end column)."""
+    counts = {}
+    for line in profile.splitlines():
+        if block := COVER_BLOCK.fullmatch(line):
+            file, *where, count = block.groups()
+            key = (file, *map(int, where))
+            counts[key] = max(counts.get(key, 0), int(count))
+    return counts
+
+
+def limit_text(seconds):
+    """A time limit in words, such as 10-minute or 8-second."""
+    return f"{seconds // 60:g}-minute" if seconds % 60 == 0 else f"{seconds:g}-second"
+
+
+def listed(paths, most=5):
+    """paths for a sentence: the first most of them, and how many more."""
+    more = f", and {len(paths) - most} more" if len(paths) > most else ""
+    return f"{', '.join(paths[:most])}{more}"
+
+
+def other_languages(patch):
+    """The files of patch's diff that it adds lines to and that are in a language LANGUAGES knows other than Go, such
+    as TypeScript."""
+    return [path for path, _, _, added, _ in diff_files(patch) if added and language_of(path) not in (None, "go")]
+
+
+def plural(count, one, many):
+    return f"{count} {one if count == 1 else many}"
+
+
+def test_gaps(run, seconds=TEST_GAPS_SECONDS):
+    """Writes test_gaps.json in run, a review run's directory, before the run starts, while the head's worktree holds
+    the head as committed: which of the lines the diff adds to the head's Go code no test ran, for whooper-show. A
+    line counts when a block of statements of Go's coverage profile covers it, and blank and comment lines, test files,
+    generated files, and files in testdata do not count. go test runs the changed packages' own tests, with coverage
+    of all of them, from the folder of their module, or of its workspace when go finds a go.work, so a block counts as
+    run when the tests of any of those packages ran it (coverage_counts). A changed file the build on this Mac leaves
+    out, such as one for Windows, is not measured, and limits says so. Nothing is measured, and the file says why,
+    without the go command, when the head does not build, when a test binary ends without recording what it ran, as
+    when a test panics, and when the step passes seconds; a test that fails still measures, and limits names it. A
+    PR whose diff adds no such line gets no file."""
+    item = read_object(run / "run.json")
+    patch = (run / "diff.patch").read_text(errors="replace")
+    head, commit = run.resolve() / "head", item["head_sha"]
+    changed = {}
+    for path, _, _, added, _ in diff_files(patch):
+        if not added or language_of(path) != "go" or path.endswith("_test.go") or "testdata" in path.split("/"):
+            continue
+        text = committed(head, commit, path)
+        # Go counts a file as generated by a comment above its package clause.
+        if text is None or GENERATED_GO.search(re.split(r"^package\s", text, maxsplit=1, flags=re.M)[0]):
+            continue
+        lines = text.split("\n")
+        if code := [n for n in sorted(added) if n <= len(lines) and lines[n - 1].strip()
+                    and not lines[n - 1].strip().startswith("//")]:
+            changed[path] = code
+    if not changed:
+        return
+    others = other_languages(patch)
+    other = [f"Whooper measures only Go code so far, so it left out"
+             f" {plural(len(others), 'changed file in another language', 'changed files in other languages')}:"
+             f" {listed(others)}."] if others else []
+    tools = []
+
+    def write(measured, reason, lines=(), ran=0, limits=()):
+        write_file(run / "test_gaps.json", json.dumps({
+            "measured": measured, "reason": reason, "tool": "; ".join(tools) or "go test",
+            "lines": [{"path": path, "line": n, "status": "not_run"} for path, n in lines],
+            "summary": {"changed_lines": ran + len(lines), "run": ran, "not_run": len(lines)},
+            "limits": [*limits, *other]}, indent=2))
+
+    if not shutil.which("go"):
+        return write(False, "The go command is not on PATH.")
+    deadline = monotonic() + seconds
+
+    def go(folder, *args):
+        code, out, err = run_go(folder, deadline - monotonic(), *args)
+        if code is None:
+            raise TimeLimit
+        return code, out, err
+
+    # Each changed package's folder, and the folder go runs in to reach it: its workspace's or its module's.
+    folders = {path: head / posixpath.dirname(path) for path in changed}
+    roots, unreachable, left_out, failed, keys, counts = {}, [], [], [], {}, {}
+    try:
+        for folder in dict.fromkeys(folders.values()):
+            _, out, _ = go(folder, "env", "GOWORK", "GOMOD")
+            work, module, *_ = out.split("\n") + ["", ""]
+            if work not in ("", "off") or module not in ("", os.devnull):
+                roots.setdefault(Path(work if work not in ("", "off") else module).parent, []).append(folder)
+        for path, folder in folders.items():
+            if not any(folder in members for members in roots.values()):
+                unreachable.append(path)
+        for root, members in roots.items():
+            patterns = {folder: "." if folder == root else f"./{folder.relative_to(root).as_posix()}" for folder in members}
+            code, out, err = go(root, "list", "-e", "-json=ImportPath,Dir,GoFiles,CgoFiles", *patterns.values())
+            if code != 0:
+                return write(False, f"go list did not list the changed packages: {build_error([], err)}")
+            decoder, at, packages = json.JSONDecoder(), 0, {}
+            while (at := re.compile(r"\s*").match(out, at).end()) < len(out):
+                package, at = decoder.raw_decode(out, at)
+                packages[Path(package["Dir"]).resolve()] = package
+            tested = set()
+            for path, folder in folders.items():
+                if folder in members:
+                    package = packages.get(folder.resolve(), {})
+                    name = posixpath.basename(path)
+                    if name in package.get("GoFiles", []) + package.get("CgoFiles", []):
+                        keys[path] = f"{package['ImportPath']}/{name}"
+                        tested.add(patterns[folder])
+                    else:
+                        left_out.append(path)
+            if not tested:
+                continue
+            tested = sorted(tested)
+            cd = "" if root == head else f"cd {shlex.quote(root.relative_to(head).as_posix())} && "
+            tools.append(f"{cd}GOPROXY=off GOTOOLCHAIN=local " + shlex.join(
+                ["go", "test", "-count=1", f"-coverpkg={','.join(tested)}", *tested]))
+            with tempfile.TemporaryDirectory() as scratch:
+                profile = Path(scratch) / "coverage.out"
+                code, out, err = go(root, "test", "-json", "-count=1", f"-coverpkg={','.join(tested)}",
+                                    f"-coverprofile={profile}", *tested)
+                profile = profile.read_text(errors="replace") if profile.exists() else ""
+            events = go_events(out)
+            if not events and code != 0:
+                return write(False, f"go test did not run: {build_error([], err)}")
+            if any(e.get("Action") == "build-fail" or e.get("FailedBuild") for e in events):
+                return write(False, f"The Go code at the head does not build: {build_error(events, err)}")
+            # A test binary that ends normally prints its coverage, even one whose tests failed. One that panics, or
+            # that go test's own -timeout stops, records none, so its tests' lines would read as not run.
+            recorded = {e.get("Package") for e in events
+                        if e.get("Action") == "output" and not e.get("Test") and "coverage: " in e.get("Output", "")}
+            if crashed := next((e["Package"] for e in events if e.get("Action") == "fail" and not e.get("Test")
+                                and e.get("Package") not in recorded), None):
+                panic = first_panic(events, crashed)
+                return write(False, f"The tests of {crashed} stopped before Go recorded what they ran, as when a test"
+                                    f" panics{': ' + panic if panic else ''}.")
+            failed += [f"{e['Test']} in {e['Package']}" for e in events
+                       if e.get("Action") == "fail" and e.get("Test") and "/" not in e["Test"]]
+            for block, count in coverage_counts(profile).items():
+                counts[block] = max(counts.get(block, 0), count)
+    except TimeLimit:
+        return write(False, f"The tests ran past Whooper's {limit_text(seconds)} limit.")
+    if not tools:
+        return write(False, f"Whooper found no package go test can run for the changed Go files: "
+                            f"{listed(left_out + unreachable)}.")
+    # Each block's lines: an end at column 1 holds none of its line.
+    spans = {}
+    for (file, start, _, end, end_column), count in counts.items():
+        spans.setdefault(file, []).append((start, end if end_column > 1 else end - 1, count))
+    ran, not_run = 0, []
+    for path, lines in changed.items():
+        for n in lines if path in keys else []:
+            if found := [count for start, end, count in spans.get(keys[path], []) if start <= n <= end]:
+                if max(found) > 0:
+                    ran += 1
+                else:
+                    not_run.append((path, n))
+    limits = ["Go counts a line as run when any part of it ran: in `a && b`, the line counts as run even when b never"
+              " ran.",
+              "A line that ran is not always checked: a test can run a line without checking what it does. Whooper"
+              " does not yet change lines on purpose to see whether a test catches it (mutation testing).",
+              "Only the tests of the changed packages ran, so a test in another package that runs these lines does not"
+              " count."]
+    if failed:
+        one = len(failed) == 1
+        limits.append(f"{plural(len(failed), 'test', 'tests')} failed: {listed(failed)}. Go recorded the lines"
+                      f" {'it' if one else 'they'} ran before {'it' if one else 'they'} failed, so they count as run.")
+    if left_out:
+        limits.append(f"The build on this Mac leaves out {plural(len(left_out), 'changed Go file', 'changed Go files')},"
+                      f" so Whooper did not measure {'it' if len(left_out) == 1 else 'them'}: {listed(left_out)}.")
+    if unreachable:
+        limits.append(f"Whooper found no Go module for {plural(len(unreachable), 'changed Go file', 'changed Go files')},"
+                      f" so it did not measure {'it' if len(unreachable) == 1 else 'them'}: {listed(unreachable)}.")
+    write(True, None, not_run, ran, limits)
+
+
+# The examples step, examples.json: whooper-review runs it once the review run ends, and it stops after
+# EXAMPLES_SECONDS. Each run of the examples test may run for EXAMPLE_TIMEOUT, go test's own limit, once built.
+EXAMPLES_SECONDS, EXAMPLE_TIMEOUT = 300, "60s"
+# The test a review run writes in its run directory, and the JSON Schema of the examples.json it writes beside it.
+EXAMPLE_TEST = "whooper_examples_test.go"
+EXAMPLES_SCHEMA = ROOT / "schemas" / "examples-request.json"
+# A row shows at most EXAMPLE_CHARS characters of a result.
+EXAMPLE_CHARS = 4000
+
+
+def go_name(name):
+    """A Go function's name without a receiver's pointer or type parameters, such as Cart.Total for (*Cart).Total, as
+    definitions names a method, and for Cart.Total."""
+    return re.sub(r"\[[^\]]*\]|[()*]", "", name)
+
+
+def example_value(line):
+    """The result a line of the examples test printed, as a row shows it: error: and the error's text, or else the
+    result as compact JSON."""
+    error = line.get("error")
+    if error not in (None, ""):
+        return f"error: {error if isinstance(error, str) else json.dumps(error)}"
+    return json.dumps(line.get("result"), ensure_ascii=False, separators=(",", ":"))
+
+
+def examples(run, seconds=EXAMPLES_SECONDS):
+    """Writes examples.json in run, a review run's directory, once the run ended, while its worktrees exist: what the
+    Go functions the run chose return for the inputs it chose, at the merge base and at the head, for whooper-show.
+    The run wrote them as examples.json, which whooper-review moved to examples.request.json as soon as the run
+    ended, and EXAMPLE_TEST, a test that prints one JSON line per input. The test runs in the package's folder once in
+    the head's worktree and twice in the merge base's, with go's -overlay leaving out the Go files the run edited or
+    added there (edited_go_files), so it runs the reviewed commits. A row is same or different when both runs at the
+    merge base printed one result for its input, flaky when they printed two, and error when a run printed none for
+    it, as when the test does not compile; a function the merge base lacks runs at the head only. Rows hold only what
+    the test printed. Each function's line is where the head defines it. Running stops after seconds. A run that
+    chose no examples gets no file, and examples Whooper cannot read get one with no rows and why."""
+    request_path = run / "examples.request.json"
+    if not request_path.exists():
+        return
+    item = read_object(run / "run.json")
+    root = run.resolve()
+    sides = {"head": (root / "head", item["head_sha"]), "base": (root / "base", item["merge_base"])}
+
+    def write(functions, rows, limits):
+        write_file(run / "examples.json", json.dumps({"functions": functions, "rows": rows, "limits": limits}, indent=2))
+
+    def unreadable(why):
+        write([], [], [f"Whooper could not read the examples the review run chose, so it ran none: {why}."])
+
+    try:
+        request = json.loads(request_path.read_text())
+        check_schema(request, json.loads(EXAMPLES_SCHEMA.read_text()), "examples.json")
+    except OSError as e:
+        return unreadable(f"examples.json cannot be read: {e}")
+    except json.JSONDecodeError as e:
+        return unreadable(f"examples.json is not JSON: {e}")
+    except ValueError as e:
+        return unreadable(str(e))
+    package = posixpath.normpath(request["package"])
+    if not (sides["head"][0] / package).resolve().is_relative_to(sides["head"][0]) or not (sides["head"][0] / package).is_dir():
+        return unreadable(f"examples.json names the package {request['package']}, which is not a folder of the PR's head")
+    names = {go_name(function["name"]) for function in request["functions"]}
+    for i, entry in enumerate(request["inputs"]):
+        if go_name(entry["function"]) not in names:
+            return unreadable(f"examples.json's inputs[{i}] names {entry['function']}, which its functions do not list")
+
+    def defined(side, path):
+        """The functions and methods path defines on side, by go_name, each with its line."""
+        text = committed(*sides[side], path)
+        return {go_name(d["name"]): d["line"] for d in definitions(text, "go") if d["kind"] in ("func", "method")} if text else {}
+
+    functions = [{**function, "line": defined("head", function["path"]).get(go_name(function["name"]), function["line"])}
+                 for function in request["functions"]]
+    tree, commit = sides["base"]
+    listing = subprocess.run(["git", "-C", str(tree), "--no-lazy-fetch", "ls-tree", "--name-only", commit, "--",
+                              f"{package}/" if package != "." else "."], capture_output=True, text=True).stdout
+    at_base = set()
+    for path in listing.split("\n"):
+        if path.endswith(".go") and not path.endswith("_test.go"):
+            at_base |= defined("base", path).keys()
+    others = other_languages((run / "diff.patch").read_text(errors="replace"))
+    limits = ["The review run chose the functions and inputs, so inputs that would show other changes may be missing.",
+              "Whooper runs each input once at the PR head, so a result that varies from run to run there can read as a"
+              " change."]
+    deadline = monotonic() + seconds
+    with tempfile.TemporaryDirectory() as scratch:
+        scratch, not_run = Path(scratch), None
+        test = scratch / EXAMPLE_TEST
+        try:
+            shutil.copyfile(run / EXAMPLE_TEST, test)
+        except FileNotFoundError:
+            not_run = f"the review run wrote no {EXAMPLE_TEST}"
+        except OSError as e:
+            not_run = f"{EXAMPLE_TEST} cannot be read: {e}"
+        if not_run is None and not shutil.which("go"):
+            not_run = "the go command is not on PATH"
+
+        def run_test(side, where):
+            """Runs the test once in side's worktree, where in words, and returns how it went, ran, broken when it did
+            not compile, or late when it ran past the time limit, the results it printed by function and input, and
+            why an input it printed no result for has none."""
+            tree, commit = sides[side]
+            # go names a file the overlay replaces by the file that holds its text, so errors name the repository's
+            # file instead.
+            replace, names = {}, {str(test): posixpath.join(package, EXAMPLE_TEST)}
+            for path in edited_go_files(tree):
+                text = committed(tree, commit, path)
+                if text is not None:
+                    backing = scratch / f"{side}-{len(replace)}.go"
+                    backing.write_text(text)
+                    names[str(backing)] = path
+                replace[str(tree / path)] = str(backing) if text is not None else ""
+            replace[str(tree / package / EXAMPLE_TEST)] = str(test)
+            overlay = scratch / f"{side}-overlay.json"
+            overlay.write_text(json.dumps({"Replace": replace}))
+            code, out, err = run_go(tree / package, deadline - monotonic(), "test", "-json", "-count=1", "-run",
+                                    "^TestWhooperExamples$", f"-timeout={EXAMPLE_TIMEOUT}", "-vet=off",
+                                    f"-overlay={overlay}", ".")
+            events = go_events(out)
+            printed = "".join(e.get("Output", "") for e in events if e.get("Action") == "output"
+                              and e.get("Test") == "TestWhooperExamples" and e.get("OutputType") != "frame")
+            results = {}
+            for line in printed.split("\n"):
+                with suppress(ValueError):
+                    value = json.loads(line)
+                    if isinstance(value, dict) and isinstance(value.get("function"), str) and isinstance(value.get("input"), str):
+                        results.setdefault((go_name(value["function"]), value["input"]), example_value(value))
+            if code is None:
+                return "late", results, f"The test ran past Whooper's {limit_text(seconds)} limit at {where}."
+            if not any(e.get("Action") == "run" and e.get("Test") == "TestWhooperExamples" for e in events):
+                error = build_error(events, err)
+                for backing, path in names.items():
+                    error = error.replace(backing, path)
+                return "broken", results, f"The test does not compile at {where}: {error}."
+            panic = first_panic(events, next((e["Package"] for e in events if e.get("Package")), None))
+            return "ran", results, (f"The test stopped at {where} before it printed this input's result: {panic}."
+                                    if panic else f"The test printed no result for this input at {where}.")
+
+        if not_run is None:
+            state, head, head_problem = run_test("head", "the PR head")
+            # The merge base has no use for a test that did not run at the head, or for the time that is left.
+            base = ([run_test("base", "the merge base") for _ in range(2)]
+                    if state == "ran" and (sides["base"][0] / package).is_dir() else [])
+    rows, cut = [], False
+
+    def shown(value, most=EXAMPLE_CHARS):
+        nonlocal cut
+        if value is not None and len(value) > most:
+            cut |= most == EXAMPLE_CHARS
+            return value[:most] + "…"
+        return value
+
+    for entry in request["inputs"]:
+        key = (go_name(entry["function"]), entry["input"])
+        row = {"function": entry["function"], "input": entry["input"], "before": None, "after": None, "status": "error",
+               "label": "not_compared", "note": None}
+        rows.append(row)
+        if not_run is not None:
+            row["note"] = f"Whooper did not run the test: {not_run}."
+            continue
+        row["after"] = after = shown(head.get(key))
+        if after is None:
+            row["note"] = head_problem
+        elif key[0] not in at_base:
+            row.update(status="different", label="ran_head_only", note=f"New in this PR: the merge base has no {entry['function']}.")
+        elif not base:
+            # The head's run used up the time.
+            row["note"] = head_problem
+        else:
+            (first_state, first, first_problem), (second_state, second, second_problem) = base
+            first, second = first.get(key), second.get(key)
+            # A run cut short by the time limit does not disagree with the other; it just did not get there.
+            if first_state == "late" and first is None or second_state == "late" and second is None:
+                row["note"] = first_problem if first_state == "late" and first is None else second_problem
+            elif first != second:
+                row.update(status="flaky", note=f"The two runs at the merge base printed"
+                                                 f" {shown(first, 200) or 'no result'} and {shown(second, 200) or 'no result'}.")
+            elif first is None:
+                row["note"] = first_problem
+            else:
+                row.update(before=shown(first), status="same" if first == head[key] else "different", label="ran_base_and_head")
+    if cut:
+        limits.append(f"Whooper cut results longer than {EXAMPLE_CHARS:,} characters, and compared them whole.")
+    if others:
+        limits.append(f"Whooper runs examples only of Go functions so far, so it ran none for"
+                      f" {plural(len(others), 'changed file in another language', 'changed files in other languages')}:"
+                      f" {listed(others)}.")
+    write(functions, rows, limits)
+
+
 def show_review(data, run_id):
     """One review run for Prompting Time's review screen, as whooper-show --json prints it:
     run.json, the outcome, the findings, whether it is safe to approve, and the posted review as
@@ -1238,8 +1681,9 @@ def show_review(data, run_id):
     between the head the review read and the PR's newest head Whooper knows (pr_head), and the files
     that changed together with the PR's in the CO_CHANGE_DAYS days before the review started, in the
     history the PR's merge base ends (co_change). How the changed code connects is connections.json, which
-    whooper-review's connections step writes (connections), once the review ended. Refuses a run ID that
-    names no run directory."""
+    whooper-review's connections step writes (connections), the changed Go lines no test ran test_gaps.json
+    (test_gaps), and the example inputs' results examples.json (examples), each once the review ended. Refuses
+    a run ID that names no run directory."""
     run, parsed = data / "runs" / run_id, parse_run_id(run_id)
     # A run ID names a directory right under runs, so a path such as ../x reads nothing outside it.
     if parsed is None or not run.is_dir():
@@ -1300,6 +1744,10 @@ def show_review(data, run_id):
         "co_change": co_change([set(commit["files"]) for commit in history or []], paths),
         # whooper-review's connections step writes the file before the review ends.
         "connections": read_object(run / "connections.json") if outcome != "running" else None,
+        # The test-gaps step writes its file before the run starts, and whooper-review puts it back once the run ends,
+        # since the run may change it meanwhile; the examples step writes its file before the review ends.
+        "test_gaps": read_object(run / "test_gaps.json") if outcome != "running" else None,
+        "examples": read_object(run / "examples.json") if outcome != "running" else None,
     }
 
 
@@ -2379,6 +2827,11 @@ ASK_RECORD = {
                      " checked and did not",
     "overview.invalid.json": "the overview the review wrote that Whooper dropped, and why",
     "diff.patch": "the pull request's change, git diff <merge base> HEAD",
+    "connections.json": "how the code the diff changes connects: the declarations it adds, changes, or removes, and the"
+                        " code that calls them",
+    "test_gaps.json": "which changed Go lines no test ran, as Whooper measured before the review started",
+    "examples.json": "what the Go functions the review chose returned for its example inputs at the merge base and at"
+                     " the head, as Whooper ran them",
     "github.json": "the PR's title, body, reviews, and comments, as the review read them",
     "transcript.jsonl": "the review's whole conversation, with every command it ran and that command's output",
     "transcript.json": "the review's whole conversation, with every command it ran and that command's output",
@@ -2541,6 +2994,7 @@ def main(command, *args):
             notes = config["repos"][repo].get("notes")
             values["repo_notes"] = (config["dir"] / notes).read_text().strip() if notes else "None."
             values["overview_schema"] = str(OVERVIEW_SCHEMA)
+            values["examples_schema"] = str(EXAMPLES_SCHEMA)
             values.update(REVIEW_WORDING[agent])
         elif name == "ask":
             agent, run, question, *finding = rest
@@ -2642,6 +3096,13 @@ def main(command, *args):
         # whooper-review runs this as soon as the run ends, in a process group of its own, and the review then goes
         # on as it would without connections.json, whatever this finds and even if it fails.
         connections(Path(args[0]))
+    elif command in ("test-gaps", "examples"):
+        # whooper-review runs each in a process group of its own, as it runs connections, and the review then goes on
+        # as it would without the step's file, whatever this finds and even if it fails. Its cleanup stops a step with
+        # SIGTERM, which raises SystemExit here, so the step kills the go it started on its way out (run_go).
+        for stop in (signal.SIGTERM, signal.SIGHUP):
+            signal.signal(stop, lambda signum, frame: sys.exit(128 + signum))
+        (test_gaps if command == "test-gaps" else examples)(Path(args[0]))
     elif command == "retry":
         data, run_id, head_now = args
         print(retry(Path(data), run_id, head_now, datetime.now(timezone.utc)))

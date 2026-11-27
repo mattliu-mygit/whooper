@@ -60,6 +60,25 @@
 #              and line are at the merge base and any other's in the head; edges, each as {from, to, kind
 #              (calls or uses), found_by (gopls or name_search)}, from caller to called by node ID; and
 #              limits, what the graph can miss, in plain words, such as that it stops at 40 nodes
+#   test_gaps  test_gaps.json, which of the lines the diff adds to Go code no test ran, which whooper-review
+#              measures before the review run starts; null while the review runs, when the PR changes no
+#              Go code, and when the file is missing or cannot be read: measured, false when Whooper could
+#              not measure, with reason saying why, such as that the head does not build, and null
+#              otherwise; tool, the go test command it ran; lines, each changed line no test ran, as {path,
+#              line, status (not_run)}; summary, {changed_lines, run, not_run}, the changed lines that
+#              hold statements and how many of them a test ran, all 0 when nothing was measured; and
+#              limits, what the measure can miss, in plain words, such as that a line a test ran may be
+#              one no test checks
+#   examples   examples.json, what the Go functions the review run chose return for the inputs it chose,
+#              from the test it wrote, which whooper-review runs once at the head and twice at the merge
+#              base; null while the review runs, when the run chose none, and when the file is missing or
+#              cannot be read: functions, each as {name, path, line}, in the head; rows, each as {function,
+#              input, before, after, status, label, note}, where before and after are what the test
+#              printed at the merge base and at the head, or null, status is same, different, flaky (the
+#              two runs at the merge base printed different results), or error (a run printed none), label
+#              is ran_base_and_head, ran_head_only (for a function the PR adds), or not_compared, and note
+#              says why, or is null; and limits, what the table can miss, in plain words. Only what the
+#              test printed fills a row, never what the run expected
 #
 # A run ID that names no run directory gets "no run <run-id>" and exit 1. Prompting Time runs this
 # as the manifest's show-review action, whose fixed argument --json comes before the run ID; either

@@ -16,7 +16,9 @@ Slack connector), `jq`, `git`, `docker`, and [uv](https://docs.astral.sh/uv/). T
 through `lib/python`, which has uv supply Python 3.11 or later and the packages `lib/whooper.py`
 names, at the versions `lib/whooper.py.lock` pins; the first run downloads what is missing.
 [gopls](https://go.dev/gopls/) is optional: with it, a review links changed Go code to its callers with
-Go's own tools rather than by name search ([How a review run works](#how-a-review-run-works)).
+Go's own tools rather than by name search ([How a review run works](#how-a-review-run-works)). So is
+the `go` command, with which a review measures which changed Go lines no test ran and runs the example
+inputs its run chose, at the head and at the merge base.
 
 1. Copy `examples/config.example.toml` to `~/.config/whooper/config.toml` and fill it in. Everything
    that identifies you, your company, or your repos lives there: your GitHub login and name, the
@@ -197,6 +199,26 @@ or uses a node to it, by node ID, each with `kind` (`calls` or `uses`) and `foun
 null while the review runs and when the file is missing or cannot be read, as for a review from before
 whooper-review saved it.
 
+`test_gaps` is the `test_gaps.json` whooper-review saved before the review run started
+([How a review run works](#how-a-review-run-works)): which of the lines the diff adds to Go code no test
+ran. `measured` is false when Whooper could not measure, with `reason` saying why in plain words, and
+`reason` is null otherwise; `tool` is the go test command it ran; `lines` lists each changed line no test
+ran, as `path`, `line`, and `status` `not_run`; `summary` counts the changed lines that hold statements
+(`changed_lines`) and how many of them a test ran (`run`) or not (`not_run`), all 0 when nothing was
+measured; and `limits` says what the measure can miss, such as that a test can run a line without checking
+what it does. For example, a PR that adds `if n > 100 { n = 100 }` to `Clamp`, whose only test calls
+`Clamp(50)`, lists the line `n = 100` as not run, and counts the `if` line as run. `examples` is the
+`examples.json` whooper-review saved after the run: what the Go functions the run chose return for the
+inputs it chose. `functions` lists each function as `name`, `path`, and `line`, in the head; each of `rows`
+has the `function`, the `input`, `before` and `after`, what the run's test printed at the merge base and at
+the head, or null, a `status` (`same`, `different`, `flaky` when the two runs at the merge base printed
+different results, or `error` when a run printed none), a `label` (`ran_base_and_head`, `ran_head_only` for
+a function the PR adds, or `not_compared`), and a `note` that says why, or null; `limits` says what the
+table can miss. For the same PR, the input `Clamp(101)` reads before `101`, after `100`, `different`, and
+`ran_base_and_head`. Only what the test printed fills a row, never what the run expected. Each is null
+while the review runs and when its file is missing or cannot be read; `test_gaps` is also null for a PR
+that changes no Go code, and `examples` for a run that chose no examples.
+
 `safe_to_approve` is true exactly when whooper-submit would approve a review without
 `--approve-anyway` ([Submit a review](#submit-a-review)): its outcome is `reviewed`, its verdict is
 `approve_once_ci_passes`, every finding is a nit, and it did not skip the PR. It is false for any
@@ -332,7 +354,8 @@ when the fetch failed or the skills could not be hashed, recorded no agent, so t
 prompt, `prompts/ask.md` filled in, names the question, the finding, and the path of each file of
 the review's record the run directory has: first `failure.txt`, the reason whooper-review gave when
 it stopped the review, then `log.md`, `findings.json`, `overview.json`, `overview.invalid.json`,
-`diff.patch`, the transcript, `github.json`, `run.json`, `prompt.md`, `verdicts.json`, `post.json`,
+`diff.patch`, `connections.json`, `test_gaps.json`, `examples.json`, the transcript, `github.json`,
+`run.json`, `prompt.md`, `verdicts.json`, `post.json`,
 `drafts.json`, `submit.json`, `summary.md`, and earlier asks. For a review that did not finish,
 whose `findings.json` is missing or holds no findings Whooper can read, such as an empty file, it
 also names the review agent's `stderr.log` and `stdout.log`, which may say why, and
@@ -463,7 +486,18 @@ in the head worktree, as `diff.patch`, which stays when the worktrees go. `diff.
 patch whatever your git config says: no external diff tool, textconv filter, or color, `a/` and
 `b/` before the paths, and a submodule's commit lines rather than its log. Then it runs the repo's
 setup script, if the config names one, which may add variables to the run's environment and prints
-a paragraph for the prompt. Then the agent that `[jobs] review` names runs from the head worktree
+a paragraph for the prompt. Then, when the diff adds lines to Go code, a step saves `test_gaps.json`:
+which of those lines no test ran ([See reviews](#see-reviews)). It runs `go test` once with coverage of
+the packages the PR changes, their own tests only, from their module's folder, or their workspace's when
+`go` finds a `go.work`, with no downloads (`GOPROXY=off GOTOOLCHAIN=local`), and takes for each block of
+statements the highest count any test package gave it, since `go test` writes a block once for each test
+package that covers it. A line counts when such a block covers it, and blank and comment lines, test
+files, generated files, files in `testdata`, and files the build on this Mac leaves out, such as files
+for Windows, do not. A test that fails still measures, but nothing is measured, and `reason` says why,
+without the `go` command, when the head does not build, when the step passes 10 minutes, and when a test
+binary ends without recording what it ran, as one does when a test panics, since the lines only its tests
+ran would read as not run. The facts at the end of the prompt name the file. The run may change it, so
+the copy from before the run replaces it once the run ends. Then the agent that `[jobs] review` names runs from the head worktree
 through its launcher, `agents/<agent>/review`. The run follows `prompts/review.md`, filled in from
 the config with that agent's tool names and saved as `prompt.md` in the run directory, and leaves
 `findings.json`, which must fit `schemas/findings.json`. The run also writes `overview.json` in the
@@ -497,6 +531,22 @@ the edits or probes the run left in the worktrees, and gopls downloads nothing (
 keeps at most 40 nodes, the changed code first, and the step stops looking after 2 minutes, and says so in
 `limits`. Like the overview, it never changes how a review ends: when it fails, the review has no
 `connections.json`.
+
+When the PR changes Go functions whose results a caller sees and that write no data, the run also
+chooses at most 3 of them and at most 12 inputs, and writes `whooper_examples_test.go`, a test that prints
+one JSON line per input with what the function returned or the error, and `examples.json`, which names
+the package, the functions, and the inputs and must fit `schemas/examples-request.json`. As soon as the
+run ends, whooper-review moves that file to `examples.request.json`, so that only its own runs fill
+`examples.json`. Then, after the connections step, a step runs the test in the package's folder once at
+the head and twice at the merge base, with `GOPROXY=off GOTOOLCHAIN=local`, `-run` limited to the test,
+`-count=1`, and go test's `-timeout` at 60 seconds, with go's `-overlay` adding the test and leaving out
+the Go files the run edited or added in the worktrees, so each run reads the reviewed commit. It stops
+after 5 minutes and saves `examples.json` ([See reviews](#see-reviews)): two runs at the merge base that
+print different results make a row flaky, and a test that does not compile at the merge base, as when it
+calls a function the PR adds, runs at the head only. Examples Whooper cannot read give an `examples.json`
+with no rows and why in `limits`. Each step runs, as the run does, in a process group of its own, with no
+GitHub login and its temporary files in the run directory, and neither changes how a review ends: when
+one fails, the review has no file from it.
 
 A run that passes
 `[review] timeout_minutes` is stopped, and when whooper-review exits it stops the run and every
@@ -646,7 +696,9 @@ the recheck list while the commands above write to it.
   `devin-config.json` and `stdout.log`) and `stderr.log` are the run, `findings.json` its result
   (`findings.invalid.json` when it did not fit the schema), `overview.json` its overview of the PR
   (`overview.invalid.json`, with why, when whooper-review dropped it), `connections.json` how the
-  code the diff changes connects, `failure.txt` the reason
+  code the diff changes connects, `test_gaps.json` the changed Go lines no test ran, `examples.json` the
+  results of the example inputs the run chose, which it wrote with `whooper_examples_test.go` and which
+  whooper-review moved to `examples.request.json`, `failure.txt` the reason
   whooper-review gave when it stopped the run and `failure.json` its cause, `log.md` its evidence
   for each finding and the candidates it dropped,
   `verdicts.json` whooper-classify's output, and `post.json` and `post-request.json` whooper-post's.

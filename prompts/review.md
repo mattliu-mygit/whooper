@@ -111,7 +111,8 @@ breaks a rule here, and the review goes on without it.
   `after` each giving one concrete example, such as "GET /v1/runs returns at most 100 runs". Empty
   when callers see no change.
 - `places`: at most 5 places to read closely, most important first: findings that need the author,
-  then risks that are not findings, then callers outside the diff that the change affects. Each has
+  then risks that are not findings, such as changed lines no test ran, which `test_gaps.json` lists
+  when the facts name it, then callers outside the diff that the change affects. Each has
   an `id`, a `title`, a `reason`, its lines, and `evidence`: `kind` is `ran` when a probe or test you
   ran shows it, `read` when you read the code without running it, and `searched` when you searched
   the repository, and `detail` says what you ran, read, or searched for.
@@ -131,6 +132,31 @@ A place's lines and each layer range are `path`, `start_line`, and `end_line`: t
 diff names it, without `a/` or `b/`, and lines inside one hunk of that file. Lines count in the head,
 as the hunk header's `+start,count` does, except in a deleted file, where they count at the merge
 base, as its `-start,count` does.
+
+## Example inputs
+
+When the PR changes Go functions whose results a caller sees, {{user_name}} reads a table of example
+inputs with what each function returns at the merge base and at the head. You choose the inputs, and
+Whooper runs them after you return: once at the head and twice at the merge base. Skip this when the
+PR changes no such function.
+
+- Pick at most 3 changed functions, all in one package, that do not write to databases, files, or the
+  network, and do not read the clock or random numbers unless the test sets them. Pick at most 12
+  inputs in all: the cases the PR's body names, values at and next to each changed comparison (99,
+  100, and 101 for `n > 100`), and empty or zero values.
+- Write `whooper_examples_test.go` in the run directory: a test file for that package, with its own
+  package clause, such as `package prices`, so it can call unexported functions, and one test,
+  `TestWhooperExamples`, that calls each function with each input and prints one line per input to
+  standard output: a JSON object with `function` and `input`, as `examples.json` names them, and
+  `result`, what the function returns, encoded with `encoding/json`, or `error` instead, the text of
+  the error it returns or of a panic. Recover from each panic so that every input runs, and print
+  nothing else.
+- Write `examples.json` in the run directory, as JSON that fits the JSON Schema in
+  `{{examples_schema}}`: the package's folder, each function with its file and line in the head, and
+  each input.
+- The test must compile at the head. It need not compile at the merge base, as when it calls a
+  function the PR adds. To try it, copy it into the package in the head worktree, run it, and delete
+  the copy. Write no expected results anywhere: Whooper shows only what the test prints.
 
 ## The log
 
