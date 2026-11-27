@@ -1,4 +1,4 @@
-import { createEffect, Match, Show, Switch, untrack } from "solid-js";
+import { createEffect, Match, Show, snapshot, Switch, untrack } from "solid-js";
 import type { Overview, Review } from "../protocol";
 import { ReviewScreen } from "../Review";
 import type { PageStore } from "../store";
@@ -58,14 +58,15 @@ export function OverviewReview(props: {
           onOpenView={(id) => props.onMode(id)}
         />
         <Switch>
+          {/* Plain copies of the store's data, which the views read in keyed lists and the diff's callbacks. */}
           <Match when={full() === "connections" && review().connections}>
-            {(connections) => <ConnectionsView connections={connections()} patch={review().patch} onBack={back} />}
+            {(connections) => <ConnectionsView connections={snapshot(connections())} patch={review().patch} onBack={back} />}
           </Match>
           <Match when={full() === "test-gaps" && review().test_gaps}>
-            {(testGaps) => <TestGapsView testGaps={testGaps()} patch={review().patch} onBack={back} />}
+            {(testGaps) => <TestGapsView testGaps={snapshot(testGaps())} patch={review().patch} onBack={back} />}
           </Match>
           <Match when={full() === "inputs" && review().examples}>
-            {(examples) => <ExamplesView examples={examples()} onBack={back} />}
+            {(examples) => <ExamplesView examples={snapshot(examples())} onBack={back} />}
           </Match>
         </Switch>
       </div>

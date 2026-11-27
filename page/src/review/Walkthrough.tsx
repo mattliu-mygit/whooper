@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, For, onSettled, Show, untrack } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onSettled, Show, snapshot, untrack } from "solid-js";
 import { CheckIcon, ChevronsLeftIcon, ChevronsRightIcon, CloseIcon, Diff, IconButton, Markdown, parsePatchFiles, type DiffLineAnnotation, type DiffMark, type FileDiffMetadata, type LineRange } from "@prompting-time/ui";
 import type { JSX } from "@solidjs/web";
 import type { LineRange as CodeRange, Finding, Overview, Review } from "../protocol";
@@ -99,7 +99,10 @@ export function Walkthrough(props: Props) {
   const runId = untrack(() => review().run_id);
   const memory = props.memory;
   const { readLayers, decided, navCollapsed, setNavCollapsed } = memory;
-  const overview = () => review().overview;
+  // Plain copies, not the store's proxies: the diff's annotations carry places and findings as their
+  // metadata, which Pierre reads outside any tracking scope.
+  const overview = createMemo(() => snapshot(review().overview));
+  const findings = createMemo(() => snapshot(review().findings.findings));
   const patchFiles = createMemo(() => (review().patch ? parsePatchFiles(review().patch).flatMap((parsed) => parsed.files) : []));
   const places = createMemo((): PlaceEntry[] => overview().places.map((place, index) => ({ place, number: index + 1 })));
 
@@ -280,7 +283,7 @@ export function Walkthrough(props: Props) {
     const side = () => (fileProps.file.file?.type === "deleted" ? "deletions" : "additions");
     const marks = createMemo((): DiffMark[] => fileProps.file.places.map((entry) => ({ id: entry.place.id, label: String(entry.number), start: entry.place.start_line, end: entry.place.end_line })));
     const placeNotes = createMemo(() => new Map(fileProps.file.places.map((entry): [string, DiffLineAnnotation<Note>] => [entry.place.id, { side: side(), lineNumber: entry.place.end_line, metadata: { kind: "place", entry } }])));
-    const draftNotes = createMemo(() => review().findings.findings
+    const draftNotes = createMemo(() => findings()
       // Only in the layer whose lines hold it, not in another's context lines, so each shows once.
       .filter((finding) => finding.path === fileProps.file.path && fileProps.file.ranges.some((range) => finding.line >= range.start && finding.line <= range.end))
       .map((finding): DiffLineAnnotation<Note> => {

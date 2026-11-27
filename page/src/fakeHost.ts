@@ -58,7 +58,13 @@ function firstDrafts(result: FindingsResult): Drafts {
 }
 
 export function createFakeHost(send: (message: HostMessage) => void, options: FakeHostOptions = {}) {
-  const records = new Map(fixtures.reviewRecords().map((record) => [record.run_id, record]));
+  // A test's findings stand for the run's own, which drafts and submits read too.
+  const records = new Map(
+    fixtures.reviewRecords().map((record) => {
+      const findings = options.shown?.[record.run_id]?.findings;
+      return [record.run_id, findings ? { ...record, findings } : record];
+    }),
+  );
   const drafts = new Map<string, Drafts>();
   const submitted = new Map<string, string>();
   const skipped = new Set<string>();
