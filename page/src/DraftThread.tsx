@@ -134,7 +134,7 @@ export function DraftThread(props: { store: PageStore; findingId: string }) {
                   onInput={(e) => setQuestion(e.currentTarget.value)}
                 />
                 <div class="w-thread-actions">
-                  <Button variant="primary" disabled={busy() || !question().trim()} onClick={ask}>
+                  <Button variant="primary" disabled={busy() || store.held() || !question().trim()} onClick={ask}>
                     {busy() ? "Asking…" : "Ask"}
                   </Button>
                   <Button disabled={busy()} onClick={() => setAsking(false)}>

@@ -15,25 +15,22 @@ export function versionLabel(review: StatusReview, number: number): string {
  * can be submitted), Skip with Undo, which also stops a review that runs, Remove, Rerun review (Retry
  * review after a failure), and banners for a removed review, an earlier version, and new commits since
  * the review. Each button runs the manifest's action for the run, and a refusal shows under the bar.
+ * The store disables the buttons while one runs and briefly after (PageStore.held).
  * It reads the review as whooper-status lists it, so it shows nothing until the status arrives or for
  * a review older than the 30 days whooper-status lists.
  */
 export function ReviewHeader(props: { store: PageStore }) {
   const store = props.store;
-  const [busy, setBusy] = createSignal(false);
   const [queued, setQueued] = createSignal<string | null>(null);
   const [error, setError] = createSignal<string | null>(null);
 
   async function run(task: () => Promise<string>, done?: (printed: string) => void) {
-    setBusy(true);
     setError(null);
     try {
       const printed = await task();
       done?.(printed);
     } catch (e) {
       setError((e as Error).message);
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -79,20 +76,20 @@ export function ReviewHeader(props: { store: PageStore }) {
                 <span class="w-hint">Reviewing… started {shortDate(review().started_at)}</span>
               </Show>
               <Show when={canSkip()}>
-                <Show when={review().skipped_by_user} fallback={<Button disabled={busy()} onClick={() => run(() => store.skip())}>Skip</Button>}>
+                <Show when={review().skipped_by_user} fallback={<Button disabled={store.held()} onClick={() => run(() => store.skip())}>Skip</Button>}>
                   <span class="w-hint">Skipped</span>
-                  <Button disabled={busy()} onClick={() => run(() => store.skip(true))}>
+                  <Button disabled={store.held()} onClick={() => run(() => store.skip(true))}>
                     Undo
                   </Button>
                 </Show>
               </Show>
               <Show when={canRemove()}>
-                <Button disabled={busy()} onClick={() => run(() => store.remove())}>
+                <Button disabled={store.held()} onClick={() => run(() => store.remove())}>
                   Remove
                 </Button>
               </Show>
               <Show when={canRerun()}>
-                <Button variant={problem() || newCommits() ? "primary" : "plain"} disabled={busy()} onClick={rerun}>
+                <Button variant={problem() || newCommits() ? "primary" : "plain"} disabled={store.held()} onClick={rerun}>
                   {problem() ? "Retry review" : "Rerun review"}
                 </Button>
               </Show>
@@ -102,7 +99,7 @@ export function ReviewHeader(props: { store: PageStore }) {
                 <span>
                   <strong>Removed from your lists</strong> · its files stay on disk.
                 </span>
-                <Button disabled={busy()} onClick={() => run(() => store.remove(true))}>
+                <Button disabled={store.held()} onClick={() => run(() => store.remove(true))}>
                   Restore
                 </Button>
               </div>
@@ -127,7 +124,7 @@ export function ReviewHeader(props: { store: PageStore }) {
               {(text) => (
                 <div class="w-banner" role="status">
                   <span>{text()}</span>
-                  <Button disabled={busy()} onClick={() => run(() => store.round(), () => setQueued(null))}>
+                  <Button disabled={store.held()} onClick={() => run(() => store.round(), () => setQueued(null))}>
                     Poll now
                   </Button>
                 </div>

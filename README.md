@@ -447,11 +447,14 @@ refuses the submit because the run is not safe to approve (exit 11) or the revie
 `--approve-anyway` or `--allow-mentions`, and Prompting Time confirms that submit too. The page
 tells the refusals apart by the exit code Prompting Time passes back, and shows whooper-submit's
 stderr as the reason. Only such a press sends a mention: whooper-post, which Whooper runs on its
-own, still holds back each comment that @-mentions someone. A review that runs, waits, or failed
-shows why instead, with whooper-review's reason, the answers to earlier questions, and Ask why, and
-a cause that stops every review lists the reviews it holds back, with Poll now. It is a Solid 2.0
-app built on Prompting Time's shared UI library, `@prompting-time/ui`. Prompting Time shows it in an
-iframe sandboxed to scripts only, so the page reaches nothing but its host, through page protocol 2
+own, still holds back each comment that @-mentions someone. After you press an action button (Skip,
+Remove, Rerun review, Poll now, Submit review, the two refusal buttons, or Ask), the page disables
+the action buttons until 600 ms after the action's reply, and 600 ms more when Prompting Time opens
+another item in that time, so a second click can't act on the item Prompting Time moved on to. A
+review that runs, waits, or failed shows why instead, with whooper-review's reason, the answers to
+earlier questions, and Ask why, and a cause that stops every review lists the reviews it holds back,
+with Poll now. It is a Solid 2.0 app built on Prompting Time's shared UI library,
+`@prompting-time/ui`. Prompting Time shows it in an iframe sandboxed to scripts only, so the page reaches nothing but its host, through page protocol 2
 in `page/src/protocol.ts`: it says `ready`, Prompting Time sends `open` with the route the user
 opened, `/`, or the route of an item or blocker, `/reviews/<run-id>` or `/causes/<cause-id>` ([See
 reviews](#see-reviews)), and the page reads and changes everything with `call`s of the manifest's

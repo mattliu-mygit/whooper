@@ -260,14 +260,14 @@ function SubmitBar(props: { store: PageStore }) {
           if (text !== drafts().message) void run(() => store.changeDraft({ op: "message", text }));
         }}
       />
-      <Button variant="primary" disabled={busy() || locked() || nothing()} onClick={() => submit()}>
+      <Button variant="primary" disabled={busy() || store.held() || locked() || nothing()} onClick={() => submit()}>
         {busy() ? "Submitting…" : "Submit review"}
       </Button>
       <Show when={override()}>
         {(next) => (
           <>
             <p class="w-hint w-submit-line w-refusal">{next().why}</p>
-            <Button disabled={busy()} onClick={() => submit(next().flag)}>
+            <Button disabled={busy() || store.held()} onClick={() => submit(next().flag)}>
               {next().label}
             </Button>
           </>

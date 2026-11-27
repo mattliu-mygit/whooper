@@ -16,6 +16,18 @@ const SLOW = { timeout: 15_000 };
 
 const OPEN = { openOnReady: `/reviews/${RUN}` };
 
+// After an action, the page holds the action buttons disabled for HOLD_MS, so a test waits for the
+// next button it presses to be enabled.
+const enabled = (find: () => HTMLElement) =>
+  waitFor(
+    () => {
+      const button = find();
+      expect(button).toBeEnabled();
+      return button;
+    },
+    { timeout: 2_000 },
+  );
+
 const thread = (place: string) => screen.findByRole("region", { name: `Draft comment on ${place}` }, SLOW);
 // The changes the page asked whooper-draft for; a call with the run ID alone only reads the drafts.
 const changes = (host: ReturnType<typeof renderWithFakeHost>) => host.calls("draft").filter((args) => args.length > 1);
@@ -100,7 +112,7 @@ describe("Whooper's page with the fake host", () => {
     fireEvent.click(within(bar).getByRole("button", { name: "Submit review" }));
     expect(await within(bar).findByRole("alert")).toHaveTextContent("Nothing ran: the confirmation was cancelled.");
 
-    fireEvent.click(await within(bar).findByRole("button", { name: "Submit review" }));
+    fireEvent.click(await enabled(() => within(bar).getByRole("button", { name: "Submit review" })));
     expect(await within(bar).findByText(/posted the review: https:\/\/github.com\/example-org\/widgets\/pull\/101/)).toBeInTheDocument();
     // The page passes the run ID alone; Prompting Time adds --print and --expect for its confirmation.
     expect(host.calls("submit")).toEqual([[RUN], [RUN]]);
@@ -132,7 +144,7 @@ describe("Whooper's page with the fake host", () => {
     expect(await within(bar).findByText(/the review @-mentions someone, and posting would notify them/)).toBeInTheDocument();
     expect(within(bar).queryByRole("alert")).not.toBeInTheDocument();
     expect(within(bar).queryByRole("button", { name: "Approve anyway" })).not.toBeInTheDocument();
-    fireEvent.click(within(bar).getByRole("button", { name: "Send with the mentions" }));
+    fireEvent.click(await enabled(() => within(bar).getByRole("button", { name: "Send with the mentions" })));
     expect(await within(bar).findByText(/posted the review/)).toBeInTheDocument();
     expect(host.refusals).toEqual([12]);
     expect(host.calls("submit")).toEqual([[RUN], [RUN, "--allow-mentions"]]);
@@ -154,8 +166,8 @@ describe("Whooper's page with the fake host", () => {
 
     fireEvent.click(within(bar).getByRole("button", { name: "Submit review" }));
     expect(await within(bar).findByText(/the run is not safe to approve/)).toBeInTheDocument();
-    fireEvent.click(within(bar).getByRole("button", { name: "Approve anyway" }));
-    fireEvent.click(await within(bar).findByRole("button", { name: "Send with the mentions" }));
+    fireEvent.click(await enabled(() => within(bar).getByRole("button", { name: "Approve anyway" })));
+    fireEvent.click(await enabled(() => within(bar).getByRole("button", { name: "Send with the mentions" })));
     expect(await within(bar).findByText(/posted the review/)).toBeInTheDocument();
     expect(host.refusals).toEqual([11, 12]);
     expect(host.calls("submit")).toEqual([[newest], [newest, "--approve-anyway"], [newest, "--approve-anyway", "--allow-mentions"]]);
@@ -203,19 +215,36 @@ describe("Whooper's page with the fake host", () => {
     await thread("config_test.go:18");
     fireEvent.click(await screen.findByRole("button", { name: "Skip" }));
     expect(await screen.findByText("Skipped")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    fireEvent.click(await enabled(() => screen.getByRole("button", { name: "Undo" })));
     expect(await screen.findByRole("button", { name: "Skip" })).toBeInTheDocument();
     expect(host.calls("skip")).toEqual([[RUN], [RUN, "--undo"]]);
 
-    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    fireEvent.click(await enabled(() => screen.getByRole("button", { name: "Remove" })));
     const banner = await screen.findByRole("note");
     expect(banner).toHaveTextContent("Removed from your lists");
     // A removed review can't be skipped or removed again, only restored.
     expect(screen.queryByRole("button", { name: "Skip" })).not.toBeInTheDocument();
-    fireEvent.click(within(banner).getByRole("button", { name: "Restore" }));
+    fireEvent.click(await enabled(() => within(banner).getByRole("button", { name: "Restore" })));
     await waitFor(() => expect(screen.queryByRole("note")).not.toBeInTheDocument());
     expect(host.calls("remove")).toEqual([[RUN], [RUN, "--undo"]]);
   }, 30_000);
+
+  it("holds the action buttons after an action, also on the review Prompting Time opens next", async () => {
+    const host = renderWithFakeHost(OPEN);
+    await thread("config_test.go:18");
+    fireEvent.click(await screen.findByRole("button", { name: "Skip" }));
+    expect(await screen.findByText("Skipped")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Undo" })).toBeDisabled();
+    expect(within(screen.getByRole("region", { name: "Submit review" })).getByRole("button", { name: "Submit review" })).toBeDisabled();
+    // Prompting Time opens the next review under Needs you, since the skip moved this one to Done, and
+    // a second click meant for Skip must not retry it.
+    host.open("/reviews/20310727T005510Z-109");
+    const retry = await screen.findByRole("button", { name: "Retry review" });
+    expect(retry).toBeDisabled();
+    fireEvent.click(retry);
+    await enabled(() => screen.getByRole("button", { name: "Retry review" }));
+    expect(host.calls("retry")).toEqual([]);
+  });
 
   it("skips a review that still runs, which stops it", async () => {
     const running = "20310727T014000Z-120";
@@ -276,10 +305,10 @@ describe("Whooper's page with the fake host", () => {
     expect(await screen.findByText(/about: Did it run out of time\?/)).toBeInTheDocument();
     expect(host.calls("ask")).toEqual([[failed, "Did it run out of time?"]]);
 
-    fireEvent.click(screen.getByRole("button", { name: "Retry review" }));
+    fireEvent.click(await enabled(() => screen.getByRole("button", { name: "Retry review" })));
     const queued = await screen.findByRole("status");
     expect(queued).toHaveTextContent("queued another review of sample-org/gadgets#109");
-    fireEvent.click(within(queued).getByRole("button", { name: "Poll now" }));
+    fireEvent.click(await enabled(() => within(queued).getByRole("button", { name: "Poll now" })));
     await waitFor(() => expect(host.calls("round")).toEqual([[]]));
     expect(host.calls("retry")).toEqual([[failed]]);
   });

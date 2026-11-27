@@ -1,4 +1,4 @@
-import { createStore } from "solid-js";
+import { createSignal, createStore } from "solid-js";
 import {
   CallError,
   PROTOCOL_VERSION,
@@ -88,6 +88,10 @@ function reviewOf(shown: Shown): Review | null {
     examples: shown.examples,
   };
 }
+
+/** How long the action buttons stay disabled after an action's reply, or after an open that arrives
+ * in that time: long enough for Prompting Time to open the next item the action moved past. */
+export const HOLD_MS = 600;
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
@@ -184,10 +188,37 @@ export function createPageStore(link: HostLink) {
     });
   }
 
+  // While an action the user pressed runs, and for HOLD_MS after its reply, the page holds every
+  // action button disabled. Prompting Time may open the next item in that time, and an open in that
+  // time holds them HOLD_MS more, so a second click can't act on the item it opened. The plain
+  // variables decide; the signal only draws, since the store applies a write at its next flush.
+  const [held, setHeld] = createSignal(false);
+  let running = 0;
+  let release: ReturnType<typeof setTimeout> | undefined;
+  function holdFor(ms: number) {
+    clearTimeout(release);
+    release = setTimeout(() => {
+      release = undefined;
+      setHeld(false);
+    }, ms);
+  }
+  async function holding<T>(work: () => Promise<T>): Promise<T> {
+    running++;
+    clearTimeout(release);
+    release = undefined;
+    setHeld(true);
+    try {
+      return await work();
+    } finally {
+      if (--running === 0) holdFor(HOLD_MS);
+    }
+  }
+
   /** Shows route: a review starts clean, with nothing this session added, and reads its record. The
    * route already open, as when the user opens the same row again, only reads again, which keeps what
    * the user typed. */
   function open(next: string) {
+    if (release !== undefined) holdFor(HOLD_MS);
     if (next === route) {
       filesChanged(null);
       return;
@@ -258,7 +289,7 @@ export function createPageStore(link: HostLink) {
 
   /** Runs a row action on the open review and reads the status again; resolves with what it printed. */
   async function act(action: string, args: string[]): Promise<string> {
-    const printed = await call(action, args);
+    const printed = await holding(() => call(action, args));
     void readStatus();
     return typeof printed === "string" ? printed.trim() : JSON.stringify(printed);
   }
@@ -269,6 +300,8 @@ export function createPageStore(link: HostLink) {
     entry,
     versions,
     earlier,
+    /** Whether the action buttons are disabled: while an action runs, and for HOLD_MS after. */
+    held,
     /** Whether the open review takes no more changes: submitted, or superseded by a newer run. */
     locked: () => state.submitted !== null || state.shown?.submitted != null || earlier(),
     ready: () => link.post({ version: PROTOCOL_VERSION, type: "ready" }),
@@ -287,7 +320,7 @@ export function createPageStore(link: HostLink) {
      * flags such as --approve-anyway that the user chose after a refusal. */
     submit: async (flags: string[] = []) => {
       const id = runId();
-      const printed = String(await call("submit", [id, ...flags])).trim();
+      const printed = String(await holding(() => call("submit", [id, ...flags]))).trim();
       setState((s) => {
         if (openRun() === id) s.submitted = printed;
       });
@@ -295,7 +328,7 @@ export function createPageStore(link: HostLink) {
     },
     ask: async (question: string, finding: string | null) => {
       const id = runId();
-      const answer = String(await call("ask", [id, question, ...(finding ? ["--finding", finding] : [])])).trim();
+      const answer = String(await holding(() => call("ask", [id, question, ...(finding ? ["--finding", finding] : [])]))).trim();
       setState((s) => {
         if (openRun() === id) (s.answers[finding ?? ""] ??= []).push({ question, answer });
       });
@@ -318,6 +351,9 @@ export function createPageStore(link: HostLink) {
       setState((s) => {
         s.discarded[finding] = false;
       }),
-    dispose: stop,
+    dispose: () => {
+      stop();
+      clearTimeout(release);
+    },
   };
 }
