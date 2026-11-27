@@ -33,13 +33,23 @@ export function parentLink(): HostLink {
   };
 }
 
-/** What a route shows: Whooper's home, one review, or one cause that stops every review. */
-export type Place = { kind: "home" } | { kind: "review"; runId: string } | { kind: "cause"; cause: string } | null;
+/** What a route shows: the list of reviews, the past reviews, the causes that stop every review, one
+ * review, or one cause. */
+export type Place =
+  | { kind: "home" }
+  | { kind: "past" }
+  | { kind: "causes" }
+  | { kind: "review"; runId: string }
+  | { kind: "cause"; cause: string }
+  | null;
 
-/** The place a route names: / for the home Prompting Time opens from Whooper's name, and the routes of
- * whooper-status's items and blockers; null for any other route. */
+/** The place a route names: / for the reviews, which Prompting Time opens from Whooper's name, /past and
+ * /causes for the page's other tabs, and the routes of whooper-status's items and blockers; null for any
+ * other route. */
 export function placeOf(route: string | null): Place {
   if (route === "/") return { kind: "home" };
+  if (route === "/past") return { kind: "past" };
+  if (route === "/causes") return { kind: "causes" };
   const match = route ? /^\/(reviews|causes)\/([^/]+)$/.exec(route) : null;
   if (!match) return null;
   const id = decodeURIComponent(match[2]);
@@ -306,11 +316,27 @@ export function createPageStore(link: HostLink) {
     return all.length > 0 && all[all.length - 1].run_id !== shownRun();
   };
 
-  /** Runs a row action on the open review and reads the status again; resolves with what it printed. */
+  const printedText = (printed: unknown) => (typeof printed === "string" ? printed.trim() : JSON.stringify(printed));
+
+  /** Runs an action, holding the action buttons, and reads the status again; resolves with what it printed. */
   async function act(action: string, args: string[]): Promise<string> {
     const printed = await holding(() => call(action, args));
     void readStatus();
-    return typeof printed === "string" ? printed.trim() : JSON.stringify(printed);
+    return printedText(printed);
+  }
+
+  // A round can take minutes, since it reviews what it finds, and opens nothing in Prompting Time, so
+  // it holds no button but the Poll now buttons, which say so.
+  const [rounds, setRounds] = createSignal(0);
+  async function round(): Promise<string> {
+    setRounds((n) => n + 1);
+    try {
+      const printed = await call("round");
+      void readStatus();
+      return printedText(printed);
+    } finally {
+      setRounds((n) => n - 1);
+    }
   }
 
   return {
@@ -319,7 +345,7 @@ export function createPageStore(link: HostLink) {
     entry,
     versions,
     earlier,
-    /** Whether the action buttons are disabled: while an action other than Ask runs, and for HOLD_MS
+    /** Whether the action buttons are disabled: while an action other than Ask or a round runs, and for HOLD_MS
      * after any action's reply. */
     held,
     /** Whether an Ask runs, which disables only the Ask buttons. */
@@ -356,11 +382,16 @@ export function createPageStore(link: HostLink) {
       });
       return answer;
     },
-    skip: (undo = false) => act("skip", [runId(), ...(undo ? ["--undo"] : [])]),
-    remove: (undo = false) => act("remove", [runId(), ...(undo ? ["--undo"] : [])]),
-    retry: () => act("retry", [runId()]),
+    /** Skip, Remove, and Retry act on the open review, or on run `id`, as a list row's menu does. */
+    skip: (undo = false, id = runId()) => act("skip", [id, ...(undo ? ["--undo"] : [])]),
+    remove: (undo = false, id = runId()) => act("remove", [id, ...(undo ? ["--undo"] : [])]),
+    retry: (id = runId()) => act("retry", [id]),
+    pause: () => act("pause", []),
+    resume: () => act("resume", []),
     /** Runs a round now, which reviews the PRs on the recheck list, such as those that wait. */
-    round: () => act("round", []),
+    round,
+    /** Whether a round runs: one the page asked for, or one whooper-status says runs. */
+    polling: () => rounds() > 0 || state.status?.round.running === true,
     /** Leaves the finding out of the review and folds its comment to one line. */
     discard: async (finding: string) => {
       const id = runId();

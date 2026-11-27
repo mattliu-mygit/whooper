@@ -31,7 +31,7 @@
 //                              lists. The page reads again with call.
 //
 // The actions the page calls, each with the arguments it adds:
-//   status                     bin/whooper-status --json: the reviews, for the home and the open
+//   status                     bin/whooper-status --json: the reviews, for the tabs and the open
 //                              review's header
 //   show-review <run-id>       bin/whooper-show --json <run-id>: the review the page shows
 //   draft <run-id> [<op> [<finding>] [<text>]]
@@ -43,6 +43,7 @@
 //   skip <run-id> [--undo], remove <run-id> [--undo], retry <run-id>
 //                              bin/whooper-skip, bin/whooper-remove, bin/whooper-retry
 //   round                      bin/whooper-round: reviews the waiting PRs again now
+//   pause, resume              bin/whooper-pause, bin/whooper-resume
 
 export const PROTOCOL_VERSION = 2;
 

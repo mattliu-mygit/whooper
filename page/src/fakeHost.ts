@@ -5,8 +5,8 @@ import { CallError, PROTOCOL_VERSION, readPageMessage, type Drafts, type Finding
 // page's calls of the manifest's actions on the invented reviews in fixtures.ts the way Whooper's
 // commands would: drafts change by whooper-draft's rules and refusals, a submit builds
 // whooper-submit's request and asks confirmSubmit first, or is refused as whooper-submit refuses an
-// unsafe approval or an @-mention, an ask answers at once, and skip, remove,
-// and retry change what status and show-review print, after which it says which files changed. It
+// unsafe approval or an @-mention, an ask answers at once, and skip, remove, retry, pause, and
+// resume change what status and show-review print, after which it says which files changed. It
 // refuses an action the manifest does not declare, as Prompting Time does. It reaches no Whooper,
 // GitHub, or model.
 
@@ -69,6 +69,7 @@ export function createFakeHost(send: (message: HostMessage) => void, options: Fa
   const submitted = new Map<string, string>();
   const skipped = new Set<string>();
   const removed = new Set<string>();
+  let paused = false;
   /** The exit code of each submit whooper-submit --print refused, in order. */
   const refusals: number[] = [];
   /** Every message the page sent that fits the protocol, in order. */
@@ -102,9 +103,18 @@ export function createFakeHost(send: (message: HostMessage) => void, options: Fa
       if (submitted.has(review.run_id)) review.submitted = { event: draftsOf(review.run_id).event, at: "2031-07-27T15:40:00-07:00" };
       if (review.skipped_by_user || review.removed_by_user || review.submitted) review.needs_you = false;
     }
-    // In status format 2, a removed review leaves the items, and a skipped or submitted one is done.
+    // In status format 2, a removed review leaves the items, and a skipped or submitted one is done,
+    // with no dot, and can't be skipped again.
     base.items = base.items.filter((item) => !removed.has(item.id));
-    for (const item of base.items) if (skipped.has(item.id) || submitted.has(item.id)) item.group = "done";
+    for (const item of base.items)
+      if (skipped.has(item.id) || submitted.has(item.id)) {
+        item.group = "done";
+        item.dot = "idle";
+        item.actions = item.actions?.filter((action) => action !== "skip");
+      }
+    // As status_v2 in lib/whooper.py words it, a cause that stops every review outranks a pause.
+    base.paused = paused;
+    if (paused && !base.blocked) base.agent = { words: "Paused", dot: "idle" };
     return base;
   }
 
@@ -264,6 +274,11 @@ export function createFakeHost(send: (message: HostMessage) => void, options: Fa
       }
       case "round":
         changed(null);
+        return "";
+      case "pause":
+      case "resume":
+        paused = action === "pause";
+        changed(["paused"]);
         return "";
       default:
         throw new Error(`the fake host does not run ${action}`);
