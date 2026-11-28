@@ -17,7 +17,7 @@ through `lib/python`, which has uv supply Python 3.11 or later and the packages 
 names, at the versions `lib/whooper.py.lock` pins; the first run downloads what is missing.
 [gopls](https://go.dev/gopls/) is optional: with it, a review links changed Go code to its callers with
 Go's own tools rather than by name search ([How a review run works](#how-a-review-run-works)). So is
-[gremlins](https://github.com/go-gremlins/gremlins) is optional too (`go install
+[gremlins](https://github.com/go-gremlins/gremlins) (`go install
 github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0`): with it, a review checks whether the tests notice a
 small change to the changed Go lines they run. So is
 the `go` command, with which a review measures which changed Go lines no test ran and runs the example
