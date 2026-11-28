@@ -538,15 +538,12 @@ The fake host runs the page's calls on invented reviews and settings in `page/sr
 way Whooper's commands would, keeping saved settings in memory, and reaches no Whooper, GitHub, or
 model; `/dev/` opens the Reviews tab, `/dev/?review=<run id>` a review, and `/dev/?route=<route>`
 any route, such as `/past`, `/settings`, or `/causes/docker_unavailable`.
-The page installs `@prompting-time/ui` from its built tarball, `prompting-time-ui-0.1.0.tgz`, which
-Prompting Time's `scripts/pack-ui.sh` writes. Until Prompting Time attaches that tarball to a GitHub
-release, the page installs it from a Prompting Time checkout beside this one,
-`../../repos/prompting-time-followups/packages/ui/prompting-time-ui-0.1.0.tgz` from `page/`; it then
-switches to the release's URL. Either way `package-lock.json` pins the tarball's sha512, so `npm ci`
-refuses a different build. The tarball bundles everything but Solid, which the page supplies; the
-page also installs `@pierre/diffs`, at the tarball's version, only for the types of `Diff`'s props.
-Versions are exact and resolved as of `.npmrc`'s `before` date, at least a week before they were
-pinned, and no install script runs.
+The page installs `@prompting-time/ui` 0.1.0 from npm, and `package-lock.json` pins its sha512, so
+`npm ci` refuses a different build. The package bundles everything but Solid, which the page
+supplies; the page also installs `@pierre/diffs`, at the package's version, only for the types of
+`Diff`'s props. Versions are exact and resolved as of `.npmrc`'s `before` date, and no install
+script runs. The date normally sits at least a week before a version is pinned; it was moved to
+just after `@prompting-time/ui` 0.1.0 was published on 2026-11-28, so that one package is newer.
 
 ### Releases
 
