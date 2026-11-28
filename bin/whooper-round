@@ -92,8 +92,10 @@ take() {
 } 9< "$WHOOPER_STATE/locks" || exit 1
 
 echo "=== $(date '+%F %T') poll"
-# step names the poll step that runs, for the history's reason when it fails.
-if ! { step="The GitHub fetch" && "$root/bin/whooper-fetch" && step="The Slack poll" && "$root/bin/whooper-poll" &&
+# step names the poll step that runs, for the history's reason when it fails. The first refuses a Claude
+# Code older than 2.1.295 while a job runs on claude (lib/whooper.py's check_claude).
+if ! { step="The Claude Code version check" && "$root/lib/python" "$root/lib/whooper.py" claude-version &&
+  step="The GitHub fetch" && "$root/bin/whooper-fetch" && step="The Slack poll" && "$root/bin/whooper-poll" &&
   step="Selecting the work" && save "$items/selected.jsonl" "$root/bin/whooper-select"; }; then
   echo "a poll step failed; trying again next round"
   result=poll_failed reason="$step failed"

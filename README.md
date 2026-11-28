@@ -11,8 +11,8 @@ GitHub on its own: `bin/whooper-submit` posts one review built from the findings
 
 Whooper needs `gh` logged in, [slackdump](https://github.com/rusq/slackdump) logged in to the
 Slack workspace (`slackdump workspace new <name>`, through a browser), the CLI of each agent the
-config's `[jobs]` names logged in (`devin auth login`; `claude`, whose summary uses the claude.ai
-Slack connector), `jq`, `git`, `docker`, and [uv](https://docs.astral.sh/uv/). The scripts run Python
+config's `[jobs]` names logged in (`devin auth login`; `claude`, Claude Code 2.1.295 or later,
+whose summary uses the claude.ai Slack connector), `jq`, `git`, `docker`, and [uv](https://docs.astral.sh/uv/). The scripts run Python
 through `lib/python`, which has uv supply Python 3.11 or later and the packages `lib/whooper.py`
 names, at the versions `lib/whooper.py.lock` pins; the first run downloads what is missing.
 [gopls](https://go.dev/gopls/) is optional: with it, a review links changed Go code to its callers with
@@ -797,7 +797,10 @@ writes only there, with your Devin config minus its allow rules and plus deny ru
 and every Slack tool. The summary run
 may call only `slack_schedule_message`, and `hooks/slack-guard.sh` blocks any other Slack call,
 any other channel, a thread, a changed text or time, and a second summary; from version 2.1.295,
-Claude Code also blocks the call when the hook cannot start, crashes, or times out. Only
+Claude Code also blocks the call when the hook cannot start, crashes, or times out. So while a job
+runs on claude, whooper-round, whooper-poll, whooper-review, whooper-summary, and whooper-ask refuse
+to start when `claude --version` names an older Claude Code, or none, and say so; a round records
+that as a failed poll, `The Claude Code version check failed`. Only
 whooper-submit writes to GitHub, with the user's own login: the one review the user chose in a run's
 `drafts.json`, and an approval of a run that is not safe to approve only after the user looked and
 passed `--approve-anyway`.

@@ -55,6 +55,8 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 eval "$("$root/lib/python" "$root/lib/whooper.py" env)"
+# With a job on claude, refuse a Claude Code older than 2.1.295 (lib/whooper.py's check_claude).
+"$root/lib/python" "$root/lib/whooper.py" claude-version || exit 1
 data="$WHOOPER_STATE"
 usage="usage: whooper-review <work-item.json> --dry-run [--as-of <time>]"
 # git takes an external diff tool from GIT_EXTERNAL_DIFF, and how many unchanged lines go around each

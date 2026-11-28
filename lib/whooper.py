@@ -16,6 +16,8 @@ from the user's config file (config_path), never from this code. The bin/ script
                     | ask <agent> <run dir> <question> [<finding-id>]              -> an ask run's prompt, with the
                                                                                       record files it may read
   whooper.py check <schema.json> <value.json>                                      -> fails unless value fits schema
+  whooper.py claude-version                                                        -> fails unless Claude Code is new
+                                                                                      enough, when a job runs on claude
   whooper.py posts <slackdump channel.json> <oldest>                               -> the channel's posts JSON
   whooper.py asks <posts.json> <answer.json> <oldest>                              -> asks JSON
   whooper.py items <github.json> <asks.json> <slack-prs.json>                      -> {"items": [...]}
@@ -2767,13 +2769,46 @@ def check_jobs(config):
     """Fails unless the config's [jobs] names an agent for each of JOBS, and each job in it names an agent
     with a launcher for it, agents/<agent>/<job>."""
     if missing := [job for job in JOBS if job not in config.get("jobs", {})]:
-        *rest, last = missing
-        named = f"{', '.join(rest)}{',' if len(rest) > 1 else ''} or {last}" if rest else last
-        raise SystemExit(f"whooper: [jobs] names no agent for {named}; each of review, poll, and summary names the"
-                         f" agent it runs on; see {config_path()}")
+        raise SystemExit(f"whooper: [jobs] names no agent for {joined(missing, 'or')}; each of review, poll, and"
+                         f" summary names the agent it runs on; see {config_path()}")
     for job, agent in config["jobs"].items():
         if not (ROOT / "agents" / agent / job).exists():
             raise SystemExit(f"whooper: [jobs] {job} names {agent!r}, which has no agents/{agent}/{job}")
+
+
+def joined(words, conjunction):
+    """words for a sentence, joined with commas and conjunction, such as "summary", "poll or summary", or
+    "review, poll, and summary"."""
+    *rest, last = words
+    return f"{', '.join(rest)}{',' if len(rest) > 1 else ''} {conjunction} {last}" if rest else last
+
+
+# The oldest Claude Code Whooper runs a job on: from 2.1.295, Claude Code blocks a call when a hook whose
+# onFailure is "block" cannot start, crashes, or times out, which the summary's Slack guard needs
+# (agents/claude/summary).
+CLAUDE_CODE_LEAST = (2, 1, 295)
+
+
+def check_claude(config):
+    """Fails unless `claude --version` names Claude Code CLAUDE_CODE_LEAST or later, when a job in the config's
+    [jobs] runs on claude, and leaves claude alone otherwise. The commands that run agents call it as they
+    start, through whooper.py claude-version."""
+    jobs = [job for job, agent in config["jobs"].items() if agent == "claude"]
+    if not jobs:
+        return
+    try:
+        said = subprocess.run(["claude", "--version"], capture_output=True, text=True).stdout.strip()
+    except FileNotFoundError:
+        said = None
+    version = re.match(r"([0-9]+)\.([0-9]+)\.([0-9]+)", said or "")
+    if version and tuple(map(int, version.groups())) >= CLAUDE_CODE_LEAST:
+        return
+    found = ("no claude command is on PATH" if said is None
+             else f"`claude --version` says {said}" if said else "`claude --version` printed nothing")
+    raise SystemExit(f"whooper: [jobs] {joined(jobs, 'and')} run{'s' if len(jobs) == 1 else ''} on claude, which needs"
+                     f" Claude Code {'.'.join(map(str, CLAUDE_CODE_LEAST))} or later, the first that blocks a Slack call"
+                     f" when its guard hook fails, but {found}; {'install' if said is None else 'update'} Claude Code,"
+                     f" or move {'that job' if len(jobs) == 1 else 'those jobs'} to devin")
 
 
 # The settings a settings form may edit, as a JSON Schema.
@@ -4047,6 +4082,8 @@ def main(command, *args):
             values["skill_tool"] = REVIEW_WORDING[agent]["skill_tool"]
             facts = ask_facts(Path(run), question, *finding)
         print(fill((ROOT / "prompts" / f"{name}.md").read_text(), values) + facts, end="")
+    elif command == "claude-version":
+        check_claude(load_config())
     elif command == "check":
         schema, path = args
         try:

@@ -93,6 +93,15 @@ def setUpModule():
     os.environ["GOCACHE"] = str(folder / "go-build")
 
 
+# The first line of each fake claude that a command which runs agents may call: it answers --version as Claude
+# Code 2.1.314 does, which the command asks as it starts (lib/whooper.py's check_claude).
+CLAUDE_VERSION = 'if [ "$1" = --version ]; then echo "2.1.314 (Claude Code)"; exit; fi'
+# What those commands print when a job runs on claude and claude --version names a version before 2.1.295.
+CLAUDE_TOO_OLD = ("whooper: [jobs] review, poll, and summary run on claude, which needs Claude Code 2.1.295 or later,"
+                  " the first that blocks a Slack call when its guard hook fails, but `claude --version` says {}; update"
+                  " Claude Code, or move those jobs to devin\n")
+
+
 # How the review bots appear as GraphQL review authors.
 BOTS = {"ci-review-bot", "assistant-bot"}
 
@@ -3945,8 +3954,9 @@ class RunTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         tmp = Path(self.tmp.name)
         self.fakes = tmp / "bin"
-        for name in ["gh", "slackdump", "claude", "devin"]:
+        for name in ["gh", "slackdump", "devin"]:
             self.script(self.fakes / name, "exit 1")
+        self.claude_script("exit 1")
         # Rounds may start at any time on any day, a minute apart. notify.sh notes each review's
         # notification in notifications.log.
         config = tmp / "config" / "config.toml"
@@ -3964,6 +3974,11 @@ class RunTest(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f"#!/bin/sh\n{body}\n")
         path.chmod(0o755)
+
+    def claude_script(self, body):
+        """Writes the fake claude, which answers --version as Claude Code 2.1.314 does and runs body, a few lines
+        of sh, for any other call."""
+        self.script(self.fakes / "claude", f"{CLAUDE_VERSION}\n{body}")
 
     def start(self, path, out=subprocess.DEVNULL):
         process = subprocess.Popen([str(path)], env=self.env, stdout=out, stderr=subprocess.STDOUT,
@@ -4097,8 +4112,8 @@ class RunTest(unittest.TestCase):
             """mkdir -p "$out" && echo '{"messages": []}' > "$out/$1.json\"""",
         ]))
         # The poll's answer is the result at the end of Claude's stream-json output.
-        self.script(self.fakes / "claude",
-                    """echo '{"type": "result", "subtype": "success", "structured_output": {"asks": [], "not_asks": []}}'""")
+        self.claude_script(
+            """echo '{"type": "result", "subtype": "success", "structured_output": {"asks": [], "not_asks": []}}'""")
 
     def git_env(self):
         """The environment for git and the review, with Sam as each commit's author. Its home has no
@@ -4191,7 +4206,7 @@ class RunTest(unittest.TestCase):
     def fake_claude(self, review):
         """Has claude run review, a line of sh, in a review run, which alone passes --json-schema, and
         answer an ask run with "It stopped."."""
-        self.script(self.fakes / "claude", "\n".join([
+        self.claude_script("\n".join([
             'case "$*" in',
             f"  *--json-schema*) {review} ;;",
             """  *) echo '{"type": "result", "subtype": "success", "result": "It stopped."}' ;;""",
@@ -4507,6 +4522,28 @@ class RunTest(unittest.TestCase):
                " most GitHub returns for one search, so it may have left some out\n"))
         self.assertEqual(sorted(read.read_text().splitlines()), sorted(urls[:1000]))
 
+    def test_with_a_job_on_claude_each_command_that_runs_agents_refuses_claude_code_before_2_1_295(self):
+        # claude --version answers as Claude Code 2.1.294 does, and the fake logs any other call.
+        log = self.fakes / "claude.log"
+        self.script(self.fakes / "claude", 'if [ "$1" = --version ]; then echo "2.1.294 (Claude Code)"; exit; fi\n'
+                                           'echo "$*" >> "${0%/*}/claude.log"\nexit 1')
+        message = CLAUDE_TOO_OLD.format("2.1.294 (Claude Code)")
+        run = self.state / "runs" / "20310727T010246Z-12"
+        run.mkdir(parents=True)
+        (run / "failure.txt").write_text("the review stopped at an unexpected error\n")
+        for command, args in [("whooper-poll", []), ("whooper-review", [str(run / "item.json"), "--dry-run"]),
+                              ("whooper-summary", [run.name]), ("whooper-ask", [run.name, "Why did it stop?"])]:
+            with self.subTest(command):
+                result = self.command(command, *args)
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (1, "", message))
+        # A round records the refusal as a failed poll, which Prompting Time and the page show.
+        round_ = self.command("whooper-round")
+        self.assertEqual((round_.returncode, round_.stderr), (1, message))
+        status = self.status()
+        self.assertEqual((status["last_round"]["result"], status["rounds"][0]["reason"]),
+                         ("poll_failed", "The Claude Code version check failed"))
+        self.assertFalse(log.exists())
+
     def test_a_round_reviews_each_selected_item_and_reports_how_it_ended(self):
         self.fake_one_review_request()
         # A lock left by a round that was killed, whose process ID now belongs to this test.
@@ -4611,7 +4648,7 @@ class RunTest(unittest.TestCase):
             "structured_output": {"status": "reviewed", "skip_reason": "", "findings": [],
                                   "approval": {"verdict": "approve_once_ci_passes", "reason": "Read the diff."}}}))
         (self.fakes / "overview.json").write_text(json.dumps(self.overview_of_the_pr()))
-        self.script(self.fakes / "claude", "\n".join([
+        self.claude_script("\n".join([
             f"git diff --no-ext-diff --no-textconv {merge_base} HEAD > '{run_diff}'",
             'cp "${0%/*}/overview.json" "$WHOOPER_RUN/"',
             'cat "${0%/*}/result.json"',
@@ -4742,7 +4779,7 @@ class RunTest(unittest.TestCase):
         self.write_git_config(env, self.diff_settings())
         tmp = Path(self.tmp.name)
         # The run reads the change with the git diff prompts/review.md names, and stops.
-        self.script(self.fakes / "claude", "\n".join([
+        self.claude_script("\n".join([
             "command=\"$(sed -n 's/.*Read the change with `\\([^`]*\\)`.*/\\1/p' \"$WHOOPER_RUN/prompt.md\")\"",
             f"eval \"$(echo \"$command\" | sed 's/<merge base>/{merge_base}/')\" > '{tmp / 'run.diff'}'",
             f"git config whooper.kept > '{tmp / 'kept.txt'}'"]))
@@ -4762,7 +4799,7 @@ class RunTest(unittest.TestCase):
         self.write_git_config(env, [{"diff.relative": "true"}])
         tmp = Path(self.tmp.name)
         # The run reads the change with git diff in docs/, as after a probe's cd there, and stops.
-        self.script(self.fakes / "claude", f"cd docs && git diff {merge_base} HEAD > '{tmp / 'run.diff'}'")
+        self.claude_script(f"cd docs && git diff {merge_base} HEAD > '{tmp / 'run.diff'}'")
         self.command("whooper-review", str(item), "--dry-run", env=env)
         self.assertEqual((tmp / "run.diff").read_text(), plain)
 
@@ -4775,7 +4812,7 @@ class RunTest(unittest.TestCase):
         self.script(tmp / "external", 'echo "external diff of $1"')
         variables = {"GIT_EXTERNAL_DIFF": str(tmp / "external"), "GIT_DIFF_OPTS": "--unified=10"}
         # The run reads the change with a plain git diff and stops.
-        self.script(self.fakes / "claude", f"git diff {merge_base} HEAD > '{tmp / 'run.diff'}'")
+        self.claude_script(f"git diff {merge_base} HEAD > '{tmp / 'run.diff'}'")
         self.command("whooper-review", str(item), "--dry-run", env={**env, **variables})
         [run] = (self.state / "runs").iterdir()
         self.assertEqual(((tmp / "run.diff").read_text(), (run / "diff.patch").read_text()), (plain, plain))
@@ -4856,7 +4893,7 @@ class RunTest(unittest.TestCase):
             (self.fakes / "overview.json").unlink(missing_ok=True)
             if overview is not None:
                 (self.fakes / "overview.json").write_bytes(overview)
-            self.script(self.fakes / "claude", "\n".join([
+            self.claude_script("\n".join([
                 'fakes="${0%/*}"',
                 f"""printf '%s' "$2" > '{tmp}/prompt.md'""",
                 "while [ $# -gt 0 ]; do",
@@ -4935,7 +4972,7 @@ class RunTest(unittest.TestCase):
             "structured_output": findings}))
         # A directory named overview.json, which the check cannot read and then cannot remove, makes the check
         # itself fail.
-        self.script(self.fakes / "claude", 'mkdir "$WHOOPER_RUN/overview.json"\ncat "${0%/*}/result.json"')
+        self.claude_script('mkdir "$WHOOPER_RUN/overview.json"\ncat "${0%/*}/result.json"')
         result = self.command("whooper-review", str(item), "--dry-run", env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
         shown = self.command("whooper-show", Path(result.stdout.strip()).name, "--json", env=env)
@@ -4958,7 +4995,7 @@ class RunTest(unittest.TestCase):
         # tool: Claude's run, which --add-dir lets write there, returns the findings as structured output, and
         # Devin's, in dangerous mode, writes findings.json there too, and its export where --export says. A
         # second call, devin rm, deletes the Devin run's session.
-        self.script(self.fakes / "claude", "\n".join([
+        self.claude_script("\n".join([
             'cp "${0%/*}/overview.json" "$WHOOPER_RUN/"',
             'cat "${0%/*}/result.json"',
         ]))
@@ -5071,7 +5108,7 @@ class RunTest(unittest.TestCase):
             "type": "result", "subtype": "success", "total_cost_usd": 0, "duration_ms": 0, "num_turns": 1,
             "structured_output": {"status": "reviewed", "skip_reason": "", "findings": [],
                                   "approval": {"verdict": "approve_once_ci_passes", "reason": "Read the diff."}}}))
-        self.script(self.fakes / "claude", 'cat "${0%/*}/result.json"')
+        self.claude_script('cat "${0%/*}/result.json"')
         (tmp / "gobin").mkdir()
         return without_gopls(env, tmp / "gobin"), item
 
@@ -5100,7 +5137,7 @@ class RunTest(unittest.TestCase):
         env, item = self.shop_pull_request(TS_SHOP, TS_SHOP_PR)
         # The review run installs in the head's checkout, where the repo's setup script would, a TypeScript that kills
         # its own process as node loads it.
-        self.script(self.fakes / "claude", "\n".join([
+        self.claude_script("\n".join([
             'ts="$WHOOPER_HEAD/shop/node_modules/typescript"', 'mkdir -p "$ts/lib"',
             """echo '{"name": "typescript", "version": "5.9.3"}' > "$ts/package.json\"""",
             """echo 'process.kill(process.pid, "SIGKILL");' > "$ts/lib/typescript.js\"""",
@@ -5118,7 +5155,7 @@ class RunTest(unittest.TestCase):
         env, item = self.shop_pull_request(TS_SHOP, TS_SHOP_PR)
         # The review run installs in the head's checkout, where the repo's setup script would, a TypeScript 7 whose language
         # server kills itself once it reads the step's first request.
-        self.script(self.fakes / "claude", "\n".join([
+        self.claude_script("\n".join([
             'modules="$WHOOPER_HEAD/shop/node_modules"', f'server="$modules/{whooper.TYPESCRIPT_SERVER_PACKAGE}/lib"',
             'mkdir -p "$modules/typescript" "$server"',
             """echo '{"name": "typescript", "version": "7.1.0-beta"}' > "$modules/typescript/package.json\"""",
@@ -5136,7 +5173,7 @@ class RunTest(unittest.TestCase):
     def test_a_review_goes_on_when_the_connections_step_fails(self):
         env, item = self.shop_pull_request()
         # A directory named connections.json, which the step cannot replace with its file, makes the step fail.
-        self.script(self.fakes / "claude", 'mkdir "$WHOOPER_RUN/connections.json"\ncat "${0%/*}/result.json"')
+        self.claude_script('mkdir "$WHOOPER_RUN/connections.json"\ncat "${0%/*}/result.json"')
         result = self.command("whooper-review", str(item), "--dry-run", env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("whooper-review: the connections step failed, so the review has no connections.json\n",
@@ -5175,7 +5212,7 @@ class RunTest(unittest.TestCase):
             "type": "result", "subtype": "success", "total_cost_usd": 0, "duration_ms": 0, "num_turns": 1,
             "structured_output": {"status": "reviewed", "skip_reason": "", "findings": [],
                                   "approval": {"verdict": "approve_once_ci_passes", "reason": "Read the diff."}}}))
-        self.script(self.fakes / "claude", f'{claude}\ncat "${{0%/*}}/result.json"')
+        self.claude_script(f'{claude}\ncat "${{0%/*}}/result.json"')
         (tmp / "gobin").mkdir(exist_ok=True)
         result = self.command("whooper-review", str(item), "--dry-run",
                               env={**without_gopls(git_env, tmp / "gobin"), **(env or {})})
@@ -5439,7 +5476,7 @@ class RunTest(unittest.TestCase):
         # The review run, which starts in the head worktree, notes its process ID and waits; the poll's
         # run finds no asks.
         poll = (self.fakes / "claude").read_text().split("\n", 1)[1]
-        self.script(self.fakes / "claude", f"case \"$PWD\" in */head) echo $$ > '{agent_pid}'; exec sleep 30 ;; esac\n{poll}")
+        self.claude_script(f"case \"$PWD\" in */head) echo $$ > '{agent_pid}'; exec sleep 30 ;; esac\n{poll}")
         round_ = subprocess.Popen([str(ROOT / "bin" / "whooper-round")], env={**self.env, **env}, stdout=subprocess.PIPE,
                                   stderr=subprocess.STDOUT, text=True, start_new_session=True)
         self.addCleanup(self.stop, round_)
@@ -6012,6 +6049,57 @@ class ConfigTest(unittest.TestCase):
                 self.assertEqual(bool(link.search(url)), matches)
 
 
+class ClaudeVersionTest(unittest.TestCase):
+    """whooper.py claude-version, which the commands that run agents run as they start, with a fake claude that
+    answers --version, alone on PATH."""
+
+    def check(self, version=None, config=None):
+        """Runs the check with claude --version answering version, or with no claude on PATH for None, on config's
+        text, or the test config; returns the message it stops with, or None."""
+        with tempfile.TemporaryDirectory() as tmp:
+            fakes = Path(tmp) / "bin"
+            fakes.mkdir()
+            if version is not None:
+                fake(fakes / "claude", f'[ "$1" = --version ] && echo "{version}"\necho "$*" >> "{tmp}/calls"')
+            path = Path(tmp) / "config.toml"
+            path.write_text(config or CONFIG)
+            with mock.patch.dict(os.environ, PATH=str(fakes), WHOOPER_CONFIG=str(path)):
+                try:
+                    main("claude-version")
+                except SystemExit as stop:
+                    return f"{stop}\n"
+                finally:
+                    self.calls = (Path(tmp) / "calls").read_text() if (Path(tmp) / "calls").exists() else ""
+        return None
+
+    def test_claude_code_2_1_295_and_later_runs(self):
+        for version in ["2.1.295 (Claude Code)", "2.1.314 (Claude Code)", "2.10.0 (Claude Code)", "3.0.0"]:
+            with self.subTest(version):
+                self.assertIsNone(self.check(version))
+                self.assertEqual(self.calls, "--version\n")
+
+    def test_an_older_or_unreadable_version_or_no_claude_refuses(self):
+        for version, said in [("2.1.294 (Claude Code)", "`claude --version` says 2.1.294 (Claude Code)"),
+                              ("1.9.999", "`claude --version` says 1.9.999"),
+                              ("Claude Code", "`claude --version` says Claude Code"),
+                              (None, "no claude command is on PATH")]:
+            with self.subTest(version):
+                fix = "install" if version is None else "update"
+                self.assertEqual(self.check(version), CLAUDE_TOO_OLD.split(" but ")[0] + f" but {said}; {fix} Claude"
+                                 " Code, or move those jobs to devin\n")
+
+    def test_the_message_names_only_the_jobs_on_claude(self):
+        config = CONFIG.replace('review = "claude"', 'review = "devin"').replace('poll = "claude"', 'poll = "devin"')
+        self.assertEqual(self.check("2.1.0", config),
+                         "whooper: [jobs] summary runs on claude, which needs Claude Code 2.1.295 or later, the first"
+                         " that blocks a Slack call when its guard hook fails, but `claude --version` says 2.1.0; update"
+                         " Claude Code, or move that job to devin\n")
+
+    def test_no_job_on_claude_leaves_claude_alone(self):
+        self.assertIsNone(self.check("2.1.0", CONFIG.replace('= "claude"', '= "devin"')))
+        self.assertEqual(self.calls, "")
+
+
 EXAMPLE = (ROOT / "examples" / "config.example.toml").read_text()
 
 
@@ -6070,6 +6158,7 @@ class AskTest(unittest.TestCase):
             fake(self.fakes / name, "exit 1")
         # The launcher passes the prompt right after -p.
         fake(self.fakes / "claude", "\n".join([
+            CLAUDE_VERSION,
             'fakes="${0%/*}"',
             'printf "%s" "$2" > "$fakes/prompt"',
             'printf "%s\\n" "$@" > "$fakes/args"',
@@ -6298,7 +6387,7 @@ class AskTest(unittest.TestCase):
         # so a process whose command line names the fake lasts the whole run.
         config = Path(self.tmp.name) / "config.toml"
         config.write_text(CONFIG + "\n[ask]\ntimeout_minutes = 0.05\n")
-        fake(self.fakes / "claude", "sleep 30")
+        fake(self.fakes / "claude", f"{CLAUDE_VERSION}\nsleep 30")
         self.addCleanup(subprocess.run, ["pkill", "-KILL", "-f", self.tmp.name])
         started = monotonic()
         result = self.ask(self.run.name, self.QUESTION, env={"WHOOPER_CONFIG": str(config)})
