@@ -4070,12 +4070,27 @@ class RunTest(unittest.TestCase):
         self.addCleanup(self.stop, process)
         return process
 
+    def gh_waits(self):
+        """Has gh stand in for a GitHub fetch that lasts until the test stops it, so a command that comes to it after
+        taking its lock holds the lock until then: gh notes that it started, in gh-<its process group> in the test's
+        folder, and waits (stop_in_gh)."""
+        self.script(self.fakes / "gh", f'touch "{self.tmp.name}/gh-$(ps -o pgid= -p $$ | tr -d " ")"\nexec sleep 600')
+
+    def stop_in_gh(self, process):
+        """Stops process, a command started in a process group of its own, once it waits in gh (gh_waits), or has
+        ended. A TERM to the group misses a process that is being forked at that moment, and each shell that waits
+        for that process runs its TERM trap only once the process ends, so a command stopped while it starts one may
+        go on through gh; one that waits in gh starts nothing until the TERM comes."""
+        self.wait_for(lambda: (Path(self.tmp.name) / f"gh-{process.pid}").exists() or process.poll() is not None,
+                      "the command to wait in gh")
+        self.stop(process)
+
     def two_copies(self, name, args, env, lock, paused):
         """Starts two copies of bin/<name> with args in the environment env. A fake command stops the first
         as it takes lock: it makes the file paused/stopped and waits for paused/go. Once the second copy
         waits for the first, or has taken the lock, the first goes on, and once the second stops, or
-        holds the lock, the test stops both. Returns the first copy's process ID, the second's exit code
-        and error output, and the process ID in lock by then."""
+        holds the lock, the test stops both, the first once it waits in gh (gh_waits). Returns the first
+        copy's process ID, the second's exit code and error output, and the process ID in lock by then."""
         def waits(process):
             # Each copy takes its lock while it holds flock on <state>/locks, which lib/python takes with
             # Python's fcntl.flock, so a copy that waits for the first runs fcntl.flock in its process group.
@@ -4091,7 +4106,7 @@ class RunTest(unittest.TestCase):
         self.wait_for(lambda: second.poll() is not None or self.read(lock / "pid") == f"{second.pid}\n",
                       f"the second {name} to stop or take the lock")
         holder = self.read(lock / "pid")
-        self.stop(first)
+        self.stop_in_gh(first)
         self.stop(second)
         first.communicate()
         return first.pid, second.returncode, second.communicate()[1], holder
@@ -4268,7 +4283,7 @@ class RunTest(unittest.TestCase):
         # then waits in its GitHub fetch, or its round's, so it holds the lock until the test stops it.
         env, item, _ = self.pull_request()
         mkdir = shutil.which("mkdir")
-        self.script(self.fakes / "gh", "exec sleep 30")
+        self.gh_waits()
         for name, args, lock, refusal in self.lock_takers(item):
             with self.subTest(name):
                 paused = Path(self.tmp.name) / f"{name}.paused"
@@ -4290,7 +4305,7 @@ class RunTest(unittest.TestCase):
         # whooper-run's first round, and whooper-round, wait in their GitHub fetch, so each holds its lock until the
         # test stops it.
         mkdir = shutil.which("mkdir")
-        self.script(self.fakes / "gh", "exec sleep 30")
+        self.gh_waits()
         for name, lock in [("whooper-run", self.lock), ("whooper-round", self.state / "round.lock")]:
             with self.subTest(name):
                 paused = Path(self.tmp.name) / f"{name}.paused"
@@ -4304,7 +4319,7 @@ class RunTest(unittest.TestCase):
                 process = self.start_command(name, env=self.env)
                 self.wait_for((paused / "stopped").exists, f"{name} to stop as it makes its lock")
                 status = self.status()
-                self.stop(process)
+                self.stop_in_gh(process)
                 if name == "whooper-run":
                     self.assertEqual(status["loop"], {"running": True, "pid": process.pid})
                 else:
@@ -4320,7 +4335,7 @@ class RunTest(unittest.TestCase):
         gone = subprocess.Popen(["true"])
         gone.wait()
         cat = shutil.which("cat")
-        self.script(self.fakes / "gh", "exec sleep 30")
+        self.gh_waits()
         for name, args, lock, refusal in self.lock_takers(item):
             with self.subTest(name):
                 paused = Path(self.tmp.name) / f"{name}.paused"
@@ -4345,7 +4360,7 @@ class RunTest(unittest.TestCase):
         # lock ends with it. Each command takes such a lock over at once, then waits in its GitHub fetch,
         # or its round's, so it holds the lock until the test stops it.
         env, item, _ = self.pull_request()
-        self.script(self.fakes / "gh", "exec sleep 30")
+        self.gh_waits()
         for name, args, lock, _ in self.lock_takers(item):
             with self.subTest(name):
                 lock.mkdir(parents=True)
@@ -4353,7 +4368,7 @@ class RunTest(unittest.TestCase):
                 self.wait_for(lambda: process.poll() is not None or self.read(lock / "pid") == f"{process.pid}\n",
                               f"{name} to stop or take the lock")
                 holder = self.read(lock / "pid")
-                self.stop(process)
+                self.stop_in_gh(process)
                 self.assertEqual(holder, f"{process.pid}\n", process.communicate()[1])
 
     def test_a_review_takes_over_a_pr_lock_whose_process_is_some_other_program(self):
@@ -4361,14 +4376,14 @@ class RunTest(unittest.TestCase):
         # review takes the lock over, then waits in its GitHub fetch, so it holds the lock until the test
         # stops it.
         env, item, _ = self.pull_request()
-        self.script(self.fakes / "gh", "exec sleep 30")
+        self.gh_waits()
         lock = self.state / "locks" / "sample-org-plain-repo-12"
         self.hold(lock, os.getpid())
         review = self.start_command("whooper-review", str(item), "--dry-run", env=env)
         self.wait_for(lambda: review.poll() is not None or self.read(lock / "pid") == f"{review.pid}\n",
                       "whooper-review to stop or take the lock")
         holder = self.read(lock / "pid")
-        self.stop(review)
+        self.stop_in_gh(review)
         self.assertEqual(holder, f"{review.pid}\n", review.communicate()[1])
 
     def test_commands_that_take_a_run_id_refuse_a_path_outside_runs(self):
