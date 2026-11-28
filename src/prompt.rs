@@ -363,3 +363,16 @@ pub fn ask_facts(run: &Path, question: &str, finding: Option<&str>) -> Result<St
     ]);
     Ok(lines.join("\n") + "\n")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fill_refuses_a_placeholder_without_a_value() {
+        let values = BTreeMap::from([("a", "1".to_string())]);
+        assert_eq!(fill("x {{a}} y", &values).unwrap(), "x 1 y");
+        assert!(fill("{{b}}", &values).is_err());
+        assert_eq!(bot_list(&serde_json::json!([]), "login"), "none");
+    }
+}

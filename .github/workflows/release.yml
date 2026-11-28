@@ -35,6 +35,12 @@ jobs:
       - name: Add the Rust targets for both Mac processors
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
+      - name: Check and test bin/whooper
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+
       - name: Build the archive
         run: scripts/build-release "$GITHUB_REF_NAME"
 

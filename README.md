@@ -1,18 +1,20 @@
 # Whooper
 
 Whooper finds the pull requests one GitHub user is expected to review or re-check, and reviews
-them with coding-agent runs; the config picks the agent, and `agents/` has a folder per agent. It reads the user's review requests on GitHub and review asks in one
+them with coding-agent runs; the config picks the agent, Claude Code or Devin. It reads the user's review requests on GitHub and review asks in one
 Slack channel, reviews each PR in a sandboxed run, and keeps the findings and a draft review for the user. It posts nothing to
-GitHub on its own: `bin/whooper-submit` posts one review built from the findings the user picked.
-`bin/whooper-run` repeats all of this on the schedule the config sets.
+GitHub on its own: `bin/whooper submit` posts one review built from the findings the user picked.
+`bin/whooper run` repeats all of this on the schedule the config sets.
 
 ## Set it up
 
 Whooper needs `gh` logged in, [slackdump](https://github.com/rusq/slackdump) logged in to the
 Slack workspace (`slackdump workspace new <name>`, through a browser), the CLI of each agent the
-config's `[jobs]` names logged in (`devin auth login`; `claude`), `jq`, `git`, `docker`, and [uv](https://docs.astral.sh/uv/). Whooper's commands are moving from bash and Python into one Rust program, `bin/whooper`, which a release archive ships built; in a checkout, build it with `cargo build --release && install target/release/whooper bin/whooper` (Rust 1.85 or later). Each moved command's `bin/whooper-<command>` links to it. The scripts run Python
-through `lib/python`, which has uv supply Python 3.11 or later and the packages `lib/whooper.py`
-names, at the versions `lib/whooper.py.lock` pins; the first run downloads what is missing.
+config's `[jobs]` names logged in (`devin auth login`; `claude`), `git`, and `docker`. Whooper is one
+program, `bin/whooper`, with a subcommand for each command, such as `bin/whooper status`; a release
+archive ships it built for both Mac processors. In a checkout, build it with
+`cargo build --release && install target/release/whooper bin/.whooper.new && mv bin/.whooper.new bin/whooper`
+(Rust 1.85 or later); the `mv` swaps it in whole, safe while Prompting Time runs the folder.
 [gopls](https://go.dev/gopls/) is optional: with it, a review links changed Go code to its callers with
 Go's own tools rather than by name search ([How a review run works](#how-a-review-run-works)). So is
 [gremlins](https://github.com/go-gremlins/gremlins) (`go install
@@ -22,7 +24,7 @@ the `go` command, with which a review measures which changed Go lines no test ra
 inputs its run chose, at the head and at the merge base, and `node`, with which it measures the changed
 JavaScript and TypeScript lines of a package whose tests run with Vitest or Jest, and links changed
 JavaScript and TypeScript code to its callers with the TypeScript 5 or 6 the package installed rather than by
-name search. A package's TypeScript 7 links them without `node`, through its own language server.
+name search. A package's TypeScript 7, which has no JavaScript API, gets name search, and the review says so.
 
 1. Copy `examples/config.example.toml` to `~/.config/whooper/config.toml` and fill it in. Everything
    that identifies you, your company, or your repos lives there: your GitHub login and name, the
@@ -50,7 +52,7 @@ from `~/.claude/skills`, so copy them there or point the config at your own.
 
 ## Run it
 
-`bin/whooper-run` runs Whooper until you stop it. Each round is `bin/whooper-round`, which runs the
+`bin/whooper run` runs Whooper until you stop it. Each round is `bin/whooper round`, which runs the
 steps below: fetch, poll, and select, then for each selected item a dry-run review, and it prints what each step prints. The config's
 `[schedule]` sets when: a round starts `interval_minutes` after the last one ended, the first at
 once, but only between `start` and `end` on the listed `days`, and otherwise whooper-run waits for
@@ -64,17 +66,17 @@ whooper-run holds the lock `<state>/run.lock` and refuses to start while another
 it. To run it in the background with a log:
 
 ```sh
-bin/whooper-run >> ~/.local/state/whooper/run.log 2>&1 &
+bin/whooper run >> ~/.local/state/whooper/run.log 2>&1 &
 ```
 
 Four commands work from a terminal and from Prompting Time, which runs them and watches the state
 directory for changes:
 
 ```sh
-bin/whooper-round          # runs a round now, even while paused
-bin/whooper-pause          # whooper-run skips each round it comes to, and logs that it did
-bin/whooper-resume         # ends the pause
-bin/whooper-status  # what runs, whether Whooper is paused, the next and last rounds, each of the last 15 days' rounds by result, and the reviews
+bin/whooper round          # runs a round now, even while paused
+bin/whooper pause          # whooper-run skips each round it comes to, and logs that it did
+bin/whooper resume         # ends the pause
+bin/whooper status  # what runs, whether Whooper is paused, the next and last rounds, each of the last 15 days' rounds by result, and the reviews
 ```
 
 A pause lasts until whooper-resume ends it or whooper-run starts again: whooper-run deletes the
@@ -88,15 +90,15 @@ reviews.
 To run the steps by hand:
 
 ```sh
-bin/whooper-fetch   # GitHub reads -> <state>/poll/github.json and recheck-prs.json
-bin/whooper-poll    # slackdump reads Slack, an agent picks the asks -> <state>/poll/<UTC start time>.json
-bin/whooper-select  # prints the newest poll's items and the recheck list's that no record marks as handled, one per line
+bin/whooper fetch   # GitHub reads -> <state>/poll/github.json and recheck-prs.json
+bin/whooper poll    # slackdump reads Slack, an agent picks the asks -> <state>/poll/<UTC start time>.json
+bin/whooper select  # prints the newest poll's items and the recheck list's that no record marks as handled, one per line
 ```
 
 To review one work item, save it as a file and run:
 
 ```sh
-bin/whooper-review <work-item.json> --dry-run [--as-of <ISO 8601 time>]   # prints the run directory
+bin/whooper review <work-item.json> [--as-of <ISO 8601 time>]   # prints the run directory
 ```
 
 `--as-of` replays a past review: `github.json` then holds only what people could read on the PR
@@ -106,22 +108,18 @@ A review that ends with findings that fit marks its PR record done. When gh says
 during the review, the record says stale and the PR goes on the recheck list, so the next round
 reviews the new commits (see [What counts as work](#what-counts-as-work)).
 
-Tests: `lib/run-tests`. It runs every test twice at once, under your PATH and with `/usr/bin:/bin`
-first, where macOS's bash 3.2 and Apple's git run the scripts, in worker processes, half as many per
-PATH as the Mac has CPUs unless `-j <workers>` says otherwise. It prints each failure, error, and
-warning, then the counts, and exits 1 when a test fails or errs or a ResourceWarning appears.
-`-k <pattern>` runs only the tests whose names match, as unittest's `-k` does. On an 18-core Mac both
-runs take about 2½ minutes together, where `lib/python -m unittest discover -s lib`, which runs one
-test at a time under one PATH, takes about 9 minutes. The tests run on a made-up config and never
-read yours; the TypeScript and Vitest tests skip until `npm ci` in page/ installs them.
+Tests: `cargo test`, with `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`. Unit
+tests sit beside the code they test; `tests/` runs `bin/whooper` as a black box on a made-up config and
+state folder, with fake `gh`, `slackdump`, `claude`, and `devin` on PATH, so no test reads your config or
+reaches GitHub, Slack, or a model. The page has its own: `npm test` in page/.
 
 ## Change settings
 
-`bin/whooper-settings get` prints the settings `schemas/settings.json` describes as JSON, with
+`bin/whooper settings get` prints the settings `schemas/settings.json` describes as JSON, with
 Whooper's defaults for what the config leaves out. They are the ones a settings form may edit:
 `[schedule]`, `[poll] timeout_minutes`, `[jobs]`, each agent's models, `[review]`
 `timeout_minutes` and `skills`, and `[ask] timeout_minutes`.
-`bin/whooper-settings set '{"schedule": {"interval_minutes": 30}}'` saves part of them. It checks
+`bin/whooper settings set '{"schedule": {"interval_minutes": 30}}'` saves part of them. It checks
 the values against the schema, and the config as it would be saved with the checks Whooper runs
 when it starts, and only then rewrites the lines of those keys, keeping the file's comments. On a
 failure it prints why and leaves the file as it was. It reads and rewrites the file under a lock on
@@ -133,7 +131,7 @@ already going keeps the old settings. Prompting Time's settings form and the Set
 
 ## See reviews
 
-`bin/whooper-status` lists, as `reviews`, the review runs in `<state>/runs` that started in
+`bin/whooper status` lists, as `reviews`, the review runs in `<state>/runs` that started in
 the last 30 days, newest first: each one's PR, the PR's title and author, and times, how it went, its
 verdict and number of findings, whether it is safe to approve, what whooper-submit posted, and
 whether it needs you.
@@ -155,7 +153,7 @@ Command-K. The format 1 fields, which the schema allows beside format 2's, stay 
 reads format 2 alone; whooper-status's header lists each field of both.
 
 ```sh
-bin/whooper-show <run-id>   # one review in full, for its review screen
+bin/whooper show <run-id>   # one review in full, for its review screen
 ```
 
 whooper-show prints the run's `run.json`, the PR's title and author, its outcome, `findings.json`,
@@ -283,14 +281,14 @@ PR's own, which shows that the cause no longer holds; a review that runs has sho
 Each review run keeps the user's choices for its review in `drafts.json`: which findings' comments
 go in, each one's text when the user edited it, whether the review approves or only comments, and
 its message. Prompting Time, Whooper's agent, and a terminal all change them with
-`bin/whooper-draft`, which prints the drafts as JSON after each change:
+`bin/whooper draft`, which prints the drafts as JSON after each change:
 
 ```sh
-bin/whooper-draft <run-id>                                  # prints the drafts
-bin/whooper-draft <run-id> include 2                        # or leave-out 2
-bin/whooper-draft <run-id> text 2 '**question:** Why ...?'  # replaces finding 2's draft, label included
-bin/whooper-draft <run-id> approve                          # or comment
-bin/whooper-draft <run-id> message 'Thanks, this reads well.'
+bin/whooper draft <run-id>                                  # prints the drafts
+bin/whooper draft <run-id> include 2                        # or leave-out 2
+bin/whooper draft <run-id> text 2 '**question:** Why ...?'  # replaces finding 2's draft, label included
+bin/whooper draft <run-id> approve                          # or comment
+bin/whooper draft <run-id> message 'Thanks, this reads well.'
 ```
 
 A run is safe to approve when it reviewed the PR, its verdict is `approve_once_ci_passes`, every
@@ -303,7 +301,7 @@ with nothing included, so the user decides. A review that did not finish, whose 
 missing or does not fit `schemas/findings.json`, such as an empty file or findings without a
 verdict, has no drafts; whooper-draft names the first part that does not fit.
 
-`bin/whooper-submit <run-id>` posts the review with the user's own gh login, as one GitHub review
+`bin/whooper submit <run-id>` posts the review with the user's own gh login, as one GitHub review
 at the head the run reviewed. Each comment is `AI comment (vetted)`, a blank line, and the text,
 which keeps the Conventional Comments label it opens with, such as `**nit:**`; a text without one
 gets its finding kind's. An approval without a message says `Pre-approving to unblock` when it
@@ -323,13 +321,13 @@ Each refusal posts nothing and exits with its own code, so Prompting Time can te
 
 | Exit | Why | What then |
 | --- | --- | --- |
-| 10 | The PR has new commits since the review. | The reviewed head's record says stale and the PR goes on the recheck list, as whooper-review does when the head moves during a review, so the next round reviews the new commits whatever brought the PR in; `bin/whooper-round` runs that round at once. |
+| 10 | The PR has new commits since the review. | The reviewed head's record says stale and the PR goes on the recheck list, as whooper-review does when the head moves during a review, so the next round reviews the new commits whatever brought the PR in; `bin/whooper round` runs that round at once. |
 | 11 | The review approves, and the run is not safe to approve. | It lists why: a review that failed and the reason in its `failure.txt`, a review the run skipped and why, the verdict and its reason, and the findings that are not nits. `--approve-anyway` approves after the user has looked. |
 | 12 | An included comment or the message @-mentions someone. | It lists each mention, and `--allow-mentions` posts them. |
 | 13 | The request is not the one whose fingerprint `--expect` gives, because the drafts changed since `--print` showed it. | `--print` shows the new request for another confirmation. |
-| 14 | An included comment is on a line outside the PR's diff, as the run's diff.patch shows, where GitHub takes no comment, so it would refuse the whole review. | It lists each such comment, and reads nothing from GitHub first. Leaving them out with `bin/whooper-draft` lets the review post, and the review's message can make their point. |
+| 14 | An included comment is on a line outside the PR's diff, as the run's diff.patch shows, where GitHub takes no comment, so it would refuse the whole review. | It lists each such comment, and reads nothing from GitHub first. Leaving them out with `bin/whooper draft` lets the review post, and the review's message can make their point. |
 
-Any other failure exits 1, or with gh's or jq's own code, none of which is 10 to 14. A comment
+Any other failure exits 1, or with gh's own code, none of which is 10 to 14. A comment
 someone wrote on the same line since the review, and a link outside the configured orgs, do not
 stop it. It refuses a review that is still running, since a Devin review may still change its
 `findings.json`, a review that did not finish, a run whose `run.json` it cannot read, a review that
@@ -338,14 +336,14 @@ review never posts twice.
 
 ## Skip a review
 
-`bin/whooper-skip <run-id>` marks a review done without submitting it, and prints what it did: it
+`bin/whooper skip <run-id>` marks a review done without submitting it, and prints what it did: it
 leaves the empty file `skipped-by-user` in the run directory, so whooper-status lists the review with
 `skipped_by_user` true and `needs_you` false, and whooper-show gives `skipped_by_user` true.
-`bin/whooper-skip <run-id> --undo` deletes the file. It also stops reviewing the PR. A review that
+`bin/whooper skip <run-id> --undo` deletes the file. It also stops reviewing the PR. A review that
 is still running stops as `kill` stops it ([Stop it](#stop-it)): whooper-review saves `the review
 was interrupted`, and whooper-round sends no notice for it. While the run is its PR's newest,
 whooper-select starts no other review of the PR, whatever asks for one, such as new commits or a new
-Slack ask, until `--undo` or `bin/whooper-retry`; a recheck-list item for the PR stays on the list
+Slack ask, until `--undo` or `bin/whooper retry`; a recheck-list item for the PR stays on the list
 meanwhile. For example, after you skip the review of #12 at head `abc1234`, the author pushes
 `def5678`, and every round drops #12 until you undo the skip, after which the next round reviews
 `def5678`. Nothing else changes: nothing posts to GitHub, and the drafts and records stay, so a
@@ -355,10 +353,10 @@ after it to undo; a review's row menu there adds `--item` before the run ID, whi
 
 ## Remove a review
 
-`bin/whooper-remove <run-id>` takes a review out of your lists, and prints what it did: it leaves the
+`bin/whooper remove <run-id>` takes a review out of your lists, and prints what it did: it leaves the
 empty file `removed-by-user` in the run directory, so whooper-status still lists the review, with
 `removed_by_user` true and `needs_you` false, and whooper-show gives `removed_by_user` true. The run's
-files and the records stay. `bin/whooper-remove <run-id> --undo` deletes the file.
+files and the records stay. `bin/whooper remove <run-id> --undo` deletes the file.
 
 Whooper does not retry a removed review on its own. While the run is its PR's newest, whooper-select
 drops each item that asks for the same review again, saying `removed by the user`, and takes the PR
@@ -369,7 +367,7 @@ and are requested again. For example, after you remove a failed review of #12 at
 a GitHub review request brought in, every poll still lists #12 at `abc1234` while the request stands,
 and whooper-select drops it; once the author pushes `def5678`, the poll lists #12 at the new head and
 the round reviews it. A request on GitHub made again at the same head reads like the one before, so
-it does not count; `bin/whooper-retry` brings the PR back whatever brought it in, and unmarks the run
+it does not count; `bin/whooper retry` brings the PR back whatever brought it in, and unmarks the run
 it retries. A new request that waits for the next round gets a run of its own rather than the
 removed run that waits. `--undo` puts a review that waits back on the recheck list when whooper-select
 took it off, so the next round reviews it again.
@@ -380,7 +378,7 @@ review's row menu there adds `--item` before the run ID, which works too.
 
 ## Ask about a review
 
-`bin/whooper-ask <run-id> '<question>' [--finding <finding-id>]` answers a question about a review
+`bin/whooper ask <run-id> '<question>' [--finding <finding-id>]` answers a question about a review
 run, such as "Why is it bad to have invisible characters?", or "Why did this review fail?" about one
 that did not finish, and prints the answer. Prompting Time's "Ask about this" runs it with the
 finding. A new run of the agent that did the review answers, with the review's skills, since Whooper
@@ -414,12 +412,12 @@ not used again.
 
 ## Retry a review
 
-`bin/whooper-retry <run-id>` queues another review of a run's PR, such as one whose setup script
+`bin/whooper retry <run-id>` queues another review of a run's PR, such as one whose setup script
 failed while Docker was not running, and prints what it queued. It reads the PR's head with your gh
 login, puts the run's work item at that head on the recheck list, and marks that head's record
 `retry`. The next round reviews it whatever earlier reviews at that head did: you asked for it, so
 neither the limit of 3 failures at a head nor the limit of 3 re-checks a day holds it back.
-`bin/whooper-round` runs that round now. When the poll lists the PR at that head, as while its
+`bin/whooper round` runs that round now. When the poll lists the PR at that head, as while its
 review request stands, the round reviews the poll's item instead, once. Once the new review starts,
 its record counts toward both limits as usual, and as the PR's newest run it supersedes the run you
 retried, which no longer needs you. It unmarks a run you removed ([Remove a review](#remove-a-review)).
@@ -430,8 +428,8 @@ the manifest's `retry` action, adding the run ID; a review's row menu there adds
 ## Whooper in Prompting Time
 
 Prompting Time reads `prompting-time-plugin.json`, which fits `schemas/prompting-time-plugin.json`:
-Whooper's name and version, the command it starts (`bin/whooper-run`), the programs it checks for
-first (`gh`, slackdump, `jq`, uv, and the CLI of each agent the settings' `[jobs]` name), the page,
+Whooper's name and version, the command it starts (`bin/whooper run`), the programs it checks for
+first (`gh`, slackdump, and the CLI of each agent the settings' `[jobs]` name), the page,
 the settings schema (`schemas/settings.json`), the groups whooper-status's status format 2 puts
 its items in and the actions their rows offer ([See reviews](#see-reviews)), and the commands it runs
 as actions. An action with `confirm: true` waits for the user's yes in Prompting Time; only `submit`
@@ -475,7 +473,7 @@ refused as you type: what the schema says, start and end as 24-hour times with t
 start, at least one day, and a value for a setting the config has, since whooper-settings can't take
 one out. Save sends only the changed settings, shows whooper-settings' reason when it refuses them,
 and then says when the change applies ([Change settings](#change-settings)). Each tab's header has
-Pause or Resume and Poll now; Start and Stop stay in Prompting Time, which runs `bin/whooper-run`. A review Prompting Time opens marks the tab whose list holds it. A review shows Back
+Pause or Resume and Poll now; Start and Stop stay in Prompting Time, which runs `bin/whooper run`. A review Prompting Time opens marks the tab whose list holds it. A review shows Back
 to the list, which keeps the list's search and filter, then its header, with its versions, Skip, which also stops a review
 that runs, and Undo, Remove and Restore, Rerun review, and a banner for new commits since the
 review; then the review's diff with Whooper's findings as draft comments under their lines, Include
@@ -561,18 +559,16 @@ since the runner has no Prompting Time checkout to install it from.
 
 ## What counts as work
 
-`lib/whooper.py` applies the rules. `prompts/poll.md` is the only judgment, and it covers Slack
+`bin/whooper` applies the rules. `prompts/poll.md` is the only judgment, and it covers Slack
 posts only. Only PRs in the configured GitHub orgs count. Each item is one PR and one kind:
 
 - **first_review**: a GitHub review request names the user and the user has not reviewed the PR,
   or a post in the ask channel asks the user for a review. A post that does not mention the user
   counts only while it has no :eyes: and no one but bots and the PR author has reviewed the PR in
   the last 8 hours, and only while the user has not reviewed it.
-- **recheck**: the user is requested by name again after reviewing, a post that mentions the user
-  asks about a PR the user already reviewed, or the user reviewed the PR without approving, every
-  thread the user started has an author reply or is resolved, and the head moved or the author
-  replied since the user's latest review. whooper-review reviews first reviews only, so for now
-  whooper-select drops each re-check, and a re-check does not take the PR off the recheck list.
+
+Whooper does not re-check a PR the user already reviewed: a request by name after the user reviewed,
+or an ask about such a PR, makes no work item.
 
 When whooper-review or whooper-submit finds that a PR's head moved since its review, it posts
 nothing and puts the PR on the recheck list. The next round's whooper-select adds it to the work at
@@ -581,7 +577,7 @@ Slack ask brought the PR in, which a poll reads once. Unless the PR is merged or
 whooper-fetch looks up each listed PR its searches did not find, and whooper-select drops a merged or
 closed one from the list, saying so on its error output, instead of reviewing it. A listed PR waits
 for the next day once it has 3 records of its kind for other heads started today.
-`bin/whooper-retry` puts a PR on the list too, and no limit holds that review back ([Retry a review](#retry-a-review)). So does
+`bin/whooper retry` puts a PR on the list too, and no limit holds that review back ([Retry a review](#retry-a-review)). So does
 whooper-round, for a review that waits for the next round after another review in the round stopped
 at a cause that stops every review, unless the list holds the PR already. Once you remove a PR's
 newest review, whooper-select takes the PR off the list and leaves it out of the work until a new
@@ -590,7 +586,7 @@ request for it comes in ([Remove a review](#remove-a-review)).
 A PENDING review or a thread reply does not count as reviewing. Slack text is untrusted: an ask
 must name a post or thread reply slackdump read, and only plain
 `https://github.com/<org>/<repo>/pull/<n>` URLs in a configured org that appear in that post reach
-`gh`. `lib/whooper.py` reads whether a post mentions the user and has :eyes: from the post itself.
+`gh`. `bin/whooper` reads whether a post mentions the user and has :eyes: from the post itself.
 It fails the poll, so the cursor stays, when slackdump or the run fails, when the run's answer does
 not fit `schemas/slack-asks.json`, or when the run left out a post by someone else that mentions
 the user next to a PR link.
@@ -660,7 +656,7 @@ declaration files do not count. Without a `package.json`, a runner, its installe
 when the runner writes no report, or at the time limit, that package's files are not measured, and
 `limits` says why; `measured` is false only when nothing was. The facts at the end of the prompt name the file. The run may change it, so
 the copy from before the run replaces it once the run ends. Then the agent that `[jobs] review` names runs from the head worktree
-through its launcher, `agents/<agent>/review`. The run follows `prompts/review.md`, filled in from
+through its launcher, `src/agent.rs`. The run follows `prompts/review.md`, filled in from
 the config with that agent's tool names and saved as `prompt.md` in the run directory, and leaves
 `findings.json`, which must fit `schemas/findings.json`. The run also writes `overview.json` in the
 run directory, which says what the PR does and where to look first, for the review screen: a
@@ -688,15 +684,12 @@ same side. For Go files it asks gopls, Go's language server, when Whooper finds 
 TypeScript, the one the file's package installed: `node_modules/typescript` in the folder of the nearest
 `package.json` above the file or in a folder above that, which the repo's setup script installs; at the
 merge base, where setup installs nothing, the head's. For TypeScript 5 or 6, `node` runs `lib/ts-callers.mjs`
-with it. TypeScript 7, written in Go, has no code `node` can load, so Whooper runs its language server,
-`tsc --lsp --stdio`, from the package its installer puts beside `typescript` for this machine, such as
-`@typescript/typescript-darwin-arm64`, with its automatic type acquisition, which would download type
-declarations with npm, turned off. Either way, TypeScript lists each file's declarations, those at its top
+with it. TypeScript 7, written in Go, has no `lib/typescript.js` for `node` to load, so its files get name
+search. TypeScript lists each file's declarations, those at its top
 level and each class's methods, such as `Cart.add`, and finds, in the project of the nearest `tsconfig.json`
 or `jsconfig.json`, the code that calls a changed function or method, as TypeScript's call hierarchy lists
 it, or uses any other changed declaration, as its references list them. TypeScript gets the first three
-quarters of the step's time. A file whose package installed no TypeScript, or a TypeScript 7 without its
-language server, or whose project TypeScript cannot load or answer for in that time, gets name search, and
+quarters of the step's time. A file whose package installed no TypeScript, or a TypeScript 7, or whose project TypeScript cannot load or answer for in that time, gets name search, and
 `limits` says which and why. For
 any other file, and for Go files without gopls, it uses name search: the definitions a pattern per
 language finds, in Go, Python, JavaScript, and TypeScript, and `git grep`'s whole-word matches of each
@@ -755,15 +748,15 @@ stopped at and what that step printed on stderr ([See reviews](#see-reviews) lis
 repo the config lists but the cache has no clone of fails the review once its run directory exists,
 so the failure shows in whooper-status.
 
-`agents/claude/review` runs `claude -p`, which returns the findings as structured output and writes
+Whooper's claude review run (`src/agent.rs`) runs `claude -p`, which returns the findings as structured output and writes
 `log.md` and `overview.json` in the run directory, which `--add-dir` opens to its file edits, and
 reports the run's cost in dollars, capped by `[agents.claude] budget_usd` when the config sets one.
-`agents/devin/review` runs `devin -p` in `dangerous` permission mode, so no tool call waits for an
+Whooper's devin review run (`src/agent.rs`) runs `devin -p` in `dangerous` permission mode, so no tool call waits for an
 approval; the run writes `findings.json` and `overview.json` itself, and the cost line is in ACUs,
 Devin's billing unit. Its config for the run, saved as `devin-config.json`, is your
 `~/.config/devin/config.json` plus Whooper's hook and deny rules for every Slack tool, which hold in
 that mode. When the run ends, the launcher deletes its Devin session with `devin rm`, so runs don't
-fill Devin Desktop's session list; `transcript.json` keeps the conversation. `agents/devin/poll`
+fill Devin Desktop's session list; `transcript.json` keeps the conversation. Whooper's devin poll run (`src/agent.rs`)
 does the same for each poll.
 
 The run gets `GH_TOKEN=disabled`, so `gh` and git's `gh` credential helper fail. Otherwise it loads
@@ -785,7 +778,7 @@ needs an approval nobody gives. A poll run that passes `[poll] timeout_minutes` 
 stopped with everything it started, or kept from starting when the limit passes before it starts,
 and the cursor stays put, so the next poll reads the same posts.
 slackdump only reads. Review runs have no GitHub
-login and every Slack write denied, and whooper-review refuses to run without `--dry-run`. An ask run
+login and every Slack write denied. An ask run
 has no GitHub login either, and reads files but writes nothing except its answer. Claude gets only
 its Read, Grep, Glob, and Skill tools, can read the run directory and `~/.claude/skills`, runs in
 `dontAsk` mode, which denies any call that would wait for an approval, and has the Slack writes
@@ -845,7 +838,7 @@ the recheck list while the commands above write to it.
   count, at the head the PR has now. whooper-select writes failed, with one more failure, over a
   record that says running while no live whooper-review holds the PR's lock (`locks/`), as after a
   SIGKILL cut a review's cleanup short, so the head gets another review, as after any interrupted one.
-  whooper-select drops a re-check, which whooper-review cannot review yet, a recheck-list item of a
+  whooper-select drops a recheck-list item of a
   PR that `poll/recheck-prs.json` says is merged or closed, an item in a repo the
   config has no `[repos."<owner>/<repo>"]` table for, an item whose record is done, has failed 3
   times, or is running while a live whooper-review holds the PR's lock, a recheck-list item of a PR
@@ -853,7 +846,7 @@ the recheck list while the commands above write to it.
   started today (local time), an item that asks again for a review you removed
   ([Remove a review](#remove-a-review)), and any item of a PR whose newest review you skipped
   ([Skip a review](#skip-a-review)). A recheck-list item dropped for the daily limit stays on the
-  list for the next day. Of these, only a re-check, a merged or closed PR, and the missing table drop
+  list for the next day. Of these, only a merged or closed PR, and the missing table drop
   an item whose record says retry. A record that cannot be read counts as none.
 - `rechecks/<owner>-<repo>-<pr>.json`: the recheck list: a PR whose head whooper-review or
   whooper-submit found moved since its review, as the work item for the new head, or whose review

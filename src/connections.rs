@@ -1597,3 +1597,52 @@ pub fn connections_within(run: &Path, seconds: f64) -> Result<()> {
     )?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn definitions_span_from_their_comments_to_the_next_and_name_methods() {
+        let go = definitions(
+            "package p\n\n// Total sums.\nfunc (c *Cart) Total() int {\n\treturn 0\n}\n\nvar (\n\tA = 1\n)\n",
+            "go",
+        );
+        let names: Vec<(&str, &str, i64, i64)> = go
+            .iter()
+            .map(|s| (s.name.as_str(), s.kind.as_str(), s.start, s.end))
+            .collect();
+        assert_eq!(
+            names,
+            [("(*Cart).Total", "method", 3, 8), ("A", "var", 9, 11)]
+        );
+        let py = definitions(
+            "class Cart:\n    def total(self):\n        x = 1\n\nLIMIT = 3\nif x == 2: pass\n",
+            "python",
+        );
+        let names: Vec<(&str, &str)> = py
+            .iter()
+            .map(|s| (s.name.as_str(), s.kind.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("Cart", "type"),
+                ("Cart.total", "method"),
+                ("LIMIT", "const")
+            ]
+        );
+        let js = definitions("export const f = async (a) => a\nlet n = 1\n", "javascript");
+        assert_eq!(
+            js.iter().map(|s| s.kind.as_str()).collect::<Vec<_>>(),
+            ["func", "var"]
+        );
+    }
+
+    #[test]
+    fn file_uris_round_trip() {
+        let path = Path::new("/tmp/a b/c%d.go");
+        assert_eq!(uri_of(path), "file:///tmp/a%20b/c%25d.go");
+        assert_eq!(path_of(&uri_of(path)), path);
+    }
+}

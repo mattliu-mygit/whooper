@@ -132,7 +132,6 @@ pub fn wait(child: &mut Child, limit: Option<Duration>) -> Ended {
 /// command was stopped, with its output and error output.
 pub struct Captured {
     pub code: Option<i32>,
-    pub ended: Ended,
     pub out: String,
     pub err: String,
 }
@@ -159,20 +158,9 @@ pub fn run_captured(command: &mut Command, limit: Option<Duration>) -> std::io::
             Ended::Exited(c) => Some(c),
             _ => None,
         },
-        ended,
         out: read(out),
         err: read(err),
     })
-}
-
-/// Runs command as run_captured does, without a limit, and fails with stopped when a signal stopped
-/// this command meanwhile.
-pub fn output(command: &mut Command) -> crate::fsx::Result<Captured> {
-    let captured = run_captured(command, None)?;
-    if captured.ended == Ended::Stopped {
-        return Err(stopped());
-    }
-    Ok(captured)
 }
 
 fn alive(group: i32) -> bool {

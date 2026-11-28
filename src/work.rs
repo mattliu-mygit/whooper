@@ -142,7 +142,7 @@ pub fn retry(state: &Path, run_id: &str) -> Result<String> {
     write_record(state, &at_head, "retry")?;
     list_again(state, &item, &head_now)?;
     let queued = format!(
-        "queued another review of {}#{} at {} for the next round; bin/whooper-round runs that round now",
+        "queued another review of {}#{} at {} for the next round; bin/whooper round runs that round now",
         str_of(&item, "repo").unwrap_or_default(),
         item["pr"],
         &head_now[..head_now.len().min(12)]
@@ -184,7 +184,7 @@ pub fn skip(state: &Path, run_id: &str, undo: bool) -> Result<String> {
         _ => false,
     };
     Ok(format!(
-        "marked {name} as skipped, without submitting it{}{} bin/whooper-skip {run_id} --undo unmarks it",
+        "marked {name} as skipped, without submitting it{}{} bin/whooper skip {run_id} --undo unmarks it",
         if stopped {
             ", and stopped its review"
         } else {
@@ -234,7 +234,7 @@ pub fn remove(state: &Path, run_id: &str, undo: bool) -> Result<String> {
     }
     fs::write(&mark, "")?;
     Ok(format!(
-        "marked {name} as removed; its files stay, and bin/whooper-remove {run_id} --undo unmarks it"
+        "marked {name} as removed; its files stay, and bin/whooper remove {run_id} --undo unmarks it"
     ))
 }
 

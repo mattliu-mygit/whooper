@@ -1,11 +1,6 @@
 //! Whooper: finds the pull requests that are the user's review work, reviews each with an agent, and
 //! answers Prompting Time's plugin actions. One program; each command is a subcommand, such as
-//! `whooper status`. While Whooper moves from its scripts to this program, bin/whooper-<command> links
-//! to it and runs that command, so a lock names the same command either way.
-
-// While the commands move over one at a time, some helpers serve only commands not switched yet.
-// Remove this once the last bin/whooper-<command> script is gone.
-#![allow(dead_code)]
+//! `whooper status`.
 
 mod agent;
 mod ask;
@@ -29,7 +24,6 @@ mod submit;
 mod work;
 
 use std::ffi::OsString;
-use std::path::Path;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
@@ -135,26 +129,6 @@ enum Command {
     },
 }
 
-/// The arguments, with bin/whooper-<command>'s command put first when the program runs by that name.
-fn arguments() -> Vec<OsString> {
-    let mut args: Vec<OsString> = std::env::args_os().collect();
-    let name = args
-        .first()
-        .map(|a| {
-            Path::new(a)
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned()
-        })
-        .unwrap_or_default();
-    if let Some(command) = name.strip_prefix("whooper-") {
-        args[0] = "whooper".into();
-        args.insert(1, command.into());
-    }
-    args
-}
-
 fn run(cli: Cli) -> Result<()> {
     let one = |item: Option<String>, run_id: Option<String>, usage: &str| -> Result<String> {
         match (item, run_id) {
@@ -175,7 +149,7 @@ fn run(cli: Cli) -> Result<()> {
                     })?;
                     config::write_settings(&values)?;
                 }
-                _ => fail!("usage: whooper-settings get | set <json>"),
+                _ => fail!("usage: whooper settings get | set <json>"),
             }
             return Ok(());
         }
@@ -237,7 +211,7 @@ fn run(cli: Cli) -> Result<()> {
                     "{}",
                     work::retry(
                         &state,
-                        &one(item, run_id, "usage: whooper-retry [--item] <run-id>")?
+                        &one(item, run_id, "usage: whooper retry [--item] <run-id>")?
                     )?
                 ),
                 Command::Skip { item, run_id, undo } => {
@@ -248,7 +222,7 @@ fn run(cli: Cli) -> Result<()> {
                             &one(
                                 item,
                                 run_id,
-                                "usage: whooper-skip [--item] <run-id> [--undo]"
+                                "usage: whooper skip [--item] <run-id> [--undo]"
                             )?,
                             undo
                         )?
@@ -262,7 +236,7 @@ fn run(cli: Cli) -> Result<()> {
                             &one(
                                 item,
                                 run_id,
-                                "usage: whooper-remove [--item] <run-id> [--undo]"
+                                "usage: whooper remove [--item] <run-id> [--undo]"
                             )?,
                             undo
                         )?
@@ -285,23 +259,23 @@ fn run(cli: Cli) -> Result<()> {
 /// The usage line each command prints for arguments it does not take.
 fn usage(command: &str) -> Option<&'static str> {
     Some(match command {
-        "status" => "usage: whooper-status",
-        "show" => "usage: whooper-show <run-id>",
+        "status" => "usage: whooper status",
+        "show" => "usage: whooper show <run-id>",
         "draft" => submit::DRAFT_USAGE,
         "submit" => {
-            "whooper-submit: usage: whooper-submit <run-id> [--print] [--allow-mentions] [--approve-anyway] [--expect <fingerprint>]"
+            "whooper-submit: usage: whooper submit <run-id> [--print] [--allow-mentions] [--approve-anyway] [--expect <fingerprint>]"
         }
-        "retry" => "usage: whooper-retry [--item] <run-id>",
-        "skip" => "usage: whooper-skip [--item] <run-id> [--undo]",
-        "remove" => "usage: whooper-remove [--item] <run-id> [--undo]",
-        "settings" => "usage: whooper-settings get | set <json>",
+        "retry" => "usage: whooper retry [--item] <run-id>",
+        "skip" => "usage: whooper skip [--item] <run-id> [--undo]",
+        "remove" => "usage: whooper remove [--item] <run-id> [--undo]",
+        "settings" => "usage: whooper settings get | set <json>",
         "review" => "whooper-review: usage: whooper review <work-item.json> [--as-of <time>]",
         _ => return None,
     })
 }
 
 fn main() -> ExitCode {
-    let args = arguments();
+    let args: Vec<OsString> = std::env::args_os().collect();
     let cli = match Cli::try_parse_from(&args) {
         Ok(cli) => cli,
         Err(e) if e.use_stderr() => {

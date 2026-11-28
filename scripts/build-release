@@ -39,9 +39,11 @@ trap 'exit 130' INT TERM HUP
 stage="$(trap '' INT TERM HUP; mktemp -d)"
 git archive --format=tar --prefix="$name/" HEAD | tar -x -C "$stage"
 cp -R page/dist "$stage/$name/page/dist"
+mkdir -p "$stage/$name/bin"
 lipo -create -output "$stage/$name/bin/whooper" target/aarch64-apple-darwin/release/whooper \
   target/x86_64-apple-darwin/release/whooper
 lipo -info "$stage/$name/bin/whooper"
+"$stage/$name/bin/whooper" --help > /dev/null
 mkdir -p release
 # COPYFILE_DISABLE keeps macOS's tar from adding ._ files for extended attributes.
 COPYFILE_DISABLE=1 tar -czf "release/$name.tar.gz" -C "$stage" "$name"

@@ -1350,3 +1350,42 @@ pub fn normalize(path: &str) -> String {
         parts.join("/")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coverage_and_lcov_keep_the_highest_count() {
+        let counts = coverage_counts("mode: set\nm/p.go:3.1,5.2 1 0\nm/p.go:3.1,5.2 1 1\n");
+        assert_eq!(counts[&("m/p.go".to_string(), 3, 1, 5, 2)], 1);
+        let lcov = lcov_counts("SF:a.ts\nDA:1,0\nDA:1,2,abc\nend_of_record\nDA:9,9\n");
+        assert_eq!(lcov, vec![("a.ts".to_string(), HashMap::from([(1, 2)]))]);
+    }
+
+    #[test]
+    fn words_are_quoted_and_globs_escaped_for_a_person_to_type() {
+        assert_eq!(
+            shell_join(&["go".into(), "a b".into(), "it's".into(), String::new()]),
+            "go 'a b' 'it'\"'\"'s' ''"
+        );
+        assert_eq!(shown_command("pkg", "go test"), "(cd pkg && go test)");
+        assert_eq!(
+            glob_escape("routes/[id]/page.tsx"),
+            "routes/\\[id\\]/page.tsx"
+        );
+        assert_eq!(normalize("a/./b/../c"), "a/c");
+    }
+
+    #[test]
+    fn a_mutation_names_the_operator_gremlins_changed() {
+        assert_eq!(
+            mutation_change("if a >= b {", 1, 6, "CONDITIONALS_BOUNDARY"),
+            "`>=` to `>`"
+        );
+        assert_eq!(
+            mutation_change("x", 1, 1, "OTHER"),
+            "gremlins's OTHER change at column 1"
+        );
+    }
+}

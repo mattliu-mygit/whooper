@@ -23,7 +23,7 @@ pub const OUTSIDE_DIFF_EXIT: i32 = 14;
 const VETTED: &str = "AI comment (vetted)";
 /// The message of an approval the user left without one, when it includes comments.
 const PRE_APPROVAL: &str = "Pre-approving to unblock";
-pub const DRAFT_USAGE: &str = "usage: whooper-draft <run-id> [include <finding-id> | leave-out <finding-id> | text <finding-id> <text> | approve | comment | message <text>]";
+pub const DRAFT_USAGE: &str = "usage: whooper draft <run-id> [include <finding-id> | leave-out <finding-id> | text <finding-id> <text> | approve | comment | message <text>]";
 
 /// The @-mentions in text, such as @alice or the team @example-org/reviewers. A handle preceded by a
 /// word character, a dot, an @, or a slash, as in an email address or a path, is none.
@@ -307,7 +307,7 @@ fn review_to_submit(state: &Path, run: &Path) -> Result<ToSubmit> {
         return Err(refuse(
             OUTSIDE_DIFF_EXIT,
             format!(
-                "whooper-submit: nothing posted: these included comments are on lines outside the PR's diff, where GitHub takes no comment, so it would refuse the whole review:\n{listed}Leave them out with bin/whooper-draft, or make their point in the review's message."
+                "whooper-submit: nothing posted: these included comments are on lines outside the PR's diff, where GitHub takes no comment, so it would refuse the whole review:\n{listed}Leave them out with bin/whooper draft, or make their point in the review's message."
             ),
         ));
     }
@@ -355,7 +355,7 @@ pub fn submit(state: &Path, run_id: &str, flags: &SubmitFlags) -> Result<()> {
         return Err(refuse(
             NEW_COMMITS_EXIT,
             format!(
-                "whooper-submit: nothing posted: the PR has new commits since the review (head {}, now {}). Whooper reviews them in its next round; bin/whooper-round runs that round now.",
+                "whooper-submit: nothing posted: the PR has new commits since the review (head {}, now {}). Whooper reviews them in its next round; bin/whooper round runs that round now.",
                 &head[..head.len().min(12)],
                 &head_now[..head_now.len().min(12)]
             ),
@@ -365,7 +365,7 @@ pub fn submit(state: &Path, run_id: &str, flags: &SubmitFlags) -> Result<()> {
     let mut message = drafts["message"].as_str().unwrap_or_default().to_string();
     if comments.is_empty() && event == "COMMENT" && message.trim().is_empty() {
         fail!(
-            "whooper-submit: nothing to submit: the drafts include no comment, have no message, and do not approve; change them with bin/whooper-draft"
+            "whooper-submit: nothing to submit: the drafts include no comment, have no message, and do not approve; change them with bin/whooper draft"
         );
     }
     if event == "APPROVE" && message.trim().is_empty() {
@@ -382,7 +382,7 @@ pub fn submit(state: &Path, run_id: &str, flags: &SubmitFlags) -> Result<()> {
             return Err(refuse(
                 NOT_SAFE_EXIT,
                 format!(
-                    "whooper-submit: nothing posted: the review approves, and the run is not safe to approve:\n{listed}Pass --approve-anyway to approve it anyway, or make the review only comment with bin/whooper-draft."
+                    "whooper-submit: nothing posted: the review approves, and the run is not safe to approve:\n{listed}Pass --approve-anyway to approve it anyway, or make the review only comment with bin/whooper draft."
                 ),
             ));
         }

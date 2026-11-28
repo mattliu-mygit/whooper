@@ -604,3 +604,116 @@ pub fn poll(whooper: &Whooper) -> Result<()> {
     println!("{}", out.display());
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pr(requested: &[&str], reviews: Value) -> Value {
+        let requests: Vec<Value> = requested
+            .iter()
+            .map(|l| json!({"requestedReviewer": {"login": l}}))
+            .collect();
+        json!({"url": "https://github.com/o/r/pull/1", "number": 1, "state": "OPEN", "author": {"login": "alice"},
+               "headRefOid": "h", "baseRefName": "main", "repository": {"nameWithOwner": "o/r"},
+               "reviewRequests": {"totalCount": requests.len(), "nodes": requests}, "reviews": reviews})
+    }
+
+    #[test]
+    fn slack_posts_keep_new_posts_replies_and_shared_text() {
+        let dump = json!({"messages": [
+            {"ts": "1000000000.000001", "user": "U1", "text": "old"},
+            {"ts": "2000000000.000001", "user": "U2", "bot_id": "B", "text": "new", "attachments": [{"text": "shared"}],
+             "reactions": [{"name": "eyes"}],
+             "slackdump_thread_replies": [{"ts": "2000000000.000001"}, {"ts": "2000000001.000001", "user": "U3", "text": "reply"}]},
+            {"ts": "bad"}]});
+        let posts = slack_posts(&dump, 1500000000);
+        assert_eq!(posts.len(), 2);
+        assert_eq!(posts[0]["text"], "new\nshared");
+        assert_eq!(posts[0]["bot"], true);
+        assert_eq!(posts[0]["reactions"], json!(["eyes"]));
+        assert_eq!(posts[1]["thread_ts"], "2000000000.000001");
+    }
+
+    #[test]
+    fn pr_links_count_in_the_configured_orgs_only_and_at_most_nine_digits() {
+        let link = PrLink::new(&["example-org".into()]);
+        assert_eq!(
+            link.find(
+                "see https://github.com/example-org/r/pull/12 and http://github.com/other/r/pull/3"
+            ),
+            ["github.com/example-org/r/pull/12"]
+        );
+        assert!(
+            link.find("https://github.com/example-org/r/pull/1234567890")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn read_asks_keeps_only_linked_urls_and_builds_permalinks() {
+        let posts = vec![
+            json!({"ts": "2000000000.000001", "thread_ts": "1999999999.000001", "user": "U1",
+                                "text": "<@ME> https://github.com/o/r/pull/1", "reactions": []}),
+        ];
+        let answer = json!({"asks": [{"ts": "2000000000.000001", "pr_urls": ["https://github.com/o/r/pull/1", "https://github.com/o/r/pull/2"], "reason": "r"},
+                                     {"ts": "1.2", "pr_urls": [], "reason": "r"}], "not_asks": []});
+        let (asks, problems) = read_asks(
+            &posts,
+            &answer,
+            0,
+            "C1",
+            "ME",
+            "https://w.slack.com",
+            &["o".into()],
+        )
+        .unwrap();
+        assert_eq!(asks[0]["pr_urls"], json!(["https://github.com/o/r/pull/1"]));
+        assert_eq!(
+            asks[0]["permalink"],
+            "https://w.slack.com/archives/C1/p2000000000000001?thread_ts=1999999999.000001&cid=C1"
+        );
+        assert_eq!(asks[0]["tagged_user"], true);
+        assert_eq!(problems.len(), 2);
+        let missed = read_asks(
+            &posts,
+            &json!({"asks": [], "not_asks": []}),
+            0,
+            "C1",
+            "ME",
+            "u",
+            &["o".into()],
+        );
+        assert!(missed.is_err());
+    }
+
+    #[test]
+    fn poll_items_take_requests_the_user_has_not_answered_and_tagged_asks_first() {
+        let none = json!({"totalCount": 0, "nodes": []});
+        let reviewed = json!({"totalCount": 1, "nodes": [{"author": {"login": "me"}, "state": "APPROVED", "body": "",
+            "submittedAt": "2031-01-01T00:00:00Z", "comments": {"totalCount": 0, "nodes": []}}]});
+        let now = "2031-01-02T00:00:00Z".parse().unwrap();
+        let items = poll_items(
+            "me",
+            &[pr(&["me"], none.clone()), pr(&["me"], reviewed)],
+            &[],
+            &[],
+            now,
+        )
+        .unwrap();
+        assert_eq!(items.len(), 1);
+        let ask = json!({"ts": "1.1", "permalink": "p", "tagged_user": true, "pr_urls": ["https://github.com/o/r/pull/1"], "has_eyes": true, "reason": "asked"});
+        let items = poll_items(
+            "me",
+            &[pr(&["me"], none.clone())],
+            &[ask],
+            &[pr(&[], none)],
+            now,
+        )
+        .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["source"], "slack_ask");
+        let cut = json!({"totalCount": 5, "nodes": []});
+        assert!(poll_items("me", &[pr(&["me"], cut)], &[], &[], now).is_err());
+    }
+}

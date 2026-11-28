@@ -234,16 +234,7 @@ pub fn number(value: f64) -> String {
     }
 }
 
-/// The text after the last of a review's lines that is not blank, or the whole when it is one line.
-pub fn last_line(text: &str) -> Option<&str> {
-    text.lines()
-        .rev()
-        .map(str::trim_end)
-        .find(|line| !line.trim().is_empty())
-}
-
-/// This program, bin/whooper, with links resolved, so a child it starts runs the subcommand it names
-/// rather than the one a bin/whooper-<command> link would.
+/// This program, bin/whooper, with links resolved, for the children it starts.
 pub fn me() -> std::io::Result<PathBuf> {
     fs::canonicalize(std::env::current_exe()?)
 }

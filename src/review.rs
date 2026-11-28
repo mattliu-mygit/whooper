@@ -909,3 +909,69 @@ pub fn steps() -> BTreeMap<&'static str, fn(&Path) -> Result<()>> {
         ("mutation", crate::gaps::mutation),
     ])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_replay_sees_only_what_was_readable_before_its_time() {
+        let pr = json!({"url": "u", "number": 1, "title": "t", "author": null, "body": "now",
+            "userContentEdits": {"totalCount": 2, "nodes": [{"editedAt": "2031-01-01T00:00:00Z", "diff": "first"},
+                                                             {"editedAt": "2031-01-03T00:00:00Z", "diff": "later"}]},
+            "reviews": {"totalCount": 2, "nodes": [
+                {"author": {"login": "bob"}, "state": "COMMENTED", "submittedAt": "2031-01-01T00:00:00Z", "commit": {"oid": "c"}, "body": "b",
+                 "comments": {"totalCount": 0, "nodes": []}},
+                {"author": {"login": "bob"}, "state": "APPROVED", "submittedAt": "2031-01-04T00:00:00Z", "commit": {"oid": "c"}, "body": "",
+                 "comments": {"totalCount": 0, "nodes": []}}]},
+            "comments": {"totalCount": 0, "nodes": []}});
+        let replay = conversation(&pr, Some("2031-01-02T00:00:00Z")).unwrap();
+        assert_eq!(replay["pr"]["body"], "first");
+        assert_eq!(replay["pr"]["author"], "ghost");
+        assert_eq!(replay["as_of"], "2031-01-02T00:00:00+00:00");
+        assert_eq!(replay["reviews"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            conversation(&pr, None).unwrap()["reviews"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn skill_hashes_change_only_with_a_skills_files() {
+        let one = tempfile::tempdir().unwrap();
+        let two = tempfile::tempdir().unwrap();
+        for dir in [one.path(), two.path()] {
+            fs::create_dir_all(dir.join("a/sub")).unwrap();
+            fs::write(dir.join("a/SKILL.md"), "x").unwrap();
+            fs::write(dir.join("a/sub/more.md"), "y").unwrap();
+            fs::create_dir_all(dir.join("b")).unwrap();
+            fs::write(dir.join("b/SKILL.md"), "z").unwrap();
+        }
+        assert_eq!(
+            skill_hashes(one.path()).unwrap(),
+            skill_hashes(two.path()).unwrap()
+        );
+        fs::write(two.path().join("a/sub/more.md"), "changed").unwrap();
+        let (a, b) = (
+            skill_hashes(one.path()).unwrap(),
+            skill_hashes(two.path()).unwrap(),
+        );
+        assert_ne!(a["a"], b["a"]);
+        assert_eq!(a["b"], b["b"]);
+    }
+
+    #[test]
+    fn setup_env_reads_key_value_lines() {
+        assert_eq!(
+            setup_env("A=1\n# c\nexport B='two words'\n\nC=\"x\"\n"),
+            [
+                ("A".into(), "1".into()),
+                ("B".into(), "two words".into()),
+                ("C".into(), "x".into())
+            ]
+        );
+    }
+}
