@@ -2859,24 +2859,29 @@ def joined(words, conjunction):
 # onFailure is "block" cannot start, crashes, or times out, which the summary's Slack guard needs
 # (agents/claude/summary).
 CLAUDE_CODE_LEAST = (2, 1, 295)
+# How long check_claude waits for `claude --version`, which runs before any watchdog starts.
+CLAUDE_VERSION_SECONDS = 30
 
 
 def check_claude(config):
     """Fails unless `claude --version` names Claude Code CLAUDE_CODE_LEAST or later, when a job in the config's
     [jobs] runs on claude, and leaves claude alone otherwise. The commands that run agents call it as they
-    start, through whooper.py claude-version."""
+    start, through whooper.py claude-version. claude gets no input and CLAUDE_VERSION_SECONDS to answer, so
+    one that waits, as at an update or login prompt, refuses instead of holding the round."""
     jobs = [job for job, agent in config["jobs"].items() if agent == "claude"]
     if not jobs:
         return
     try:
-        said = subprocess.run(["claude", "--version"], capture_output=True, text=True).stdout.strip()
+        said = subprocess.run(["claude", "--version"], capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                              timeout=CLAUDE_VERSION_SECONDS).stdout.strip()
+        found = f"`claude --version` says {said}" if said else "`claude --version` printed nothing"
     except FileNotFoundError:
-        said = None
+        said, found = None, "no claude command is on PATH"
+    except subprocess.TimeoutExpired:
+        said, found = "", f"`claude --version` did not answer within {CLAUDE_VERSION_SECONDS} seconds"
     version = re.match(r"([0-9]+)\.([0-9]+)\.([0-9]+)", said or "")
     if version and tuple(map(int, version.groups())) >= CLAUDE_CODE_LEAST:
         return
-    found = ("no claude command is on PATH" if said is None
-             else f"`claude --version` says {said}" if said else "`claude --version` printed nothing")
     raise SystemExit(f"whooper: [jobs] {joined(jobs, 'and')} run{'s' if len(jobs) == 1 else ''} on claude, which needs"
                      f" Claude Code {'.'.join(map(str, CLAUDE_CODE_LEAST))} or later, the first that blocks a Slack call"
                      f" when its guard hook fails, but {found}; {'install' if said is None else 'update'} Claude Code,"

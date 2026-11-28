@@ -6395,13 +6395,16 @@ class ClaudeVersionTest(unittest.TestCase):
     """whooper.py claude-version, which the commands that run agents run as they start, with a fake claude that
     answers --version, alone on PATH."""
 
-    def check(self, version=None, config=None):
-        """Runs the check with claude --version answering version, or with no claude on PATH for None, on config's
-        text, or the test config; returns the message it stops with, or None."""
+    def check(self, version=None, config=None, body=None):
+        """Runs the check with claude --version answering version, or with no claude on PATH for None, or with a
+        claude that runs body, a few lines of sh, on config's text, or the test config; returns the message it stops
+        with, or None."""
         with tempfile.TemporaryDirectory() as tmp:
             fakes = Path(tmp) / "bin"
             fakes.mkdir()
-            if version is not None:
+            if body is not None:
+                fake(fakes / "claude", body)
+            elif version is not None:
                 fake(fakes / "claude", f'[ "$1" = --version ] && echo "{version}"\necho "$*" >> "{tmp}/calls"')
             path = Path(tmp) / "config.toml"
             path.write_text(config or CONFIG)
@@ -6429,6 +6432,23 @@ class ClaudeVersionTest(unittest.TestCase):
                 fix = "install" if version is None else "update"
                 self.assertEqual(self.check(version), CLAUDE_TOO_OLD.split(" but ")[0] + f" but {said}; {fix} Claude"
                                  " Code, or move those jobs to devin\n")
+
+    def test_a_claude_that_does_not_answer_in_time_refuses_and_one_that_reads_its_input_gets_none(self):
+        # This test's input is a pipe nobody closes, as a terminal would be, so a claude that read it would wait.
+        read, write = os.pipe()
+        saved = os.dup(0)
+        os.dup2(read, 0)
+        try:
+            with mock.patch.object(whooper, "CLAUDE_VERSION_SECONDS", 2):
+                self.assertEqual(self.check(body="exec /bin/sleep 30"), CLAUDE_TOO_OLD.split(" but ")[0] + " but"
+                                 " `claude --version` did not answer within 2 seconds; update Claude Code, or move those"
+                                 " jobs to devin\n")
+                # A claude that reads its input to the end, as one waiting at a prompt would, gets an empty input.
+                self.assertIsNone(self.check(body='/bin/cat >/dev/null\necho "2.1.314 (Claude Code)"'))
+        finally:
+            os.dup2(saved, 0)
+            for fd in (saved, read, write):
+                os.close(fd)
 
     def test_the_message_names_only_the_jobs_on_claude(self):
         config = CONFIG.replace('review = "claude"', 'review = "devin"').replace('poll = "claude"', 'poll = "devin"')

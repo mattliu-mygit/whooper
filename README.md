@@ -812,10 +812,10 @@ may call only `slack_schedule_message`, and `hooks/slack-guard.sh` blocks any ot
 any other channel, a thread, a changed text or time, and a second summary; from version 2.1.295,
 Claude Code also blocks the call when the hook cannot start, crashes, or times out. So while a job
 runs on claude, whooper-round, whooper-poll, whooper-review, whooper-summary, and whooper-ask refuse
-to start when `claude --version` names an older Claude Code, or none, and say so; a round records
-that as a failed poll, `The Claude Code version check failed`. Only
-whooper-submit writes to GitHub, with the user's own login: the one review the user chose in a run's
-`drafts.json`, and an approval of a run that is not safe to approve only after the user looked and
+to start when `claude --version` names an older Claude Code, or none, or does not answer within 30
+seconds, and say so; a round records that as a failed poll, `The Claude Code version check failed`.
+Only whooper-submit writes to GitHub, with the user's own login: the one review the user chose in a
+run's `drafts.json`, and an approval of a run that is not safe to approve only after the user looked and
 passed `--approve-anyway`.
 
 ## Stop it
