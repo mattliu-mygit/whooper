@@ -75,7 +75,7 @@ import subprocess
 import sys
 import tempfile
 import threading
-from time import monotonic
+from time import monotonic, sleep
 import tomllib
 import urllib.parse
 
@@ -215,7 +215,8 @@ def read_status(data):
     and beside them the same status in Prompting Time's status format 2 (status_v2). Times are local, in
     ISO 8601 with the offset. It reads files, asks ps about the two
     lock holders, and checks that the process of each review's lock exists, and never calls GitHub,
-    Slack, or a model."""
+    Slack, or a model. It reads the two locks once neither is being made (reading_locks), so a lock
+    whose command has not yet written its pid there does not read as held by nothing."""
     def read(path):
         # Whooper renames each of these files into place, so a read gets a whole file or none.
         try:
@@ -233,10 +234,11 @@ def read_status(data):
         ps = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True)
         return pid if name in ps.stdout else None
 
-    loop, current = holder(data / "run.lock", "whooper-run"), holder(data / "round.lock", "whooper-round")
+    with reading_locks(data):
+        loop, current = holder(data / "run.lock", "whooper-run"), holder(data / "round.lock", "whooper-round")
+        record = json.loads(read(data / "round.lock" / "round.json") or "null") if current else None
     # whooper-run writes next-round before each wait and deletes it when the round is due.
     next_round = read(data / "next-round") if loop else None
-    record = json.loads(read(data / "round.lock" / "round.json") or "null") if current else None
     last = json.loads(read(data / "last-round.json") or "null")
     rounds = [json.loads(line) for line in (read(data / "rounds.jsonl") or "").splitlines()]
     reviews = read_reviews(data, datetime.now(timezone.utc))
@@ -256,6 +258,42 @@ def read_status(data):
                    for r in reversed(rounds)],
     }
     return {**status, **status_v2(status, datetime.now(timezone.utc).astimezone())}
+
+
+# reading_locks waits at most this long for the flock on <state>/locks that whooper-run, whooper-round, and
+# whooper-review hold while they make a lock or take one over, which takes them milliseconds; one stopped in that
+# moment holds it until it goes on.
+LOCKS_WAIT_SECONDS = 2
+
+
+@contextmanager
+def reading_locks(data):
+    """Holds a shared flock on data/locks for the with block, for reading run.lock and round.lock: whooper-run and
+    whooper-round hold that flock, exclusive, from before the mkdir that makes their lock until they have written its
+    pid there or refused, so under this one a lock has its pid, or lost it to a process killed while making it, which
+    is stale. Readers share the flock, so none waits for another. It waits at most LOCKS_WAIT_SECONDS, then reads
+    without it, and reads at once without data/locks, which those commands make before their first lock. The PR locks
+    need none of this: whooper-review makes a run's directory only once that run's lock holds its pid and run ID, and
+    only once that review is gone can another make the lock again, so a lock read for a run whose directory exists, as
+    running_runs's callers read them, is never one being made."""
+    try:
+        fd = os.open(data / "locks", os.O_RDONLY)
+    except FileNotFoundError:
+        fd = None
+    try:
+        deadline = monotonic() + LOCKS_WAIT_SECONDS
+        while fd is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if monotonic() > deadline:
+                    break
+                sleep(0.02)
+        yield
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
 def read_blocked(reviews):

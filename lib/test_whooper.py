@@ -4230,6 +4230,33 @@ class RunTest(unittest.TestCase):
                 # lock names the first.
                 self.assertEqual((returncode, stderr, holder), (1, f"{refusal.format(first)}\n", f"{first}\n"))
 
+    def test_status_reads_a_lock_another_command_is_making_once_it_is_made(self):
+        # whooper-run and whooper-round each stop for a second in the mkdir that makes their lock, before they write
+        # their process ID there, as if they lost the processor there, while whooper-status reads the status. Then
+        # whooper-run's first round, and whooper-round, wait in their GitHub fetch, so each holds its lock until the
+        # test stops it.
+        mkdir = shutil.which("mkdir")
+        self.script(self.fakes / "gh", "exec sleep 30")
+        for name, lock in [("whooper-run", self.lock), ("whooper-round", self.state / "round.lock")]:
+            with self.subTest(name):
+                paused = Path(self.tmp.name) / f"{name}.paused"
+                self.script(self.fakes / "mkdir", "\n".join([
+                    f'{mkdir} "$@" || exit',
+                    f'if [ "$1" = "{lock}" ] && {mkdir} "{paused}" 2>/dev/null; then',
+                    f'  touch "{paused}/stopped"',
+                    "  sleep 1",
+                    "fi",
+                ]))
+                process = self.start_command(name, env=self.env)
+                self.wait_for((paused / "stopped").exists, f"{name} to stop as it makes its lock")
+                status = self.status()
+                self.stop(process)
+                if name == "whooper-run":
+                    self.assertEqual(status["loop"], {"running": True, "pid": process.pid})
+                else:
+                    self.assertEqual((status["round"]["running"], status["round"]["reviewing"]), (True, None))
+                    self.assertIsNotNone(status["round"]["started_at"])
+
     def test_of_two_copies_that_find_the_same_stale_lock_one_takes_it_over_and_the_other_refuses(self):
         # Two copies of each command come to a lock whose process is gone. The first stops in the cat that
         # reads the lock's process ID, as if it lost the processor there, until the second has come to the
