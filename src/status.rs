@@ -965,3 +965,101 @@ pub fn show_review(state: &Path, run_id: &str) -> Result<Value> {
         "examples": after("examples.json"),
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cause(id: &str) -> Value {
+        let (_, summary, scope) = CAUSES.iter().find(|(c, ..)| *c == id).unwrap();
+        json!({"id": id, "summary": summary, "scope": scope})
+    }
+
+    #[test]
+    fn a_setup_script_that_cannot_reach_docker_stops_every_review() {
+        for output in [
+            // OrbStack with a newer docker CLI, after a warning of the script's own.
+            "! You are not logged in to FloxHub. Run 'flox auth login' to log in.\nfailed to connect to the docker API at unix:///Users/sam/.orbstack/run/docker.sock; check if the path is correct and if the daemon is running: dial unix /Users/sam/.orbstack/run/docker.sock: connect: no such file or directory\n",
+            // Docker Desktop, from docker run, and colima.
+            "docker: Cannot connect to the Docker daemon at unix:///Users/sam/.docker/run/docker.sock. Is the docker daemon running?\nRun 'docker run --help' for more information\n",
+            "Cannot connect to the Docker daemon at unix:///Users/sam/.colima/default/docker.sock. Is the docker daemon running?\n",
+        ] {
+            assert_eq!(failure_cause("setup", output), cause("docker_unavailable"));
+        }
+        assert_eq!(cause("docker_unavailable")["scope"], "all");
+    }
+
+    #[test]
+    fn any_other_setup_failure_stops_every_review_too() {
+        for output in [
+            "",
+            "make: *** [migrate] Error 1\n",
+            "docker: Error response from daemon: Conflict. The container name \"/whooper-postgres\" is already in use.\n",
+        ] {
+            assert_eq!(failure_cause("setup", output), cause("setup_failed"));
+        }
+        assert_eq!(cause("setup_failed")["scope"], "all");
+    }
+
+    #[test]
+    fn a_fetch_github_refuses_for_want_of_a_login_stops_every_review() {
+        for output in [
+            // git with gh as its credential helper, signed out, and no terminal to ask on.
+            "fatal: could not read Username for 'https://github.com': terminal prompts disabled\n",
+            "fatal: could not read Username for 'https://github.com': Device not configured\n",
+            // git with a token GitHub no longer takes.
+            "remote: Invalid username or token. Password authentication is not supported for Git operations.\nfatal: Authentication failed for 'https://github.com/example-org/example-repo.git/'\n",
+            // gh itself.
+            "To get started with GitHub CLI, please run:  gh auth login\nAlternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token.\n",
+            "HTTP 401: Bad credentials (https://api.github.com/graphql)\nTry authenticating with:  gh auth login\n",
+        ] {
+            assert_eq!(failure_cause("fetch", output), cause("gh_signed_out"));
+        }
+        assert_eq!(cause("gh_signed_out")["scope"], "all");
+    }
+
+    #[test]
+    fn any_other_fetch_failure_is_unknown() {
+        for output in [
+            "fatal: couldn't find remote ref no-such-branch\n",
+            "fatal: unable to access 'https://github.com/example-org/example-repo.git/': Could not resolve host: github.com\n",
+        ] {
+            assert_eq!(failure_cause("fetch", output), cause("unknown"));
+        }
+    }
+
+    #[test]
+    fn the_other_steps_name_their_cause_whatever_they_printed() {
+        for (step, id, scope) in [
+            ("clone", "repo_not_configured", "pr"),
+            ("time-limit", "time_limit", "pr"),
+            ("findings", "agent_no_findings", "pr"),
+            ("prepare", "unknown", "pr"),
+            ("review", "unknown", "pr"),
+            ("interrupted", "unknown", "pr"),
+            ("", "unknown", "pr"),
+        ] {
+            // Docker's and gh's messages count only for the steps that run them.
+            let got = failure_cause(step, "Cannot connect to the Docker daemon. gh auth login");
+            assert_eq!(got, cause(id), "{step}");
+            assert_eq!(got["scope"], scope);
+        }
+    }
+
+    #[test]
+    fn each_cause_has_the_summary_and_scope_the_page_shows() {
+        let all: Vec<Value> = CAUSES.iter().map(|(id, ..)| cause(id)).collect();
+        assert_eq!(
+            Value::Array(all),
+            json!([
+                {"id": "docker_unavailable", "summary": "Docker isn't running", "scope": "all"},
+                {"id": "setup_failed", "summary": "The repo's setup script failed", "scope": "all"},
+                {"id": "gh_signed_out", "summary": "gh isn't signed in to GitHub", "scope": "all"},
+                {"id": "repo_not_configured", "summary": "Whooper isn't set up for this repo", "scope": "pr"},
+                {"id": "agent_no_findings", "summary": "The review agent left no usable findings", "scope": "pr"},
+                {"id": "time_limit", "summary": "The review ran past its time limit", "scope": "pr"},
+                {"id": "unknown", "summary": "The review stopped unexpectedly", "scope": "pr"},
+            ])
+        );
+    }
+}

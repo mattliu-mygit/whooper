@@ -974,4 +974,300 @@ mod tests {
             ]
         );
     }
+
+    const T: &str = "2031-07-19T21:35:04Z";
+
+    /// A review comment as queries/conversation.graphql returns it.
+    fn gql_comment(author: &str, created: &str, body: &str, edited: Option<&str>) -> Value {
+        json!({"databaseId": 1, "author": {"login": author}, "createdAt": created, "lastEditedAt": edited,
+               "path": "services/orders/internal/api/settings.go", "originalLine": 88, "originalStartLine": null,
+               "diffHunk": "@@ -80,6 +80,9 @@", "body": body, "replyTo": null, "originalCommit": {"oid": "head1"}})
+    }
+
+    fn connection(nodes: Vec<Value>) -> Value {
+        json!({"totalCount": nodes.len(), "nodes": nodes})
+    }
+
+    fn gql_review(author: &str, state: &str, at: Option<&str>, comments: Vec<Value>) -> Value {
+        json!({"author": {"login": author}, "state": state, "submittedAt": at, "body": "",
+               "commit": {"oid": "head1"}, "comments": connection(comments)})
+    }
+
+    /// A pull request as queries/conversation.graphql returns it; comments are (author, createdAt,
+    /// lastEditedAt, body), edits (editedAt, body of that version), newest first.
+    fn gql_pr(
+        reviews: Vec<Value>,
+        comments: &[(&str, &str, Option<&str>, &str)],
+        body: &str,
+        edits: &[(&str, &str)],
+    ) -> Value {
+        json!({"url": "https://github.com/example-org/example-repo/pull/42", "number": 42,
+               "title": "feat(app): add a settings page", "body": body, "author": {"login": "dave"},
+               "userContentEdits": connection(edits.iter().map(|(t, d)| json!({"editedAt": t, "diff": d})).collect()),
+               "reviews": connection(reviews),
+               "comments": connection(comments.iter().map(|(a, c, e, b)|
+                   json!({"author": {"login": a}, "createdAt": c, "lastEditedAt": e, "body": b})).collect())})
+    }
+
+    type Summary = (Vec<(String, String, Vec<String>)>, Vec<String>);
+
+    fn summary(github: &Value) -> Summary {
+        let s = |v: &Value| v.as_str().unwrap().to_string();
+        (
+            github["reviews"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| {
+                    let bodies = r["comments"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|c| s(&c["body"]))
+                        .collect();
+                    (s(&r["author"]), s(&r["state"]), bodies)
+                })
+                .collect(),
+            github["comments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| s(&c["body"]))
+                .collect(),
+        )
+    }
+
+    fn reviewed(author: &str, state: &str, bodies: &[&str]) -> (String, String, Vec<String>) {
+        (
+            author.into(),
+            state.into(),
+            bodies.iter().map(|b| b.to_string()).collect(),
+        )
+    }
+
+    #[test]
+    fn without_a_cutoff_the_conversation_keeps_every_submitted_review_but_not_a_pending_one() {
+        let github = conversation(
+            &gql_pr(
+                vec![
+                    gql_review(
+                        "alice",
+                        "APPROVED",
+                        Some("2031-07-16T02:43:19Z"),
+                        vec![gql_comment(
+                            "alice",
+                            "2031-07-16T02:38:42Z",
+                            "rename this",
+                            None,
+                        )],
+                    ),
+                    gql_review(
+                        "sam-example",
+                        "PENDING",
+                        None,
+                        vec![gql_comment(
+                            "sam-example",
+                            "2031-07-19T21:09:55Z",
+                            "draft",
+                            None,
+                        )],
+                    ),
+                ],
+                &[],
+                "Compares rows.",
+                &[],
+            ),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            summary(&github),
+            (
+                vec![reviewed("alice", "APPROVED", &["rename this"])],
+                vec![]
+            )
+        );
+        assert_eq!(github["pr"]["body"], "Compares rows.");
+        assert!(github["as_of"].is_null());
+    }
+
+    #[test]
+    fn a_cutoff_leaves_out_the_replayed_review_and_everything_written_after_it() {
+        // The user drafted comments before the cutoff and submitted the review at it, so the comments are
+        // dated before the cutoff although nobody could read them then.
+        let pr = gql_pr(
+            vec![
+                gql_review(
+                    "alice",
+                    "APPROVED",
+                    Some("2031-07-16T02:43:19Z"),
+                    vec![
+                        gql_comment("alice", "2031-07-16T02:38:42Z", "rename this", None),
+                        gql_comment(
+                            "alice",
+                            "2031-07-16T02:40:13Z",
+                            "edited later",
+                            Some("2031-07-27T05:00:00Z"),
+                        ),
+                    ],
+                ),
+                gql_review(
+                    "sam-example",
+                    "COMMENTED",
+                    Some("2031-07-17T10:00:00Z"),
+                    vec![gql_comment(
+                        "sam-example",
+                        "2031-07-17T10:00:00Z",
+                        "an earlier point",
+                        None,
+                    )],
+                ),
+                gql_review(
+                    "sam-example",
+                    "APPROVED",
+                    Some(T),
+                    vec![gql_comment(
+                        "sam-example",
+                        "2031-07-19T21:09:55Z",
+                        "the answer",
+                        None,
+                    )],
+                ),
+                gql_review(
+                    "dave",
+                    "COMMENTED",
+                    Some("2031-07-27T05:29:47Z"),
+                    vec![gql_comment("dave", "2031-07-27T05:29:47Z", "fixed", None)],
+                ),
+            ],
+            &[
+                (
+                    "codeowners-bot",
+                    "2031-07-14T05:42:44Z",
+                    None,
+                    "code owners",
+                ),
+                (
+                    "ci-review-bot",
+                    "2031-07-08T02:13:26Z",
+                    Some("2031-07-27T15:51:22Z"),
+                    "deployment, rewritten later",
+                ),
+                ("dave", "2031-07-20T09:00:00Z", None, "after the cutoff"),
+            ],
+            "Compares rows.",
+            &[],
+        );
+        let github = conversation(&pr, Some(T)).unwrap();
+        assert_eq!(
+            summary(&github),
+            (
+                vec![
+                    reviewed("alice", "APPROVED", &["rename this"]),
+                    reviewed("sam-example", "COMMENTED", &["an earlier point"]),
+                ],
+                vec!["code owners".to_string()]
+            )
+        );
+        assert!(!github.to_string().contains("the answer"));
+        assert_eq!(github["as_of"], "2031-07-19T21:35:04+00:00");
+    }
+
+    #[test]
+    fn a_cutoff_reads_the_body_as_it_was_then() {
+        // GitHub lists body versions newest first, the first version included, once a body is edited.
+        let edits = [
+            ("2031-07-27T00:32:19Z", "v3, after the restack"),
+            ("2031-07-16T01:00:00Z", "v2"),
+            ("2031-07-08T02:03:58Z", "v1"),
+        ];
+        let pr = gql_pr(vec![], &[], "v3, after the restack", &edits);
+        assert_eq!(conversation(&pr, Some(T)).unwrap()["pr"]["body"], "v2");
+        assert_eq!(
+            conversation(&pr, None).unwrap()["pr"]["body"],
+            "v3, after the restack"
+        );
+        let never = gql_pr(vec![], &[], "never edited", &[]);
+        assert_eq!(
+            conversation(&never, Some(T)).unwrap()["pr"]["body"],
+            "never edited"
+        );
+    }
+
+    #[test]
+    fn a_conversation_list_longer_than_one_page_fails() {
+        let mut pr = gql_pr(
+            vec![gql_review(
+                "alice",
+                "APPROVED",
+                Some("2031-07-16T02:43:19Z"),
+                vec![],
+            )],
+            &[],
+            "b",
+            &[],
+        );
+        pr["reviews"]["totalCount"] = json!(101);
+        assert!(conversation(&pr, None).is_err());
+    }
+
+    #[test]
+    fn check_overview_keeps_a_fitting_overview_and_moves_any_other_aside() {
+        let run = tempfile::tempdir().unwrap();
+        let run = run.path();
+        let patch = "diff --git a/app.go b/app.go\n--- a/app.go\n+++ b/app.go\n@@ -1,1 +1,2 @@\n one\n+two\n";
+        fs::write(run.join("diff.patch"), patch).unwrap();
+        let findings = r#"{"status": "reviewed", "skip_reason": "", "findings": [], "approval": {"verdict": "look_first", "reason": "r"}}"#;
+        fs::write(run.join("findings.json"), findings).unwrap();
+        // Without overview.json it changes nothing.
+        check_overview(run).unwrap();
+        let names = || {
+            let mut n: Vec<String> = fsx::entries(run).iter().map(|p| fsx::name_of(p)).collect();
+            n.sort();
+            n
+        };
+        assert_eq!(names(), ["diff.patch", "findings.json"]);
+        let kept = json!({"summary": "s", "verdict_reason": "v", "before_after": [], "places": [],
+            "layers": [{"id": "l1", "title": "t", "intent": "i", "read_hint": "read",
+                        "ranges": [{"path": "app.go", "start_line": 1, "end_line": 2}]}],
+            "flow": null, "checked": [], "not_checked": []});
+        fs::write(run.join("overview.json"), kept.to_string()).unwrap();
+        check_overview(run).unwrap();
+        assert_eq!(
+            fs::read_to_string(run.join("overview.json")).unwrap(),
+            kept.to_string()
+        );
+        assert!(!run.join("overview.invalid.json").exists());
+        // An overview.json that breaks a rule, is not JSON, or cannot be read moves to
+        // overview.invalid.json with why and what it held; findings.json stays as it was.
+        let mut broken = kept.clone();
+        broken["layers"][0]["ranges"][0]["end_line"] = json!(3);
+        for (content, reason, held) in [
+            (
+                broken.to_string().into_bytes(),
+                "overview.layers[0].ranges[0], lines 1 to 3 of app.go, is not inside one hunk of the diff".to_string(),
+                broken.clone(),
+            ),
+            (b"\xff\xfe{}".to_vec(), "overview.json cannot be read: it is not UTF-8".to_string(), Value::Null),
+        ] {
+            fs::write(run.join("overview.json"), content).unwrap();
+            check_overview(run).unwrap();
+            assert!(!run.join("overview.json").exists());
+            assert_eq!(
+                fsx::read_json(&run.join("overview.invalid.json")).unwrap(),
+                json!({"reason": reason, "overview": held})
+            );
+            assert_eq!(fs::read_to_string(run.join("findings.json")).unwrap(), findings);
+        }
+        fs::write(run.join("overview.json"), r#"{"summary": "Pages GET"#).unwrap();
+        check_overview(run).unwrap();
+        let invalid = fsx::read_json(&run.join("overview.invalid.json")).unwrap();
+        assert_eq!(invalid["overview"], r#"{"summary": "Pages GET"#);
+        assert!(
+            invalid["reason"]
+                .as_str()
+                .unwrap()
+                .starts_with("overview.json is not JSON: ")
+        );
+    }
 }

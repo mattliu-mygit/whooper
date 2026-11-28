@@ -716,4 +716,866 @@ mod tests {
         let cut = json!({"totalCount": 5, "nodes": []});
         assert!(poll_items("me", &[pr(&["me"], cut)], &[], &[], now).is_err());
     }
+
+    // Builders after the old Python suite's: PRs as queries/pr.graphql returns them, asks as read_asks
+    // gives them, and Slack messages as slackdump dumps them.
+    const LOGIN: &str = "sam-example";
+    const NOW: &str = "2031-07-27T05:00:00Z";
+    const BOTS: [&str; 2] = ["ci-review-bot", "assistant-bot"];
+
+    fn now() -> Timestamp {
+        NOW.parse().unwrap()
+    }
+
+    fn connection(nodes: Vec<Value>) -> Value {
+        json!({"totalCount": nodes.len(), "nodes": nodes})
+    }
+
+    /// A review: (author, state, submittedAt, commit, is a thread reply).
+    type R<'a> = (&'a str, &'a str, Option<&'a str>, &'a str, bool);
+
+    struct Pr<'a> {
+        number: i64,
+        author: &'a str,
+        state: &'a str,
+        requested: Vec<Option<&'a str>>,
+        reviews: Vec<R<'a>>,
+    }
+
+    impl Default for Pr<'_> {
+        fn default() -> Self {
+            Pr {
+                number: 1,
+                author: "alice",
+                state: "OPEN",
+                requested: vec![],
+                reviews: vec![],
+            }
+        }
+    }
+
+    impl Pr<'_> {
+        fn json(&self) -> Value {
+            let requests = self
+                .requested
+                .iter()
+                .map(|r| match r {
+                    Some(login) => json!({"requestedReviewer": {"login": login}}),
+                    // A team matches no fragment in the query, so it comes back empty.
+                    None => json!({"requestedReviewer": {}}),
+                })
+                .collect();
+            let reviews = self
+                .reviews
+                .iter()
+                .map(|(author, state, at, commit, reply)| {
+                    let reply_to = if *reply {
+                        json!({"id": "PRRC_1"})
+                    } else {
+                        Value::Null
+                    };
+                    let kind = if BOTS.contains(author) { "Bot" } else { "User" };
+                    json!({"author": {"__typename": kind, "login": author}, "state": state,
+                           "submittedAt": at, "body": "", "commit": {"oid": commit},
+                           "comments": connection(vec![json!({"replyTo": reply_to})])})
+                })
+                .collect();
+            json!({"url": format!("https://github.com/example-org/example-repo/pull/{}", self.number),
+                   "number": self.number, "repository": {"nameWithOwner": "example-org/example-repo"},
+                   "state": self.state, "headRefOid": "head2", "baseRefName": "master",
+                   "author": {"login": self.author}, "reviewRequests": connection(requests),
+                   "reviews": connection(reviews), "reviewThreads": connection(vec![])})
+        }
+    }
+
+    fn requested_pr() -> Value {
+        Pr {
+            requested: vec![Some(LOGIN)],
+            ..Pr::default()
+        }
+        .json()
+    }
+
+    fn reviewed_pr(reviews: Vec<R>) -> Value {
+        Pr {
+            reviews,
+            ..Pr::default()
+        }
+        .json()
+    }
+
+    fn slack_ask(ts: &str, tagged: bool, eyes: bool, urls: &[&str]) -> Value {
+        json!({"ts": ts, "permalink": format!("https://example.slack.com/archives/C0000000001/p{}", ts.replace('.', "")),
+               "tagged_user": tagged, "pr_urls": urls, "has_eyes": eyes, "reason": "Alex asked for a review."})
+    }
+
+    const PR1: &str = "https://github.com/example-org/example-repo/pull/1";
+
+    fn ask_for(tagged: bool, eyes: bool) -> Value {
+        slack_ask("1943194837.000100", tagged, eyes, &[PR1])
+    }
+
+    fn kinds(items: &[Value]) -> Vec<(i64, String, String)> {
+        items
+            .iter()
+            .map(|i| {
+                (
+                    i["pr"].as_i64().unwrap(),
+                    i["kind"].as_str().unwrap().to_string(),
+                    i["source"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    fn one(number: i64, source: &str) -> Vec<(i64, String, String)> {
+        vec![(number, "first_review".into(), source.into())]
+    }
+
+    #[test]
+    fn a_request_by_name_before_any_review_is_a_first_review() {
+        let items = poll_items(LOGIN, &[requested_pr()], &[], &[], now()).unwrap();
+        assert_eq!(kinds(&items), one(1, "github_request"));
+        assert_eq!(items[0]["head_sha"], "head2");
+        assert_eq!(items[0]["base_ref"], "master");
+        assert!(items[0]["slack"].is_null());
+    }
+
+    #[test]
+    fn a_team_request_is_not_work() {
+        let team = Pr {
+            requested: vec![None],
+            ..Pr::default()
+        };
+        assert!(
+            poll_items(LOGIN, &[team.json()], &[], &[], now())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_pending_review_does_not_count_as_reviewed() {
+        let pr = Pr {
+            requested: vec![Some(LOGIN)],
+            reviews: vec![(LOGIN, "PENDING", None, "head2", false)],
+            ..Pr::default()
+        };
+        let items = poll_items(LOGIN, &[pr.json()], &[], &[], now()).unwrap();
+        assert_eq!(kinds(&items), one(1, "github_request"));
+    }
+
+    #[test]
+    fn a_request_by_name_after_the_users_review_makes_no_item() {
+        let pr = Pr {
+            requested: vec![Some(LOGIN)],
+            reviews: vec![(
+                LOGIN,
+                "COMMENTED",
+                Some("2031-07-27T01:02:46Z"),
+                "head1",
+                false,
+            )],
+            ..Pr::default()
+        };
+        assert!(
+            poll_items(LOGIN, &[pr.json()], &[], &[], now())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn only_a_thread_reply_is_not_a_review() {
+        // The user only replied "+1" in a thread Carol started on Bob's PR.
+        let reviews = vec![
+            (
+                "carol",
+                "COMMENTED",
+                Some("2031-07-27T01:00:00Z"),
+                "head1",
+                false,
+            ),
+            (
+                LOGIN,
+                "COMMENTED",
+                Some("2031-07-27T02:00:00Z"),
+                "head1",
+                true,
+            ),
+        ];
+        for (requested, want) in [
+            (vec![Some(LOGIN)], one(7, "github_request")),
+            (vec![], vec![]),
+        ] {
+            let pr = Pr {
+                number: 7,
+                author: "bob",
+                requested,
+                reviews: reviews.clone(),
+                ..Pr::default()
+            };
+            let items = poll_items(LOGIN, &[pr.json()], &[], &[], now()).unwrap();
+            assert_eq!(kinds(&items), want);
+        }
+    }
+
+    #[test]
+    fn a_truncated_connection_fails() {
+        let mut pr = requested_pr();
+        pr["reviews"]["totalCount"] = json!(101);
+        assert!(poll_items(LOGIN, &[pr], &[], &[], now()).is_err());
+    }
+
+    const HUMAN_REVIEW: R = (
+        "bob",
+        "COMMENTED",
+        Some("2031-07-27T01:00:00Z"),
+        "head1",
+        false,
+    );
+
+    #[test]
+    fn a_tagged_ask_is_a_first_review_with_its_post() {
+        let items = poll_items(
+            LOGIN,
+            &[],
+            &[ask_for(true, false)],
+            &[reviewed_pr(vec![])],
+            now(),
+        )
+        .unwrap();
+        assert_eq!(kinds(&items), one(1, "slack_ask"));
+        assert_eq!(
+            items[0]["slack"],
+            json!({"ts": "1943194837.000100", "tagged_user": true,
+                   "permalink": "https://example.slack.com/archives/C0000000001/p1943194837000100"})
+        );
+        assert_eq!(items[0]["reason"], "Alex asked for a review.");
+    }
+
+    #[test]
+    fn an_untagged_ask_is_work_while_no_human_is_looking() {
+        // Review bots and the PR author's own thread replies are not someone reviewing.
+        let non_human = vec![
+            (
+                "ci-review-bot",
+                "COMMENTED",
+                Some("2031-07-26T18:31:52Z"),
+                "head1",
+                false,
+            ),
+            (
+                "assistant-bot",
+                "COMMENTED",
+                Some("2031-07-26T18:40:00Z"),
+                "head1",
+                false,
+            ),
+            (
+                "alice",
+                "COMMENTED",
+                Some("2031-07-26T18:59:38Z"),
+                "head1",
+                true,
+            ),
+        ];
+        let cases: Vec<(&str, bool, Vec<R>, bool)> = vec![
+            ("nobody looking", false, vec![], true),
+            ("only bots and the author", false, non_human, true),
+            (
+                "only the user's pending review",
+                false,
+                vec![(LOGIN, "PENDING", None, "head2", false)],
+                true,
+            ),
+            ("a human put :eyes:", true, vec![], false),
+            (
+                "a human reviewed in the last 8 hours",
+                false,
+                vec![HUMAN_REVIEW],
+                false,
+            ),
+            // More than 8 hours before NOW, so the PR is fair game again.
+            (
+                "a human reviewed earlier",
+                false,
+                vec![(
+                    "bob",
+                    "COMMENTED",
+                    Some("2031-07-26T20:59:59Z"),
+                    "head1",
+                    false,
+                )],
+                true,
+            ),
+        ];
+        for (name, eyes, reviews, taken) in cases {
+            let items = poll_items(
+                LOGIN,
+                &[],
+                &[ask_for(false, eyes)],
+                &[reviewed_pr(reviews)],
+                now(),
+            )
+            .unwrap();
+            let want = if taken { one(1, "slack_ask") } else { vec![] };
+            assert_eq!(kinds(&items), want, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_tagged_ask_ignores_eyes_and_other_reviews() {
+        let items = poll_items(
+            LOGIN,
+            &[],
+            &[ask_for(true, true)],
+            &[reviewed_pr(vec![HUMAN_REVIEW])],
+            now(),
+        )
+        .unwrap();
+        assert_eq!(kinds(&items), one(1, "slack_ask"));
+    }
+
+    #[test]
+    fn an_ask_about_a_pr_the_user_already_reviewed_makes_no_item() {
+        for (tagged, state) in [(true, "COMMENTED"), (false, "APPROVED")] {
+            let reviewed = reviewed_pr(vec![(
+                LOGIN,
+                state,
+                Some("2031-07-27T01:02:46Z"),
+                "head1",
+                false,
+            )]);
+            assert!(
+                poll_items(LOGIN, &[], &[ask_for(tagged, false)], &[reviewed], now())
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn closed_merged_and_own_prs_are_dropped() {
+        for pr in [
+            Pr {
+                state: "CLOSED",
+                ..Pr::default()
+            },
+            Pr {
+                state: "MERGED",
+                ..Pr::default()
+            },
+            Pr {
+                author: LOGIN,
+                ..Pr::default()
+            },
+        ] {
+            assert!(
+                poll_items(LOGIN, &[], &[ask_for(true, false)], &[pr.json()], now())
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn an_ask_for_a_pr_without_data_is_skipped() {
+        let ask = slack_ask(
+            "1943194837.000100",
+            true,
+            false,
+            &["https://github.com/example-org/example-repo/pull/2"],
+        );
+        assert!(
+            poll_items(LOGIN, &[], &[ask], &[reviewed_pr(vec![])], now())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn one_item_per_pr_and_kind_preferring_tagged_slack_asks() {
+        let asks = [
+            slack_ask("1943194600.000001", false, false, &[PR1]),
+            slack_ask("1943194837.000100", true, false, &[PR1]),
+        ];
+        let items = poll_items(
+            LOGIN,
+            &[requested_pr()],
+            &asks,
+            &[reviewed_pr(vec![])],
+            now(),
+        )
+        .unwrap();
+        assert_eq!(kinds(&items), one(1, "slack_ask"));
+        assert_eq!(items[0]["slack"]["ts"], "1943194837.000100");
+    }
+
+    #[test]
+    fn a_request_by_name_wins_over_an_untagged_ask() {
+        // An untagged ask lets the review run skip a PR that is not small. A request by name does not.
+        let items = poll_items(
+            LOGIN,
+            &[requested_pr()],
+            &[ask_for(false, false)],
+            &[reviewed_pr(vec![])],
+            now(),
+        )
+        .unwrap();
+        assert_eq!(kinds(&items), one(1, "github_request"));
+    }
+
+    #[test]
+    fn each_linked_pr_is_its_own_item() {
+        let ask = slack_ask(
+            "1943194837.000100",
+            true,
+            false,
+            &[PR1, "https://github.com/example-org/example-repo/pull/2"],
+        );
+        let prs = [
+            Pr {
+                number: 1,
+                ..Pr::default()
+            }
+            .json(),
+            Pr {
+                number: 2,
+                ..Pr::default()
+            }
+            .json(),
+        ];
+        let items = poll_items(LOGIN, &[], &[ask], &prs, now()).unwrap();
+        let mut want = one(1, "slack_ask");
+        want.extend(one(2, "slack_ask"));
+        assert_eq!(kinds(&items), want);
+    }
+
+    const CHANNEL: &str = "C0000000001";
+    const USER: &str = "U0000000000";
+    const OLDEST: i64 = 1943117600;
+    const ASKER: &str = "U0000000001";
+    const TEAMMATE: &str = "U0000000002";
+    const POST_TS: &str = "1943194837.000100";
+    const DIGEST_TS: &str = "1943197600.000001";
+
+    fn message(ts: &str, text: &str, user: &str, reactions: &[&str]) -> Value {
+        let mut m = json!({"type": "message", "ts": ts, "user": user, "text": text});
+        if !reactions.is_empty() {
+            m["reactions"] = reactions
+                .iter()
+                .map(|n| json!({"name": n, "count": 1, "users": [TEAMMATE]}))
+                .collect();
+        }
+        m
+    }
+
+    fn with(mut m: Value, fields: Value) -> Value {
+        for (k, v) in fields.as_object().unwrap() {
+            m[k] = v.clone();
+        }
+        m
+    }
+
+    fn post() -> Value {
+        message(
+            POST_TS,
+            "<@U0000000000|Sam Reviewer> can you take a look?\n\
+             • <https://github.com/example-org/example-repo/pull/21|feat(app): add a settings page #21>\n\
+             • <http://github.com/example-org/example-repo/pull/22|#22>",
+            ASKER,
+            &["eyes"],
+        )
+    }
+
+    fn bot_digest() -> Value {
+        with(
+            message(
+                DIGEST_TS,
+                "• <https://github.com/example-org/example-repo/pull/34|#34>",
+                "U07ABCDEF12",
+                &[],
+            ),
+            json!({"bot_id": "B0000000001", "bot_profile": {"name": "pr_bot"}}),
+        )
+    }
+
+    fn posts(messages: Vec<Value>) -> Vec<Value> {
+        let messages = if messages.is_empty() {
+            vec![post()]
+        } else {
+            messages
+        };
+        slack_posts(
+            &json!({"channel_id": CHANNEL, "name": "pr-reviews", "messages": messages}),
+            OLDEST,
+        )
+    }
+
+    fn model_ask(ts: &str, urls: &[&str]) -> Value {
+        json!({"ts": ts, "pr_urls": urls, "reason": "Alex asked the user to review #21."})
+    }
+
+    fn pr21() -> Value {
+        model_ask(
+            POST_TS,
+            &["https://github.com/example-org/example-repo/pull/21"],
+        )
+    }
+
+    // Alex's post, reported as not an ask, for tests about other posts.
+    fn asker_not_ask() -> Value {
+        json!({"ts": POST_TS, "reason": "Not an ask."})
+    }
+
+    fn asks_of(
+        posts: &[Value],
+        asks: Vec<Value>,
+        not_asks: Vec<Value>,
+    ) -> std::result::Result<(Vec<Value>, Vec<String>), String> {
+        read_asks(
+            posts,
+            &json!({"asks": asks, "not_asks": not_asks}),
+            OLDEST,
+            CHANNEL,
+            USER,
+            "https://example.slack.com",
+            &["example-org".into(), "sample-org".into()],
+        )
+    }
+
+    fn urls_of(asks: &[Value]) -> Vec<Value> {
+        asks.iter().map(|a| a["pr_urls"].clone()).collect()
+    }
+
+    #[test]
+    fn slack_posts_keep_each_post_and_reply_since_oldest() {
+        let reply = with(
+            message("1943194900.000200", "<@U0000000000> also #23", ASKER, &[]),
+            json!({"thread_ts": POST_TS}),
+        );
+        let old = message(
+            "1943017600.000001",
+            "<https://github.com/example-org/example-repo/pull/9|#9>",
+            ASKER,
+            &[],
+        );
+        let malformed = message(
+            "1943194837",
+            "<https://github.com/example-org/example-repo/pull/9|#9>",
+            ASKER,
+            &[],
+        );
+        // slackdump lists the thread's post first among its replies.
+        let threaded = with(post(), json!({"slackdump_thread_replies": [post(), reply]}));
+        assert_eq!(
+            posts(vec![threaded, old, malformed]),
+            vec![
+                json!({"ts": POST_TS, "user": ASKER, "bot": false, "text": post()["text"], "reactions": ["eyes"]}),
+                json!({"ts": "1943194900.000200", "thread_ts": POST_TS, "user": ASKER, "bot": false,
+                       "text": "<@U0000000000> also #23", "reactions": []}),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_older_post_counts_again_for_a_new_reply_or_edit() {
+        let older = message(
+            "1943017600.000001",
+            "Ongoing PR stack, see the thread",
+            ASKER,
+            &[],
+        );
+        let reply = with(
+            message(
+                "1943194900.000200",
+                "<https://github.com/example-org/example-repo/pull/9|#9>",
+                ASKER,
+                &[],
+            ),
+            json!({"thread_ts": older["ts"]}),
+        );
+        let edited = with(
+            message("1943017700.000001", "EDIT: see the thread", ASKER, &[]),
+            json!({"edited": {"ts": "1943194950.000000"}}),
+        );
+        let threaded = with(
+            older.clone(),
+            json!({"slackdump_thread_replies": [older, reply]}),
+        );
+        let got: Vec<(Value, Value)> = posts(vec![threaded, edited])
+            .iter()
+            .map(|p| (p["ts"].clone(), p["thread_ts"].clone()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (json!("1943194900.000200"), json!("1943017600.000001")),
+                (json!("1943017700.000001"), Value::Null),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_shared_message_counts_as_part_of_the_post() {
+        let bump = with(
+            message(DIGEST_TS, "bump on this one", ASKER, &[]),
+            json!({"attachments": [{"from_url": "https://example.slack.com/archives/C0000000009/p1943190000000001",
+                   "text": "alex requested review on <https://github.com/example-org/example-repo/pull/60|#60>"}]}),
+        );
+        let url = "https://github.com/example-org/example-repo/pull/60";
+        let (asks, problems) = asks_of(
+            &posts(vec![bump]),
+            vec![model_ask(DIGEST_TS, &[url])],
+            vec![],
+        )
+        .unwrap();
+        assert!(problems.is_empty());
+        assert_eq!(urls_of(&asks), vec![json!([url])]);
+    }
+
+    #[test]
+    fn slack_posts_mark_what_bots_wrote() {
+        for m in [
+            bot_digest(),
+            with(
+                message(DIGEST_TS, "digest", ASKER, &[]),
+                json!({"subtype": "bot_message"}),
+            ),
+            message(DIGEST_TS, "reminder", "USLACKBOT", &[]),
+        ] {
+            assert_eq!(posts(vec![m])[0]["bot"], true);
+        }
+    }
+
+    #[test]
+    fn an_ask_gets_a_permalink_built_from_its_ts() {
+        let (asks, problems) = asks_of(&posts(vec![]), vec![pr21()], vec![]).unwrap();
+        assert!(problems.is_empty());
+        assert_eq!(
+            asks,
+            vec![json!({"ts": POST_TS,
+                "permalink": "https://example.slack.com/archives/C0000000001/p1943194837000100",
+                "tagged_user": true, "pr_urls": ["https://github.com/example-org/example-repo/pull/21"],
+                "has_eyes": true, "reason": "Alex asked the user to review #21."})]
+        );
+    }
+
+    #[test]
+    fn an_http_link_in_the_post_grounds_an_https_url() {
+        let url = "https://github.com/example-org/example-repo/pull/22";
+        let (asks, problems) =
+            asks_of(&posts(vec![]), vec![model_ask(POST_TS, &[url])], vec![]).unwrap();
+        assert!(problems.is_empty());
+        assert_eq!(asks[0]["pr_urls"], json!([url]));
+    }
+
+    #[test]
+    fn untrusted_pr_urls_are_dropped() {
+        for (url, in_post) in [
+            ("https://github.com/other-org/example-repo/pull/21", true),
+            (
+                "https://github.com/example-org/example-repo/pull/21/files",
+                true,
+            ),
+            (
+                "https://github.com/example-org/example-repo/pull/21; gh pr merge",
+                true,
+            ),
+            (
+                "https://github.com/example-org/example-repo/issues/21",
+                true,
+            ),
+            ("https://github.com/example-org/example-repo/pull/0", true),
+            // Well formed, but the post links #21, not #2.
+            ("https://github.com/example-org/example-repo/pull/2", false),
+        ] {
+            let mut p = post();
+            if in_post {
+                p["text"] = json!(format!("{}\n{url}", p["text"].as_str().unwrap()));
+            }
+            let (asks, problems) =
+                asks_of(&posts(vec![p]), vec![model_ask(POST_TS, &[url])], vec![]).unwrap();
+            assert!(asks.is_empty(), "{url}");
+            assert!(!problems.is_empty(), "{url}");
+        }
+    }
+
+    #[test]
+    fn a_pr_url_must_be_linked_by_the_post_that_asks() {
+        // The bot's digest links #34, but Alex's post does not.
+        let urls = [
+            "https://github.com/example-org/example-repo/pull/21",
+            "https://github.com/example-org/example-repo/pull/34",
+        ];
+        let (asks, problems) = asks_of(
+            &posts(vec![post(), bot_digest()]),
+            vec![model_ask(POST_TS, &urls)],
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(urls_of(&asks), vec![json!([urls[0]])]);
+        assert_eq!(
+            problems,
+            [format!("dropped PR URL '{}' from ask {POST_TS}", urls[1])]
+        );
+    }
+
+    #[test]
+    fn an_ask_must_be_one_of_the_channels_posts_since_oldest() {
+        let link = "<https://github.com/example-org/example-repo/pull/21|#21>";
+        for (ts, extra) in [
+            ("1943195599.000001", vec![]),
+            ("1943194837", vec![message("1943194837", link, ASKER, &[])]),
+            (
+                "1943017600.000001",
+                vec![message("1943017600.000001", link, ASKER, &[])],
+            ),
+        ] {
+            let mut all = vec![post()];
+            all.extend(extra);
+            let ask = model_ask(ts, &["https://github.com/example-org/example-repo/pull/21"]);
+            let (asks, problems) = asks_of(&posts(all), vec![ask], vec![asker_not_ask()]).unwrap();
+            assert!(asks.is_empty(), "{ts}");
+            assert!(!problems.is_empty(), "{ts}");
+        }
+    }
+
+    #[test]
+    fn mention_and_eyes_are_read_from_the_post() {
+        let eyes_no_mention = message(
+            "1943197600.000001",
+            "<https://github.com/example-org/example-repo/pull/50|#50>",
+            TEAMMATE,
+            &["squirrel", "eyes"],
+        );
+        let mention_no_eyes = message(
+            "1943197601.000001",
+            "<@U0000000000> <https://github.com/example-org/example-repo/pull/51|#51>",
+            ASKER,
+            &["eyes-closed"],
+        );
+        let model_asks = vec![
+            model_ask(
+                "1943197600.000001",
+                &["https://github.com/example-org/example-repo/pull/50"],
+            ),
+            model_ask(
+                "1943197601.000001",
+                &["https://github.com/example-org/example-repo/pull/51"],
+            ),
+        ];
+        let (asks, problems) = asks_of(
+            &posts(vec![post(), eyes_no_mention, mention_no_eyes]),
+            model_asks,
+            vec![asker_not_ask()],
+        )
+        .unwrap();
+        assert!(problems.is_empty());
+        let got: Vec<Value> = asks
+            .iter()
+            .map(|a| json!([a["ts"], a["tagged_user"], a["has_eyes"]]))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                json!(["1943197600.000001", false, true]),
+                json!(["1943197601.000001", true, false])
+            ]
+        );
+    }
+
+    #[test]
+    fn an_ask_from_a_bot_counts() {
+        // Such as a digest of PRs waiting for the team's review.
+        let url = "https://github.com/example-org/example-repo/pull/34";
+        let (asks, problems) = asks_of(
+            &posts(vec![post(), bot_digest()]),
+            vec![model_ask(DIGEST_TS, &[url])],
+            vec![asker_not_ask()],
+        )
+        .unwrap();
+        assert!(problems.is_empty());
+        assert_eq!(urls_of(&asks), vec![json!([url])]);
+    }
+
+    #[test]
+    fn an_ask_in_a_thread_links_to_the_reply() {
+        let reply = with(
+            message(
+                "1943194900.000200",
+                "<https://github.com/example-org/example-repo/pull/9|#9>",
+                ASKER,
+                &[],
+            ),
+            json!({"thread_ts": POST_TS}),
+        );
+        let threaded = with(post(), json!({"slackdump_thread_replies": [post(), reply]}));
+        let (asks, problems) = asks_of(
+            &posts(vec![threaded]),
+            vec![model_ask(
+                "1943194900.000200",
+                &["https://github.com/example-org/example-repo/pull/9"],
+            )],
+            vec![asker_not_ask()],
+        )
+        .unwrap();
+        assert!(problems.is_empty());
+        assert_eq!(
+            asks[0]["permalink"],
+            format!(
+                "https://example.slack.com/archives/C0000000001/p1943194900000200?thread_ts={POST_TS}&cid=C0000000001"
+            )
+        );
+    }
+
+    #[test]
+    fn every_post_that_mentions_the_user_next_to_a_pr_link_is_answered() {
+        let link =
+            "<@U0000000000|Sam Reviewer> <https://github.com/example-org/example-repo/pull/50|#50>";
+        let cases = vec![
+            ("left out", posts(vec![]), vec![], true),
+            (
+                "reported as not an ask",
+                posts(vec![]),
+                vec![asker_not_ask()],
+                false,
+            ),
+            (
+                "written by the user",
+                posts(vec![message(DIGEST_TS, link, USER, &[])]),
+                vec![],
+                false,
+            ),
+            (
+                "written by a bot and left out",
+                posts(vec![with(
+                    message(DIGEST_TS, link, ASKER, &[]),
+                    json!({"bot_id": "B0000000001"}),
+                )]),
+                vec![],
+                true,
+            ),
+            (
+                "no PR link",
+                posts(vec![message(
+                    DIGEST_TS,
+                    "<@U0000000000|Sam Reviewer> lunch?",
+                    ASKER,
+                    &[],
+                )]),
+                vec![],
+                false,
+            ),
+        ];
+        for (name, channel_posts, not_asks, fails) in cases {
+            let got = asks_of(&channel_posts, vec![], not_asks);
+            if fails {
+                assert!(got.is_err(), "{name}");
+            } else {
+                assert_eq!(got.unwrap(), (vec![], vec![]), "{name}");
+            }
+        }
+    }
 }
