@@ -822,7 +822,12 @@ passed `--approve-anyway`.
 
 Stop whooper-run with Ctrl-C, or with `kill $(cat ~/.local/state/whooper/run.lock/pid)` when a
 shell started it in the background; either way the round it is running stops too, with the round's
-review, and a round or review that the stop catches starting never starts. Interrupt any other
+review, and a round or review that the stop catches starting never starts. Each command stops what
+it started with a TERM, and sends SIGKILL to whatever of it is left 4 seconds later, such as a run
+that ignores TERM or a cleanup that hangs, with everything that started, so a stop of whooper-run
+ends its round, the review, and the review's run within about 4 seconds, before the SIGKILL Prompting
+Time sends whooper-run 5 seconds after its TERM; a review cut short so may leave its worktrees and
+lock behind, and the next review of the PR takes the lock over. Interrupt any other
 script with Ctrl-C, or stop a review with `kill $(cat ~/.local/state/whooper/locks/*/pid)`.
 An interrupted review runs the teardown script, removes its worktrees and lock, saves
 `the review was interrupted` as its `failure.txt`, and counts as a failure in its record. The

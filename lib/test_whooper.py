@@ -3767,6 +3767,12 @@ def bash_folder(bash, folder):
     return folder
 
 
+def running(pid):
+    """Whether the process pid runs: it exists and has not yet exited, as a zombie its parent has not reaped has."""
+    stat = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    return bool(stat) and not stat.startswith("Z")
+
+
 class SlackGuardTest(unittest.TestCase):
     """hooks/slack-guard.sh, fed the PreToolUse input Claude Code sends it, under each bash in BASHES."""
 
@@ -4238,6 +4244,25 @@ class RunTest(unittest.TestCase):
             config.write_text(config.read_text().replace(table, f'{table}setup = "setup.sh"\n'))
         self.script(config.parent / "setup.sh", body)
         return config.parent / "setup.sh"
+
+    def teardown_script(self, body):
+        """Names teardown.sh, which runs body, a few lines of sh, as sample-org/plain-repo's teardown script in the
+        config, as setup_script names setup.sh, and returns its path."""
+        config = Path(self.env["WHOOPER_CONFIG"])
+        table = '[repos."sample-org/plain-repo"]\n'
+        if f'{table}teardown = "teardown.sh"\n' not in config.read_text():
+            config.write_text(config.read_text().replace(table, f'{table}teardown = "teardown.sh"\n'))
+        self.script(config.parent / "teardown.sh", body)
+        return config.parent / "teardown.sh"
+
+    def kill_groups(self, pids):
+        """Sends SIGKILL to each process in pids that is still there and to its process group, for a test that leaves
+        processes behind when a stop misses them."""
+        for pid in pids:
+            with suppress(ProcessLookupError, PermissionError):
+                os.killpg(os.getpgid(pid), signal.SIGKILL)
+            with suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, signal.SIGKILL)
 
     def fake_claude(self, review):
         """Has claude run review, a line of sh, in a review run, which alone passes --json-schema, and
@@ -5646,6 +5671,75 @@ class RunTest(unittest.TestCase):
                         last = json.loads((home / "whooper" / "last-round.json").read_text())
                         self.assertEqual((last["result"], last["reviews"]),
                                          ("interrupted", [{"pr": "example-org/example-repo#12", "outcome": "interrupted"}]))
+
+    def test_a_stop_of_whooper_run_ends_its_round_review_and_run_before_prompting_times_sigkill_whatever_ignores_term(self):
+        # Prompting Time stops whooper-run with a TERM to its process group and, 5 seconds later, a SIGKILL to it. The
+        # round and the review run in process groups of their own, which neither signal reaches, so each parent's
+        # cleanup stops its child's group, and the review's cleanup stops the run's and then runs the repo's teardown
+        # script. Here either the review run ignores TERM, or the teardown script does and waits 10 minutes, a cleanup
+        # that hangs. Under bash 3.2 and 5 alike, whooper-run exits 130 on its own before the SIGKILL, and nothing of the
+        # round is left: whooper-round, whooper-review, the run, and the teardown script have all ended.
+        env, item, _ = self.pull_request()
+        head = json.loads(item.read_text())["head_sha"]
+        tmp = Path(self.tmp.name)
+        self.fake_review_requests({**pr(number=12, head=head, requested=[LOGIN]),
+                                   "repository": {"nameWithOwner": "sample-org/plain-repo"}, "baseRefName": "main",
+                                   "url": "https://github.com/sample-org/plain-repo/pull/12"})
+        # The review run, which starts in the head worktree, notes its process ID in the folder WHOOPER_TEST_PIDS names
+        # and waits, ignoring TERM when WHOOPER_TEST_RUN_IGNORES_TERM is set; the poll's run finds no asks. The teardown
+        # script notes its own and returns, or ignores TERM and waits when WHOOPER_TEST_TEARDOWN_HANGS is set.
+        poll = (self.fakes / "claude").read_text().split("\n", 1)[1]
+        self.claude_script("\n".join([
+            'case "$PWD" in */head)',
+            '  echo $$ > "$WHOOPER_TEST_PIDS/run"',
+            '  [ -z "$WHOOPER_TEST_RUN_IGNORES_TERM" ] || trap "" TERM',
+            "  exec sleep 600 ;;",
+            "esac",
+            poll,
+        ]))
+        self.teardown_script("\n".join([
+            'echo $$ > "$WHOOPER_TEST_PIDS/teardown"',
+            '[ -n "$WHOOPER_TEST_TEARDOWN_HANGS" ] || exit 0',
+            'trap "" TERM',
+            "exec sleep 600",
+        ]))
+        for case, (what, hang) in enumerate([("the run ignores TERM", {"WHOOPER_TEST_RUN_IGNORES_TERM": "1"}),
+                                             ("the teardown hangs", {"WHOOPER_TEST_TEARDOWN_HANGS": "1"})]):
+            for n, bash in enumerate(BASHES):
+                with self.subTest(what, bash=str(bash)):
+                    home, pids = tmp / f"state-{case}-{n}", tmp / f"pids-{case}-{n}"
+                    pids.mkdir()
+                    folder = bash_folder(bash, tmp / f"bash-{case}-{n}")
+                    # Its output goes to a file, which a process the stop missed cannot hold open as it can a pipe.
+                    log = tmp / f"run-{case}-{n}.log"
+                    with log.open("w") as out:
+                        loop = subprocess.Popen([str(ROOT / "bin" / "whooper-run")], stdout=out, stderr=subprocess.STDOUT,
+                                                start_new_session=True, env={
+                                                    **env, **hang, "XDG_STATE_HOME": str(home),
+                                                    "WHOOPER_TEST_PIDS": str(pids),
+                                                    "PATH": f"{folder}{os.pathsep}{env['PATH']}"})
+                    self.addCleanup(self.stop, loop)
+                    self.wait_for(lambda: (pids / "run").exists() or loop.poll() is not None, "the review run to start")
+                    state = home / "whooper"
+                    started = {"whooper-round": int((state / "run.lock" / "round.group").read_text()),
+                               "whooper-review": int((state / "locks" / "sample-org-plain-repo-12" / "pid").read_text()),
+                               "the run": int((pids / "run").read_text())}
+                    self.addCleanup(self.kill_groups, list(started.values()))
+                    os.killpg(loop.pid, signal.SIGTERM)
+                    try:
+                        loop.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(loop.pid, signal.SIGKILL)
+                        loop.wait()
+                    if (pids / "teardown").exists():
+                        started["the teardown script"] = int((pids / "teardown").read_text())
+                        self.addCleanup(self.kill_groups, [started["the teardown script"]])
+                    if hang.get("WHOOPER_TEST_TEARDOWN_HANGS"):
+                        self.assertIn("the teardown script", started)
+                    deadline = monotonic() + 3
+                    while (left := [name for name, pid in started.items() if running(pid)]) and monotonic() < deadline:
+                        sleep(0.1)
+                    self.assertEqual((loop.returncode, left), (130, []), log.read_text())
 
     def test_a_time_limit_that_passes_before_the_run_makes_its_process_group_keeps_the_run_from_starting(self):
         # A fake uv stops the lib/python that starts a review, poll, or ask run, before it has made the run's process

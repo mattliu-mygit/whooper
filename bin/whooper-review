@@ -128,13 +128,13 @@ finished=false
 # unless the trap below records that a signal stopped the review.
 stop_reason="the review stopped at an unexpected error; see whooper-review's error output"
 work="" agent_group="" agent_file="" watchdog_pid="" step_file=""
-# Stops the process group of the run or a step, which lib/whooper.py session starts, named by the file $1, where session
-# writes the group's ID once it has made the group. While the file is missing, as when this script stops the moment it
-# starts the run, this makes the file instead, and session, finding it, or no work folder for it once the cleanup removes
-# that, exits without starting the run: however the two meet, the run stops with the cleanup or never starts.
+# Stops the run or a step, which lib/whooper.py session starts in a process group of its own, named by the file $1, where
+# session writes the group's ID once it has made the group, and everything it started (lib/stop-group): a TERM, then a
+# SIGKILL to whatever is left 4 seconds later. While the file is missing, as when this script stops the moment it starts
+# the run, lib/stop-group makes the file instead, and session, finding it, or no work folder for it once the cleanup
+# removes that, exits without starting the run: however the two meet, the run stops with the cleanup or never starts.
 stop_group() {
-  if [[ -n "$1" ]] && ! (set -o noclobber; : > "$1") 2>/dev/null; then
-    kill -TERM -- "-$(cat "$1")" 2>/dev/null || true
+  if [[ -n "$1" ]] && "$root/lib/stop-group" "$1"; then
     wait "$(cat "$1")" 2>/dev/null || true
   fi
 }
@@ -179,8 +179,7 @@ cleanup() {
   if [[ "$finished" != true && -n "$failure" && ! -e "$failure" ]]; then
     save_failure "$stop_reason" || true
   fi
-  # The run and everything it started share one process group, so this also stops a server a
-  # probe left running. Each step has a group of its own too.
+  # The run, while it runs, and a step, while one runs, each with everything it started.
   stop_group "$agent_file"
   stop_group "$step_file"
   if [[ -n "$watchdog_pid" ]]; then
@@ -422,6 +421,10 @@ agent_exit=0
 wait "$agent_group" || agent_exit=$?
 kill "$watchdog_pid" 2>/dev/null || true
 watchdog_pid=""
+# As run_step does for a step, this stops whatever the run left running, such as a server a probe started, and forgets
+# agent.group, since the system may give the group's ID to another program's group once its processes have all ended.
+stop_group "$agent_file"
+agent_file=""
 
 # Only Whooper's own runs fill test_gaps.json and examples.json: the copy from before the run replaces the
 # first, whatever the run did to it, and the examples the run chose, which it wrote as examples.json, move to

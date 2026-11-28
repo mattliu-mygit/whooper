@@ -29,11 +29,11 @@ work=""
 agent_group="" agent_file=""
 watchdog_pid=""
 finished=false
-# As in whooper-review: stops the run's process group, named by the file lib/whooper.py session writes its ID in, or
-# keeps a run that has not yet made its group from starting.
+# As in whooper-review: stops the run's process group, named by the file lib/whooper.py session writes its ID in, and
+# everything the run started, with a SIGKILL to whatever is left 4 seconds after the TERM (lib/stop-group), or keeps a
+# run that has not yet made its group from starting.
 stop_group() {
-  if [[ -n "$1" ]] && ! (set -o noclobber; : > "$1") 2>/dev/null; then
-    kill -TERM -- "-$(cat "$1")" 2>/dev/null || true
+  if [[ -n "$1" ]] && "$root/lib/stop-group" "$1"; then
     wait "$(cat "$1")" 2>/dev/null || true
   fi
 }
@@ -108,6 +108,9 @@ agent_exit=0
 wait "$agent_group" || agent_exit=$?
 kill "$watchdog_pid" 2>/dev/null || true
 watchdog_pid=""
+# As in whooper-review, this stops whatever the run left running and forgets its group file at once.
+stop_group "$agent_file"
+agent_file=""
 [[ ! -e "$work/timed-out" ]] ||
   die "the $WHOOPER_POLL_AGENT poll run passed its $WHOOPER_POLL_TIMEOUT_MINUTES-minute limit; see $poll/$stamp.*"
 (( agent_exit == 0 )) || die "the $WHOOPER_POLL_AGENT poll run failed; see $poll/$stamp.*"
