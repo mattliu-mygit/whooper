@@ -817,12 +817,12 @@ passed `--approve-anyway`.
 
 ## Stop it
 
-Stop whooper-run with Ctrl-C, or with `kill -- -$(cat ~/.local/state/whooper/run.lock/pid)` when a
-shell started it in the background; either way the round it is running stops too. A `kill` of
-whooper-run's process alone waits for that round to end. Interrupt any other script with Ctrl-C,
-or stop a review with `kill $(cat ~/.local/state/whooper/locks/*/pid)`. An interrupted review runs
-the teardown script, removes its worktrees and lock, saves `the review was interrupted` as its
-`failure.txt`, and counts as a failure in its record. The
+Stop whooper-run with Ctrl-C, or with `kill $(cat ~/.local/state/whooper/run.lock/pid)` when a
+shell started it in the background; either way the round it is running stops too, with the round's
+review, and a round or review that the stop catches starting never starts. Interrupt any other
+script with Ctrl-C, or stop a review with `kill $(cat ~/.local/state/whooper/locks/*/pid)`.
+An interrupted review runs the teardown script, removes its worktrees and lock, saves
+`the review was interrupted` as its `failure.txt`, and counts as a failure in its record. The
 Slack cursor moves only after a poll writes its output, so an interrupted poll is simply repeated.
 A whooper-submit interrupted while gh posts leaves the run's `submit.json` saying `posting`, and
 whooper-submit refuses that run until you check the PR on GitHub and delete the file.

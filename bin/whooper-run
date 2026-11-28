@@ -11,8 +11,8 @@
 # round it runs. A pause does not survive a restart: whooper-run deletes <state>/paused when it
 # starts. Only one copy runs at a time: whooper-run holds the lock <state>/run.lock, with its process
 # ID in run.lock/pid, and refuses to start while another whooper-run holds it. Stop it with Ctrl-C,
-# or with kill -- -$(cat <state>/run.lock/pid) when a shell started it in the background; either way
-# the round it is running stops too.
+# or with kill $(cat <state>/run.lock/pid) when a shell started it in the background; either way
+# the round it is running stops too, with the round's review.
 #
 # No set -e: a round that fails must not end the loop, and the next round tries again.
 set -uo pipefail
@@ -36,9 +36,19 @@ save() {
 # An INT, TERM, or HUP never does: the traps come before the lock, and take makes the lock and
 # writes its pid in a subshell that ignores those signals, so one that comes meanwhile stops this
 # script only once the lock has its pid. The EXIT trap removes the lock only when its pid is this
-# process's, so a copy refused below leaves the other copy's lock.
-nap=""
-trap '[[ "$(cat "$lock/pid" 2>/dev/null)" != "$$" ]] || rm -rf "$lock"; [[ -z "$nap" ]] || kill "$nap" 2>/dev/null || true' EXIT
+# process's, so a copy refused below leaves the other copy's lock. Before that, it stops the round
+# this copy runs, or keeps one it is starting from starting (stop_group), and waits for the round to
+# end; only the copy that holds the lock starts rounds.
+nap="" round_file=""
+# As in whooper-review: stops the process group of the round, named by the file lib/whooper.py session
+# writes its ID in, or keeps a round that has not yet made its group from starting.
+stop_group() {
+  if [[ -n "$1" ]] && ! (set -o noclobber; : > "$1") 2>/dev/null; then
+    kill -TERM -- "-$(cat "$1")" 2>/dev/null || true
+    wait "$(cat "$1")" 2>/dev/null || true
+  fi
+}
+trap 'stop_group "$round_file"; [[ "$(cat "$lock/pid" 2>/dev/null)" != "$$" ]] || rm -rf "$lock"; [[ -z "$nap" ]] || kill "$nap" 2>/dev/null || true' EXIT
 trap 'exit 130' INT TERM HUP
 take() { (trap '' INT TERM HUP; mkdir "$lock" 2>/dev/null && save "$lock/pid" echo "$$"); }
 # take makes the lock a moment before it writes the pid there, and two copies can find the same
@@ -97,9 +107,15 @@ while true; do
     "$root/lib/python" "$root/lib/whooper.py" add-round "$WHOOPER_STATE" "$(jq -cn --argjson started "$(date +%s)" \
       '{started_at: $started, ended_at: null, result: "skipped", selected: 0, reason: "Whooper is paused"}')"
   else
-    # In the foreground, so Ctrl-C and kill -- -<pid> reach the round too. A TERM sent to this
-    # process alone takes effect only once the round ends, since bash runs a trap between commands.
-    "$root/bin/whooper-round"
+    # The round starts in a session of its own (lib/whooper.py session), as whooper-review starts
+    # its run, and this waits for it in the background, so an INT, TERM, or HUP reaches the traps
+    # at once, even one sent to this process alone, and the EXIT trap stops the round through
+    # round.group in the lock (stop_group). A Ctrl-C or kill -- -<pid> that lands while this forks
+    # the round can miss the round, which then ran to its end before the loop stopped.
+    round_file="$lock/round.group"
+    "$root/lib/python" "$root/lib/whooper.py" session "$round_file" "$root/bin/whooper-round" &
+    wait "$!"
+    rm -f "$round_file"
   fi
   ended="$(date +%s)"
 done

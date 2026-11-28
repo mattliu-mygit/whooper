@@ -4072,9 +4072,14 @@ class RunTest(unittest.TestCase):
 
     def gh_waits(self):
         """Has gh stand in for a GitHub fetch that lasts until the test stops it, so a command that comes to it after
-        taking its lock holds the lock until then: gh notes that it started, in gh-<its process group> in the test's
-        folder, and waits (stop_in_gh)."""
-        self.script(self.fakes / "gh", f'touch "{self.tmp.name}/gh-$(ps -o pgid= -p $$ | tr -d " ")"\nexec sleep 600')
+        taking its lock holds the lock until then: gh notes that it started, in gh-<process ID> in the test's folder for
+        itself and each process it descends from, and waits (stop_in_gh). whooper-run's round runs in a process group of
+        its own, so whooper-run is the round's parent but not in its group."""
+        self.script(self.fakes / "gh", "\n".join([
+            "pid=$$",
+            f'while [ "$pid" -gt 1 ]; do touch "{self.tmp.name}/gh-$pid"; pid="$(ps -o ppid= -p "$pid" | tr -d " ")"; done',
+            "exec sleep 600",
+        ]))
 
     def stop_in_gh(self, process):
         """Stops process, a command started in a process group of its own, once it waits in gh (gh_waits), or has
@@ -5561,6 +5566,60 @@ class RunTest(unittest.TestCase):
                     (paused / "go").touch()
                     self.wait_for(lambda: not alive(starter), "the process that starts the run to end")
                     self.assertEqual((exited, ran.exists()), (130, False), command.communicate()[1])
+
+    def test_a_stop_that_misses_the_review_or_round_being_started_stops_it_and_its_parent_at_once(self):
+        # A Ctrl-C or kill -- -<pid> that lands while whooper-round forks whooper-review, or whooper-run forks
+        # whooper-round, reaches the parent but can miss the child being forked, and the parent then stopped only once
+        # that child had run to its end: a whole review, or a whole round. A fake uv stops the child's first lib/python
+        # as it starts, and the test meanwhile sends TERM to the parent alone, standing in for the stop the child
+        # missed. The child goes on only once the parent has exited, or after 30 seconds. Under bash 3.2 and 5 alike,
+        # the parent exits 130 at once, and the child never runs: after the pause, the child itself, whooper-review or
+        # whooper-round, starts no lib/python of its own, which the fake uv notes in ran.
+        self.fake_one_review_request()
+        uv, tmp = shutil.which("uv"), Path(self.tmp.name)
+
+        def alive(pid):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return False
+            return True
+
+        # (the parent, and what the command line of the child, or of the lib/python that starts it, names)
+        for case, (name, child) in enumerate([("whooper-round", "/bin/whooper-review "), ("whooper-run", "/bin/whooper-round")]):
+            for n, bash in enumerate(BASHES):
+                with self.subTest(name, bash=str(bash)):
+                    paused, ran, home = tmp / f"paused-{case}-{n}", tmp / f"ran-{case}-{n}", tmp / f"state-{case}-{n}"
+                    # The fake uv's parent is a lib/python, and the lib/python's parent the script that runs it.
+                    self.script(self.fakes / "uv", "\n".join([
+                        'parent="$(ps -ww -o command= -p "$PPID")"',
+                        'script="$(ps -ww -o command= -p "$(ps -o ppid= -p "$PPID" | tr -d " ")")"',
+                        f'case "$parent $script" in *"{child}"*)',
+                        f'  if mkdir "{paused}" 2>/dev/null; then',
+                        f'    echo "$PPID" > "{paused}/pid.tmp" && mv "{paused}/pid.tmp" "{paused}/pid"',
+                        f'    until [ -e "{paused}/go" ]; do sleep 0.1; done',
+                        f'  else case "$script" in *"{child}"*) touch "{ran}" ;; esac; fi ;;',
+                        "esac",
+                        f'exec "{uv}" "$@"',
+                    ]))
+                    folder = bash_folder(bash, tmp / f"bash-{case}-{n}")
+                    command = self.start_command(name, env={**self.env, "XDG_STATE_HOME": str(home),
+                                                            "PATH": f"{folder}{os.pathsep}{self.env['PATH']}"})
+                    self.wait_for(lambda: (paused / "pid").exists() or command.poll() is not None,
+                                  f"{name} to start {child.strip()}")
+                    starter = int((paused / "pid").read_text())
+                    os.kill(command.pid, signal.SIGTERM)
+                    with suppress(subprocess.TimeoutExpired):
+                        command.wait(timeout=30)
+                    exited = command.returncode
+                    (paused / "go").touch()
+                    self.wait_for(lambda: not alive(starter), "the process that starts the child to end")
+                    self.assertEqual((exited, ran.exists()), (130, False), command.communicate()[1])
+                    if name == "whooper-round":
+                        # The round, which stopped the review before it started, lists it as interrupted.
+                        last = json.loads((home / "whooper" / "last-round.json").read_text())
+                        self.assertEqual((last["result"], last["reviews"]),
+                                         ("interrupted", [{"pr": "example-org/example-repo#12", "outcome": "interrupted"}]))
 
     def test_skipping_a_review_a_round_runs_stops_it_quietly_and_holds_back_its_pr_until_undone(self):
         env, item, _ = self.pull_request()

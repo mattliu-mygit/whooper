@@ -43,13 +43,25 @@ notify() {
   fi
 }
 
+# As in whooper-review: stops the process group of the review this round runs, named by the file lib/whooper.py
+# session writes its ID in, or keeps a review that has not yet made its group from starting.
+stop_group() {
+  if [[ -n "$1" ]] && ! (set -o noclobber; : > "$1") 2>/dev/null; then
+    kill -TERM -- "-$(cat "$1")" 2>/dev/null || true
+    wait "$(cat "$1")" 2>/dev/null || true
+  fi
+}
+
 # However the round ends, round.json becomes last-round.json with the time and result, and a review
-# still running is listed as interrupted. The history gets the round with the reason it ended so, or
-# null, and 0 selected for a round that ended before it selected. Only the round whose process ID
-# the lock holds does this: one refused the lock below, or stopped before it took it, leaves the
-# lock and both files alone.
-result=interrupted reason=""
+# still running is listed as interrupted, once it has stopped: finish first stops the review the
+# round runs, or keeps one it is starting from starting (stop_group). The history gets the round
+# with the reason it ended so, or null, and 0 selected for a round that ended before it selected.
+# Only the round whose process ID the lock holds does this: one refused the lock below, or stopped
+# before it took it, leaves the lock and both files alone.
+result=interrupted reason="" work="" review_file=""
 finish() {
+  stop_group "$review_file"
+  rm -rf "$work"
   [[ "$(cat "$lock/pid" 2>/dev/null)" == "$$" ]] || return
   save "$WHOOPER_STATE/last-round.json" jq --argjson ended "$(date +%s)" --arg result "$result" \
     '{started_at, ended_at: $ended, result: $result, selected,
@@ -61,6 +73,9 @@ finish() {
 }
 trap finish EXIT
 trap 'exit 130' INT TERM HUP
+# As in whooper-review, the work folder comes after the traps, from a mktemp that ignores INT, TERM,
+# and HUP, so no signal leaves it behind.
+work="$(trap '' INT TERM HUP; mktemp -d)"
 
 # The same lock rule as whooper-run's: mkdir is atomic, so of two rounds started at once only one
 # gets the lock, and a lock whose process is gone, or is now some other program, is stale and this
@@ -119,7 +134,19 @@ while IFS= read -r item <&3; do
   fi
   echo "--- review $pr $(jq -r .kind <<<"$item")"
   save "$record" jq --arg pr "$pr" '.reviewing = $pr' "$record"
-  if run="$("$root/bin/whooper-review" "$file" --dry-run < /dev/null)"; then
+  # The review starts in a session of its own (lib/whooper.py session), as whooper-review starts its
+  # run, and the round waits for it in the background, so an INT, TERM, or HUP reaches finish at
+  # once, and finish stops the review through review.group in the work folder (stop_group). A Ctrl-C
+  # or kill -- -<pid> that lands while the round forks the review can miss the review, which then
+  # ran to its end before the round stopped. The review prints its run directory to run.txt there.
+  review_file="$work/review.group"
+  "$root/lib/python" "$root/lib/whooper.py" session "$review_file" "$root/bin/whooper-review" "$file" --dry-run \
+    < /dev/null > "$work/run.txt" &
+  review_exit=0
+  wait "$!" || review_exit=$?
+  rm -f "$review_file"
+  run="$(cat "$work/run.txt")"
+  if ((review_exit == 0)); then
     "$root/bin/whooper-classify" "$run" < /dev/null
     "$root/bin/whooper-post" "$(basename "$run")" --print < /dev/null
     "$root/bin/whooper-summary" "$(basename "$run")" < /dev/null
