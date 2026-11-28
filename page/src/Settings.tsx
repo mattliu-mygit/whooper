@@ -1,6 +1,6 @@
 import { createMemo, createSignal, createUniqueId, For, onSettled, Show } from "solid-js";
-import { Button, Checkbox, NumberField, Select, Textarea, TextField } from "@prompting-time/ui";
-import { changedSettings, FIELDS, fieldKey, formValue, problems, valueAt, type FormValue, type LeafField, type SettingField, type Settings } from "./settingsForm";
+import { Button, Checkbox, fieldKey, formValue, NumberField, Select, Textarea, TextField, valueAt, type FormValue, type LeafField, type SettingField } from "@prompting-time/ui";
+import { FIELDS, problems, toSave, type Settings } from "./settingsForm";
 import type { PageStore } from "./store";
 import { TabHeader } from "./TabHeader";
 
@@ -48,7 +48,7 @@ export function SettingsTab(props: { store: PageStore }) {
 
   const value = (field: LeafField) => draft()[fieldKey(field)] ?? formValue(field, valueAt(saved(), field.path));
   const errors = createMemo(() => (saved() ? problems(saved()!, value) : {}));
-  const changes = createMemo(() => (saved() ? changedSettings(saved()!, draft()) : {}));
+  const changes = createMemo(() => (saved() ? toSave(saved()!, draft()) : {}));
   const dirty = () => Object.keys(changes()).length > 0;
   const refused = () => Object.keys(errors()).length > 0;
 
@@ -154,7 +154,7 @@ export function SettingsTab(props: { store: PageStore }) {
 function FieldView(props: { field: SettingField; value: (field: LeafField) => FormValue; errors: Record<string, string>; onChange(field: LeafField, value: FormValue): void; disabled: boolean }) {
   const field = props.field;
   const hint = field.description ?? undefined;
-  const error = () => props.errors[fieldKey(field)];
+  const error = () => (field.kind === "group" ? undefined : props.errors[fieldKey(field)]);
   switch (field.kind) {
     case "group":
       return (
@@ -187,12 +187,10 @@ function FieldView(props: { field: SettingField; value: (field: LeafField) => Fo
       );
     case "choice": {
       // An unset choice shows as unset rather than as the first option, which would read as chosen.
-      // The options change only with that, since new option elements would lose the select's choice.
-      const unset = createMemo(() => props.value(field) === "");
-      const options = createMemo(() => [
-        ...(unset() ? [{ value: "", label: "Not set" }] : []),
+      const options = () => [
+        ...(props.value(field) === "" ? [{ value: "", label: "Not set" }] : []),
         ...field.options.map((option) => ({ value: option, label: optionLabel(option) })),
-      ]);
+      ];
       return (
         <Select label={field.title} hint={hint} error={error()} options={options()} value={props.value(field) as string} disabled={props.disabled} onChange={(event) => props.onChange(field, event.currentTarget.value)} />
       );

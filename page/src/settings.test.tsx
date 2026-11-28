@@ -1,6 +1,7 @@
 import { fireEvent as dom, screen, waitFor, within } from "@testing-library/dom";
 import { flush } from "solid-js";
 import { describe, expect, it } from "vitest";
+import * as fixtures from "./fixtures";
 import { appliesWhen } from "./Settings";
 import { renderWithFakeHost } from "./test/connect";
 
@@ -15,8 +16,8 @@ const field = (name: string | RegExp, group?: string) =>
   (group ? within(screen.getByRole("group", { name: group })) : screen).getByLabelText(name) as HTMLInputElement;
 const save = () => screen.getByRole("button", { name: "Save" });
 
-async function openSettings() {
-  const host = renderWithFakeHost({ openOnReady: "/" });
+async function openSettings(settings?: Record<string, unknown>) {
+  const host = renderWithFakeHost({ openOnReady: "/", settings });
   await screen.findByRole("list", { name: "Reviews" });
   fireEvent.click(within(screen.getByRole("navigation", { name: "Whooper" })).getByRole("button", { name: "Settings" }));
   expect(await screen.findByRole("heading", { name: "Settings" })).toBeInTheDocument();
@@ -83,6 +84,23 @@ describe("the Settings tab", () => {
     expect(field("Poll every")).toHaveValue(30);
     expect(field("Review agent")).toHaveValue("devin");
     expect(save()).toBeDisabled();
+  });
+
+  it("keeps each choice shown as edits redraw its options, and drops Not set once a choice is made", async () => {
+    const settings = fixtures.settings();
+    settings.jobs = { review: "devin", poll: "claude" };
+    await openSettings(settings);
+    const options = (name: string) => [...field(name).querySelectorAll("option")].map((option) => option.textContent);
+    expect(field("Review agent")).toHaveValue("devin");
+    expect(field("Summary agent")).toHaveValue("");
+    expect(options("Summary agent")).toEqual(["Not set", "Claude", "Devin"]);
+    fireEvent.input(field("Poll every"), "30");
+    expect(field("Review agent")).toHaveValue("devin");
+    expect(field("Summary agent")).toHaveValue("");
+    fireEvent.change(field("Summary agent"), { target: { value: "devin" } });
+    expect(options("Summary agent")).toEqual(["Claude", "Devin"]);
+    expect(field("Summary agent")).toHaveValue("devin");
+    expect(field("Review agent")).toHaveValue("devin");
   });
 
   it("reverts unsaved changes", async () => {

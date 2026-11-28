@@ -458,8 +458,9 @@ Time's All work folds while a plugin shows: » and "Whooper · 2 waiting on you"
 when nothing waits on you, turned 90°, so only the walkthrough's own navigator stays beside the
 review. A click on the rail unfolds the tabs with the review still open, « at their top folds them
 again, and Back to the list, like any list, shows them; each review opens with them folded. Settings, at `/settings`, edits the settings `schemas/settings.json`
-describes, read with the `get-settings` action and saved with `save-settings`, the same two
-Prompting Time's settings form runs, so both edit the same lines of `config.toml` and Prompting
+describes, drawn with the settings-form logic `@prompting-time/ui` exports for Prompting Time's own
+form, read with the `get-settings` action and saved with `save-settings`, the same two Prompting
+Time's settings form runs, so both edit the same lines of `config.toml` and Prompting
 Time's check for each agent's CLI follows the saved `[jobs]`. Each field says why its value would be
 refused as you type: what the schema says, start and end as 24-hour times with the end after the
 start, at least one day, and a value for a setting the config has, since whooper-settings can't take
@@ -528,7 +529,7 @@ any route, such as `/past`, `/settings`, or `/causes/docker_unavailable`.
 The page installs `@prompting-time/ui` from its built tarball, `prompting-time-ui-0.1.0.tgz`, which
 Prompting Time's `scripts/pack-ui.sh` writes. Until Prompting Time attaches that tarball to a GitHub
 release, the page installs it from a Prompting Time checkout beside this one,
-`../../repos/prompting-time-layout/packages/ui/prompting-time-ui-0.1.0.tgz` from `page/`; it then
+`../../repos/prompting-time-followups/packages/ui/prompting-time-ui-0.1.0.tgz` from `page/`; it then
 switches to the release's URL. Either way `package-lock.json` pins the tarball's sha512, so `npm ci`
 refuses a different build. The tarball bundles everything but Solid, which the page supplies; the
 page also installs `@pierre/diffs`, at the tarball's version, only for the types of `Diff`'s props.

@@ -22,6 +22,8 @@ export interface FakeHostOptions {
   /** Top-level fields of what show-review prints, by run ID, that replace the fixture's, as a test's
    * variation of a review, such as one without connections. */
   shown?: Record<string, Partial<Shown>>;
+  /** What whooper-settings get prints, in place of the fixture's settings. */
+  settings?: Record<string, unknown>;
 }
 
 /** The actions prompting-time-plugin.json declares. */
@@ -136,7 +138,7 @@ export function createFakeHost(send: (message: HostMessage) => void, options: Fa
   const skipped = new Set<string>();
   const removed = new Set<string>();
   let paused = false;
-  let settings = fixtures.settings();
+  let settings = options.settings ?? fixtures.settings();
   /** The exit code of each submit whooper-submit --print refused, in order. */
   const refusals: number[] = [];
   /** Every message the page sent that fits the protocol, in order. */
