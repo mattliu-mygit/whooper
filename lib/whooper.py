@@ -538,22 +538,32 @@ def parse_run_id(run_id):
     return started.replace(tzinfo=timezone.utc), int(m[2])
 
 
+def lock_holder(lock):
+    """The process ID in the pid of lock, a PR's lock under <state>/locks, while the command of that process names
+    whooper-review, as whooper-review's own takeover checks, or else None. A lock whose process is gone, as after a
+    kill -9, is stale, and so is one whose process ID the system gave to another program since; a lock that is missing
+    or has no pid has no holder either."""
+    try:
+        pid = int((lock / "pid").read_text())
+    except (OSError, ValueError):
+        return None
+    # ps prints nothing for a process that is gone.
+    command = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout
+    return pid if "whooper-review" in command else None
+
+
 def running_runs(data):
     """The IDs of the review runs that a live whooper-review still runs, each with the process ID its
-    lock names, by whooper-ask's rule: the PR's lock under data/locks names the run in run_id, and the
-    command of the process in its pid names whooper-review, as whooper-review's own takeover checks. A
-    lock whose process is gone, as after a kill -9, is stale, and so is one whose process ID the system
-    gave to another program since. The locks are read for the runs they name, so a review counts as
+    lock names, by whooper-ask's rule: the PR's lock under data/locks names the run in run_id, and a live
+    whooper-review holds it (lock_holder). The locks are read for the runs they name, so a review counts as
     running before it writes run.json, which names its PR and so its lock."""
     running = {}
     for lock in (data / "locks").glob("*"):
         try:
-            pid, run_id = int((lock / "pid").read_text()), (lock / "run_id").read_text().strip()
-        except (OSError, ValueError):
+            run_id = (lock / "run_id").read_text().strip()
+        except OSError:
             continue
-        # ps prints nothing for a process that is gone.
-        command = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout
-        if "whooper-review" in command:
+        if pid := lock_holder(lock):
             running[run_id] = pid
     return running
 
@@ -3217,18 +3227,23 @@ def work_item(pr, kind, source, reason, slack=None):
     }
 
 
-def select_work(items, prs_dir, now, repos, rechecks=(), runs_dir=None, closed=None):
+def select_work(items, prs_dir, now, repos, rechecks=(), runs_dir=None, closed=None, locks_dir=None):
     """Splits work items into work to start and (item, reason) for items already handled or
     unreviewable, and returns the recheck-list items that no longer wait, for the caller to delete.
 
     items are the newest poll's, and rechecks the recheck list's (mark_new_commits). prs_dir holds the
-    records write_record writes, runs_dir the review runs, and repos is the config's [repos] table. A
-    re-check is dropped, and leaves the recheck list, since whooper-review reviews first reviews only and
-    would fail it every round. An item is dropped when repos has no table for its repo, since a review
-    needs the repo's settings, or when its record is running or done or has failed MAX_FAILURES times. A
-    record that cannot be read counts as none, and the review writes it again when it starts. A record
-    that says retry, which whooper-retry writes when the user asks for another review (retry), lets its
-    item through whatever earlier reviews at its head did, and the daily limit does not hold it either.
+    records write_record writes, runs_dir the review runs, locks_dir the PRs' locks, which whooper-review
+    takes, and repos is the config's [repos] table. A re-check is dropped, and leaves the recheck list,
+    since whooper-review reviews first reviews only and would fail it every round. An item is dropped when
+    repos has no table for its repo, since a review needs the repo's settings, or when its record is done
+    or has failed MAX_FAILURES times, or is running while a live whooper-review holds the PR's lock
+    (lock_holder). A record that says running while none does is that of a review that ended without
+    writing how, as when a SIGKILL cut its cleanup short or its round stopped between whooper-review and
+    whooper-classify: this writes it failed, with one more failure, as an interrupted review's cleanup
+    does, so the item is work again until its head has failed MAX_FAILURES times. A record that cannot be
+    read counts as none, and the review writes it again when it starts. A record that says retry, which
+    whooper-retry writes when the user asks for another review (retry), lets its item through whatever
+    earlier reviews at its head did, and the daily limit does not hold it either.
 
     Whooper does not retry on its own a review the user removed (remove_review): while the newest run
     of an item's PR in runs_dir is marked removed, an item that asks for the same review again
@@ -3257,6 +3272,13 @@ def select_work(items, prs_dir, now, repos, rechecks=(), runs_dir=None, closed=N
         path = record_path(prs_dir, item)
         pr_dir = path.parent
         record = read_object(path)
+        # A review takes the PR's lock, named as the PR's folder of records, before it writes running, so a running
+        # record whose lock no live review holds is that of a review that ended without writing how. The write below
+        # replaces a live review's record only if a review run by hand wrote running since the check; no round starts a
+        # review while it selects.
+        if record and record["status"] == "running" and not (locks_dir and lock_holder(locks_dir / pr_dir.name)):
+            write_record(prs_dir, item, "failed", now)
+            record = read_object(path)
         reason = None
         if item["kind"] != "first_review":
             reason = "whooper-review does not re-check a PR yet"
@@ -4222,7 +4244,8 @@ def main(command, *args):
         with folder_lock(recheck_list):
             rechecks = [load(path) for path in sorted(recheck_list.glob("*.json"))]
             work, drops, finished = select_work(load(newest)["items"], data / "prs", datetime.now().astimezone(),
-                                                load_config().get("repos", {}), rechecks, data / "runs", closed)
+                                                load_config().get("repos", {}), rechecks, data / "runs", closed,
+                                                data / "locks")
             for item, reason in drops:
                 print(f"whooper-select: dropped {item['repo']}#{item['pr']} {item['kind']}: {reason}", file=sys.stderr)
             for item in finished:

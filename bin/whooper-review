@@ -42,9 +42,9 @@
 # on as it would without its file. bin/whooper-classify <run dir> then applies rule v1 to its findings.
 #
 # While it runs, this script holds the PR's lock, <state>/locks/<owner>-<repo>-<pr>/, with its
-# process ID in pid and the run ID in run_id. On exit, finished or not, the repo's teardown script
-# runs, the worktrees and PR lock go away, and a run that did not finish counts as a failure in its
-# <state>/prs record. Once the run directory exists, a review that does not finish leaves why there
+# process ID in pid and the run ID in run_id. On exit, a run that did not finish first counts as a
+# failure in its <state>/prs record; then, finished or not, the repo's teardown script runs, and the
+# worktrees and PR lock go away. Once the run directory exists, a review that does not finish leaves why there
 # as failure.txt: the reason this script prints when it stops the review, such as at the time limit,
 # or else "the review was interrupted" after a signal such as Ctrl-C, or a line about an unexpected
 # error after a command that failed. Beside it, failure.json holds the cause, {id, summary, scope},
@@ -181,10 +181,13 @@ cleanup() {
     rm -rf "$work"
     exit "$status"
   fi
-  # This comes before the rest, so the reason is saved even when the cleanup is cut short, as by the
-  # SIGKILL the round sends 4 seconds after its TERM (stop_group).
-  if [[ "$finished" != true && -n "$failure" && ! -e "$failure" ]]; then
-    save_failure "$stop_reason" || true
+  # These come before the rest, so the reason is saved, and the record counts the failure, even when the
+  # cleanup is cut short, as by the SIGKILL the round sends 4 seconds after its TERM (stop_group).
+  if [[ "$finished" != true ]]; then
+    if [[ -n "$failure" && ! -e "$failure" ]]; then
+      save_failure "$stop_reason" || true
+    fi
+    "$root/lib/python" "$root/lib/whooper.py" record "$data" "$item" failed || true
   fi
   # The run, while it runs, a step, and the setup script, while one runs, each with everything it started.
   stop_group "$agent_file"
@@ -212,9 +215,6 @@ cleanup() {
     git -C "$core" update-ref -d "refs/whooper/$run_id/$tree" 2>/dev/null || true
   done
   rm -rf "$work" "$run/tmp"
-  if [[ "$finished" != true ]]; then
-    "$root/lib/python" "$root/lib/whooper.py" record "$data" "$item" failed || true
-  fi
   rm -rf "$lock"
   exit "$status"
 }

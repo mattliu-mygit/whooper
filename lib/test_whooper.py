@@ -654,7 +654,8 @@ class SelectWorkTest(unittest.TestCase):
         cases = [
             # (status, failures, selected)
             ("done", 0, False),
-            ("running", 0, False),
+            # No live whooper-review holds the PR's lock, so the review that wrote it is gone.
+            ("running", 0, True),
             ("failed", 2, True),
             ("failed", 3, False),
             ("stale", 0, True),
@@ -663,6 +664,39 @@ class SelectWorkTest(unittest.TestCase):
             with self.subTest(f"{status} {failures}"):
                 self.record("head3.first_review.json", status, failures)
                 self.assertEqual(self.selected(work_item()), want)
+
+    def test_a_running_record_whose_review_is_gone_counts_as_a_failure(self):
+        # whooper-review writes running as it starts and failed once it stops without findings, and whooper-classify
+        # writes done. A review whose cleanup a SIGKILL cut short, or whose round stopped between whooper-review and
+        # whooper-classify, left its record running, and whooper-select dropped the head as running for good. While no
+        # live whooper-review holds the PR's lock, such a record counts as failed, with one more failure, as an
+        # interrupted review's does, and the item is work again. Here the lock is missing, as after a round stopped
+        # before whooper-classify, names a process that is gone, as after a SIGKILL, or names a process ID the system
+        # gave to another program since.
+        locks = self.prs.parent / "locks"
+        lock = locks / "example-org-example-repo-12"
+        gone = subprocess.Popen(["true"])
+        gone.wait()
+        other = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(lambda: (other.kill(), other.wait()))
+        path = self.prs / "example-org-example-repo-12" / "head3.first_review.json"
+        for name, holder in [("no lock", None), ("a process that is gone", gone.pid), ("another program", other.pid)]:
+            with self.subTest(name):
+                shutil.rmtree(lock, ignore_errors=True)
+                if holder:
+                    lock.mkdir(parents=True)
+                    (lock / "pid").write_text(f"{holder}\n")
+                self.record("head3.first_review.json", "running", failures=1)
+                self.assertEqual(select_work([work_item()], self.prs, self.now, REPOS, locks_dir=locks),
+                                 ([work_item()], [], []))
+                self.assertEqual(json.loads(path.read_text()),
+                                 {"status": "failed", "failures": 2, "started_at": "2031-08-01T16:00:00Z"})
+        # The failure counts toward the limit as any other: the head's third failure drops the item and takes it off the
+        # recheck list.
+        listed = self.listed_again()
+        self.record("head3.first_review.json", "running", failures=2)
+        self.assertEqual(select_work([], self.prs, self.now, REPOS, [listed], locks_dir=locks),
+                         ([], [(listed, "failed 3 times at this head")], [listed]))
 
     def test_record_for_another_head_or_kind_does_not_match(self):
         self.record("head2.first_review.json", "done")
@@ -743,7 +777,8 @@ class SelectWorkTest(unittest.TestCase):
         cases = [
             # (the record at its head as (status, failures), selected, finished)
             (None, True, False),
-            (("running", 0), False, False),
+            # No live whooper-review holds the PR's lock, so the review that wrote it is gone.
+            (("running", 0), True, False),
             (("failed", 2), True, False),
             (("failed", 3), False, True),
             (("done", 0), False, True),
@@ -5596,8 +5631,12 @@ class RunTest(unittest.TestCase):
     def test_an_interrupted_review_saves_that_it_was_interrupted(self):
         env, item, _ = self.pull_request()
         agent_pid = Path(self.tmp.name) / "agent.pid"
-        # The review run notes its process ID and waits.
+        # The review run notes its process ID and waits, and the teardown script copies the PR's record as it finds it.
         self.fake_claude(review=f"echo $$ > '{agent_pid}'; exec sleep 30")
+        head = json.loads(item.read_text())["head_sha"]
+        record = self.state / "prs" / "sample-org-plain-repo-12" / f"{head}.first_review.json"
+        at_teardown = Path(self.tmp.name) / "record-at-teardown.json"
+        self.teardown_script(f"cp '{record}' '{at_teardown}'")
         review = subprocess.Popen([str(ROOT / "bin" / "whooper-review"), str(item), "--dry-run"], env=env,
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         self.addCleanup(self.stop, review)
@@ -5608,6 +5647,10 @@ class RunTest(unittest.TestCase):
         [run] = (self.state / "runs").iterdir()
         self.assertEqual((review.returncode, self.read(run / "failure.txt")), (130, "the review was interrupted\n"))
         self.assertEqual(json.loads((run / "failure.json").read_text()), CAUSES["unknown"])
+        # The record counted the failure before the teardown script ran, so a SIGKILL that cuts the cleanup short there
+        # leaves it right.
+        self.assertEqual({key: json.loads(at_teardown.read_text())[key] for key in ("status", "failures")},
+                         {"status": "failed", "failures": 1})
 
     def test_a_command_stopped_before_its_run_makes_its_process_group_leaves_none_of_the_run_running(self):
         # lib/python runs uv before Python, which starts a review, poll, or ask run, or a step of a review, in a session
@@ -8252,9 +8295,10 @@ class StatusFormat2Test(unittest.TestCase):
 
 class RetryTest(unittest.TestCase):
     """bin/whooper-retry and bin/whooper-remove, run as the manifest's retry and remove actions, and
-    bin/whooper-select after them, on review runs of example-org/example-repo#12 and #13 in a throwaway
-    state folder. gh is a fake that reports PR 12's head from the file head and fails any other call,
-    and slackdump, claude, and devin fail, so no test can reach GitHub, Slack, or a model."""
+    bin/whooper-select after them or after a review that left its record running, on review runs of
+    example-org/example-repo#12 and #13 in a throwaway state folder. gh is a fake that reports PR 12's
+    head from the file head and fails any other call, and slackdump, claude, and devin fail, so no test
+    can reach GitHub, Slack, or a model."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -8350,6 +8394,25 @@ class RetryTest(unittest.TestCase):
         self.assertEqual(self.select(), [self.work])
         self.assertFalse((self.state / "rechecks" / "example-org-example-repo-12.json").exists())
         self.assertEqual(self.select(), [self.work])
+
+    def test_a_review_that_left_its_record_running_is_reviewed_again_once_no_live_review_holds_its_lock(self):
+        # The second review of h1 left its record running, as when a SIGKILL cut its cleanup short or its round stopped
+        # between whooper-review and whooper-classify.
+        running = {**self.failed, "status": "running", "failures": 1}
+        self.record("h1").write_text(json.dumps(running))
+        # While a live whooper-review holds the PR's lock, the record is that review's, and h1 is not work.
+        lock = self.state / "locks" / "example-org-example-repo-12"
+        lock.mkdir(parents=True)
+        (lock / "pid").write_text(f"{review_stand_in(self, Path(self.tmp.name))}\n")
+        self.assertEqual(self.select(), [])
+        self.assertEqual(json.loads(self.record("h1").read_text()), running)
+        # Once none does, here since the lock names a process that is gone, as after a SIGKILL, the review failed, as
+        # an interrupted review does, and h1 is work again.
+        gone = subprocess.Popen(["true"])
+        gone.wait()
+        (lock / "pid").write_text(f"{gone.pid}\n")
+        self.assertEqual(self.select(), [self.work])
+        self.assertEqual(json.loads(self.record("h1").read_text()), {**running, "status": "failed", "failures": 2})
 
     def test_a_rows_menu_retries_a_review_with_item(self):
         # Prompting Time runs each of status.item_actions as the action's command, --item, and the run ID.

@@ -837,8 +837,8 @@ Time sends whooper-run 5 seconds after its TERM; a review cut short so may leave
 lock behind, and the next review of the PR takes the lock over. Once whooper-run or a round stops,
 it ignores a second Ctrl-C, which could otherwise leave its lock behind. Interrupt any other
 script with Ctrl-C, or stop a review with `kill $(cat ~/.local/state/whooper/locks/*/pid)`.
-An interrupted review runs the teardown script, removes its worktrees and lock, saves
-`the review was interrupted` as its `failure.txt`, and counts as a failure in its record. The repo's
+An interrupted review first saves `the review was interrupted` as its `failure.txt` and counts as a
+failure in its record, then runs the teardown script and removes its worktrees and lock. The repo's
 setup and teardown scripts run in process groups of their own, as the run does, so a stop reaches
 them as it reaches the run: one that comes while the teardown script runs stops the script, and the
 review goes on removing its worktrees and lock. The
@@ -871,11 +871,15 @@ the recheck list while the commands above write to it.
   whooper-review writes running when it starts and failed, with one more failure, when it stops
   without findings. whooper-classify writes done with the run's `approval`, whooper-post and
   whooper-submit write stale when the head moved, and whooper-retry writes retry, keeping the
-  count, at the head the PR has now.
+  count, at the head the PR has now. whooper-select writes failed, with one more failure, over a
+  record that says running while no live whooper-review holds the PR's lock (`locks/`), as after a
+  SIGKILL cut a review's cleanup short or a round stopped between whooper-review and
+  whooper-classify, so the head gets another review, as after any interrupted one.
   whooper-select drops a re-check, which whooper-review cannot review yet, a recheck-list item of a
   PR that `poll/recheck-prs.json` says is merged or closed, an item in a repo the
-  config has no `[repos."<owner>/<repo>"]` table for, an item whose record is done or running or has
-  failed 3 times, a recheck-list item of a PR that already has 3 records of its kind for other heads
+  config has no `[repos."<owner>/<repo>"]` table for, an item whose record is done, has failed 3
+  times, or is running while a live whooper-review holds the PR's lock, a recheck-list item of a PR
+  that already has 3 records of its kind for other heads
   started today (local time), an item that asks again for a review you removed
   ([Remove a review](#remove-a-review)), and any item of a PR whose newest review you skipped
   ([Skip a review](#skip-a-review)). A recheck-list item dropped for the daily limit stays on the
