@@ -255,7 +255,7 @@ fn posts_the_included_drafts_as_one_review_at_the_reviewed_head() {
          "body": format!("{VETTED}**question:** Why retry a call that succeeded? It duplicates the order.")},
         nit_comment(),
     ]});
-    assert_eq!(s.posted(), [request.clone()]);
+    assert_eq!(s.posted(), std::slice::from_ref(&request));
     let response: Value = serde_json::from_str(RESPONSE).unwrap();
     assert_eq!(
         read_json(&s.run.join("submit.json")),
@@ -813,7 +813,7 @@ fn a_skipped_or_failed_review_is_not_safe_to_approve_whatever_its_verdict() {
         for flags in [&[][..], &["--print"]] {
             let refused = s.submit(flags);
             assert_eq!(code(&refused), Some(11), "{}", err(&refused));
-            assert_eq!(listed(&refused), [reason.clone()]);
+            assert_eq!(listed(&refused), std::slice::from_ref(&reason));
             assert!(err(&refused).contains("--approve-anyway"));
         }
         assert!(s.posted().is_empty());
@@ -874,7 +874,8 @@ fn a_review_still_running_cannot_be_submitted() {
 fn status_and_show_call_a_run_safe_to_approve_exactly_when_submit_approves_it_without_approve_anyway()
  {
     let why = "The PR changes 40 files across four services.";
-    let cases: Vec<(&str, &str, Vec<Value>, &str, Option<i32>, bool)> = vec![
+    type Case<'a> = (&'a str, &'a str, Vec<Value>, &'a str, Option<i32>, bool);
+    let cases: Vec<Case> = vec![
         (
             "only nits",
             "approve_once_ci_passes",
