@@ -590,7 +590,9 @@ read: the head and the merge base of the head and `base_ref`, checked out as two
 PR's conversation as `github.json`. It saves the diff the run reads, `git diff <merge base> HEAD`
 in the head worktree, as `diff.patch`, which stays when the worktrees go. `diff.patch` is a plain
 patch whatever your git config says: no external diff tool, textconv filter, or color, `a/` and
-`b/` before the paths, and a submodule's commit lines rather than its log. Then it runs the repo's
+`b/` before the paths, a submodule's commit lines rather than its log, and git's default hunks: 3
+unchanged lines around each change, and a new hunk wherever more than 6 unchanged lines separate two
+changes. Then it runs the repo's
 setup script, if the config names one, which may add variables to the run's environment and prints
 a paragraph for the prompt. Then, when the diff adds lines to Go, JavaScript, or TypeScript code, a step
 saves `test_gaps.json`: which of those lines no test ran ([See reviews](#see-reviews)). For Go, it runs

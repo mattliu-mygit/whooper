@@ -751,9 +751,11 @@ def read_reviews(data, now):
 
 # The flags of the git diff that writes a review's diff.patch in bin/whooper-review, which keep it a
 # plain patch whatever the user's git config says: no external diff tool, textconv filter, or color,
-# a/ and b/ before the paths, and a submodule's commit lines rather than its log. rebuilt_diff passes
-# the same ones, so keep the two lists the same.
-PLAIN_DIFF = ("--no-ext-diff", "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", "--submodule=short")
+# a/ and b/ before the paths, a submodule's commit lines rather than its log, and git's default hunks:
+# 3 unchanged lines around each change, and a new hunk wherever more than 6 unchanged lines separate
+# two changes. rebuilt_diff passes the same ones, so keep the two lists the same.
+PLAIN_DIFF = ("--no-ext-diff", "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", "--submodule=short",
+              "--unified=3", "--inter-hunk-context=0")
 
 
 def repo_clone(repo):

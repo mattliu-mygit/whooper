@@ -228,10 +228,12 @@ git -C "$core" worktree add --quiet --detach "$run/base" "$merge_base"
 # past review and for asks about it. It runs in the head worktree, as the run's git diff does, because
 # git applies the .gitattributes it finds there: a file marked -diff shows as binary. The flags keep
 # it a plain patch whatever the user's git config says: no external diff tool, textconv filter, or
-# color, a/ and b/ before the paths, and a submodule's commit lines rather than its log. whooper-show
-# rebuilds the diff of a run from before this file with the same flags, lib/whooper.py's PLAIN_DIFF.
+# color, a/ and b/ before the paths, a submodule's commit lines rather than its log, and git's default
+# hunks: 3 unchanged lines around each change, and a new hunk wherever more than 6 unchanged lines
+# separate two changes. whooper-show rebuilds the diff of a run from before this file with the same
+# flags, lib/whooper.py's PLAIN_DIFF.
 git -C "$run/head" diff --no-ext-diff --no-textconv --no-color --src-prefix=a/ --dst-prefix=b/ --submodule=short \
-  "$merge_base" HEAD > "$run/diff.patch"
+  --unified=3 --inter-hunk-context=0 "$merge_base" HEAD > "$run/diff.patch"
 # skills holds a content hash of every skill the run can load, so a finding traces to the skill version behind it.
 jq --arg run_id "$run_id" --arg merge_base "$merge_base" --arg as_of "$as_of" --arg agent "$WHOOPER_REVIEW_AGENT" \
   --argjson skills "$("$root/lib/python" "$root/lib/whooper.py" skills "$HOME/.claude/skills")" \

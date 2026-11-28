@@ -4005,10 +4005,10 @@ class RunTest(unittest.TestCase):
                 "GIT_AUTHOR_NAME": "Sam", "GIT_AUTHOR_EMAIL": "sam@example.com",
                 "GIT_COMMITTER_NAME": "Sam", "GIT_COMMITTER_EMAIL": "sam@example.com"}
 
-    def pull_request(self):
+    def pull_request(self, app=("one\n", "one\ntwo\n")):
         """Makes PR 12 of sample-org/plain-repo in a local origin, the cache's clone of it, and its work
         item, and returns the environment for git and the review (git_env), the work item's path, and
-        the PR's merge base."""
+        the PR's merge base. app is app.txt at the merge base and at the head."""
         tmp = Path(self.tmp.name)
         origin = tmp / "origin"
         env = self.git_env()
@@ -4021,14 +4021,14 @@ class RunTest(unittest.TestCase):
         # repo's .gitattributes marks generated.txt -diff, which git reads from the worktree it runs in.
         origin.mkdir()
         git("init", "--quiet", "--initial-branch=main")
-        for name, content in [("app.txt", "one\n"), ("generated.txt", "g1\n"),
+        for name, content in [("app.txt", app[0]), ("generated.txt", "g1\n"),
                               (".gitattributes", "generated.txt -diff\n")]:
             (origin / name).write_text(content)
         git("add", ".")
         git("commit", "--quiet", "-m", "base")
         merge_base = git("rev-parse", "HEAD")
         git("checkout", "--quiet", "-b", "pr-12")
-        (origin / "app.txt").write_text("one\ntwo\n")
+        (origin / "app.txt").write_text(app[1])
         (origin / "generated.txt").write_text("g2\n")
         git("add", "app.txt", "generated.txt")
         git("update-index", "--add", "--cacheinfo", f"160000,{'1' * 40},vendor/lib")
@@ -4358,10 +4358,17 @@ class RunTest(unittest.TestCase):
         self.assertEqual({key: json.loads(shown.stdout)[key] for key in ["outcome", "diff"]},
                          {"outcome": "reviewed", "diff": diff})
 
+    # app.txt at the merge base and at the head of a PR that changes lines 13 and 22 of its 34, which git diff's
+    # defaults show as two hunks, lines 10 to 16 and 19 to 25: 3 unchanged lines around each change, and the 2
+    # lines between the hunks left out.
+    APP_IN_TWO_HUNKS = ("".join(f"line {n}\n" for n in range(1, 35)),
+                        "".join(f"changed {n}\n" if n in (13, 22) else f"line {n}\n" for n in range(1, 35)))
+
     def change_every_diff(self, env):
         """Writes the git config of env's home, in which each setting changes what git diff prints: an
-        external diff tool, a textconv filter for app.txt, color, paths without a/ and b/, and a
-        submodule's log instead of its commit lines."""
+        external diff tool, a textconv filter for app.txt, color, paths without a/ and b/, a submodule's
+        log instead of its commit lines, 10 unchanged lines around each change instead of 3, and hunks
+        at most 5 lines apart joined into one."""
         tmp = Path(self.tmp.name)
         self.script(tmp / "external", 'echo "external diff of $1"')
         self.script(tmp / "shout", 'tr a-z A-Z < "$1"')
@@ -4369,12 +4376,13 @@ class RunTest(unittest.TestCase):
         Path(env["GIT_CONFIG_GLOBAL"]).write_text("\n".join([
             "[core]", f"attributesFile = {tmp / 'attributes'}",
             "[color]", "ui = always",
-            "[diff]", f"external = {tmp / 'external'}", "noprefix = true", "submodule = log",
+            "[diff]", f"external = {tmp / 'external'}", "noprefix = true", "submodule = log", "context = 10",
+            "interHunkContext = 5",
             '[diff "shout"]', f"textconv = {tmp / 'shout'}",
         ]) + "\n")
 
     def test_the_kept_diff_is_a_plain_patch_whatever_the_git_config_says(self):
-        env, item, merge_base = self.pull_request()
+        env, item, merge_base = self.pull_request(app=self.APP_IN_TWO_HUNKS)
         # git's own patch of the PR, made before the config exists.
         plain = subprocess.run(["git", "diff", merge_base, "pr-12"], cwd=Path(self.tmp.name) / "origin", env=env,
                                check=True, capture_output=True, text=True).stdout
@@ -4385,7 +4393,7 @@ class RunTest(unittest.TestCase):
         self.assertEqual((run / "diff.patch").read_text(), plain)
 
     def test_show_rebuilds_the_diff_of_a_review_from_before_reviews_kept_it(self):
-        env, item, _ = self.pull_request()
+        env, item, _ = self.pull_request(app=self.APP_IN_TWO_HUNKS)
         self.command("whooper-review", str(item), "--dry-run", env=env)
         [run] = (self.state / "runs").iterdir()
         kept = (run / "diff.patch").read_text()
