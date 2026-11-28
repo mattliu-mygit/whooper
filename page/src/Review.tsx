@@ -3,7 +3,7 @@ import { Button, Diff, type DiffLineAnnotation } from "@prompting-time/ui";
 import type { JSX } from "@solidjs/web";
 import { DraftThread } from "./DraftThread";
 import { readPatch, showsLine, type PatchFile } from "./patch";
-import { createDecision } from "./decision";
+import { createDecision, SubmitRefusal } from "./decision";
 import type { Finding, Review } from "./protocol";
 import type { PageStore } from "./store";
 import { verdictText } from "./text";
@@ -172,17 +172,9 @@ function FileCard(props: { store: PageStore; file: PatchFile; findings: Finding[
 
 function SubmitBar(props: { store: PageStore }) {
   const store = props.store;
-  const drafts = () => store.state.review!.drafts;
   const decision = createDecision(store);
   const { comments, event, busy, error } = decision;
-  // The message box shows the user's typing until it is saved, then whatever the drafts say.
-  const [message, setMessage] = createSignal(() => drafts().message);
   const locked = () => store.locked();
-
-  // What posts when the message stays empty (whooper-submit): an approval with comments says
-  // "Pre-approving to unblock".
-  const placeholder = () =>
-    event() === "APPROVE" ? (comments() > 0 ? "Pre-approving to unblock" : "No message") : "Message (optional)";
 
   return (
     <section class="w-submit" aria-label="Submit review">
@@ -202,28 +194,16 @@ function SubmitBar(props: { store: PageStore }) {
       <input
         class="w-message"
         aria-label="Review message"
-        placeholder={placeholder()}
-        value={message()}
+        placeholder={decision.placeholder()}
+        value={decision.message()}
         disabled={locked()}
-        onInput={(e) => setMessage(e.currentTarget.value)}
-        onChange={(e) => {
-          const text = e.currentTarget.value;
-          if (text !== drafts().message) void decision.run(() => store.changeDraft({ op: "message", text }));
-        }}
+        onInput={(e) => decision.typeMessage(e.currentTarget.value)}
+        onChange={() => decision.saveMessage()}
       />
       <Button variant="primary" disabled={busy() || store.held() || locked() || decision.nothing()} onClick={() => decision.submit()}>
         {busy() ? "Submitting…" : "Submit review"}
       </Button>
-      <Show when={decision.override()}>
-        {(next) => (
-          <>
-            <p class="w-hint w-submit-line w-refusal">{next().why}</p>
-            <Button disabled={busy() || store.held()} onClick={() => decision.submit(next().flag)}>
-              {next().label}
-            </Button>
-          </>
-        )}
-      </Show>
+      <SubmitRefusal store={store} decision={decision} class="w-submit-line" />
       <Show when={store.state.submitted}>{(text) => <p class="w-hint w-submit-line">Submitted. Whooper says: {text()}</p>}</Show>
       <Show when={error()}>
         <p class="w-error w-submit-line" role="alert">

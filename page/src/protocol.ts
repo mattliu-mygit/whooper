@@ -168,12 +168,15 @@ export interface Shown {
 
 export type Verdict = "approve_once_ci_passes" | "look_first";
 
-/** A finding in findings.json (schemas/findings.json), with the fields the page reads. */
+/** A finding in findings.json (schemas/findings.json), with the fields the page and its fake host read. */
 export interface Finding {
   id: string;
   path: string;
   line: number;
   side: "LEFT" | "RIGHT";
+  /** Whether the line is inside a hunk of the PR's diff, where GitHub takes an inline comment;
+   * whooper-submit refuses a review that includes a comment elsewhere (exit 14). */
+  in_diff: boolean;
   title: string;
   draft: string;
   kind: "caller_visible_bug" | "ci_failure" | "nit" | "question" | "other";

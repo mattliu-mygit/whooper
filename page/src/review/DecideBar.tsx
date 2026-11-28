@@ -1,14 +1,15 @@
-import { Show } from "solid-js";
-import { Button } from "@prompting-time/ui";
-import { createDecision } from "../decision";
+import { createUniqueId, Show } from "solid-js";
+import { Button, Textarea } from "@prompting-time/ui";
+import { createDecision, SubmitRefusal } from "../decision";
 import type { PageStore } from "../store";
 import { plural } from "../text";
 
 /**
- * The review's decision in the walkthrough: Comment or Approve, which whooper-draft saves at once, and
- * Submit review, which Prompting Time confirms first, as the diff's submit bar does; a refusal that a
- * flag lets through offers that flag's button. It waits as one Decide… button in the corner until
- * you click it or reach the end of the walkthrough.
+ * The review's decision in the walkthrough: Comment or Approve, which whooper-draft saves at once, the
+ * review's message, which it saves when the box loses focus, and Submit review, which Prompting Time
+ * confirms first, as the diff's submit bar does; a refusal shows why, and one that a flag lets through
+ * offers that flag's button. It waits as one Decide… button in the corner until you click it or reach
+ * the end of the walkthrough.
  */
 export function DecideBar(props: { store: PageStore; open: boolean; onOpen(): void; onEditDrafts(): void }) {
   const store = props.store;
@@ -16,6 +17,7 @@ export function DecideBar(props: { store: PageStore; open: boolean; onOpen(): vo
   const { busy, error, event } = decision;
   const total = () => store.state.review!.findings.findings.length;
   const name = () => `decide-${store.state.review!.run_id}`;
+  const nothingId = createUniqueId();
   let bar: HTMLDivElement | undefined;
   return (
     <Show
@@ -48,6 +50,14 @@ export function DecideBar(props: { store: PageStore; open: boolean; onOpen(): vo
         <button type="button" class="decide-edit" onClick={() => props.onEditDrafts()}>
           Edit drafts in Diff
         </button>
+        <Textarea
+          label="Review message"
+          rows={2}
+          placeholder={decision.placeholder()}
+          value={decision.message()}
+          onInput={(e) => decision.typeMessage(e.currentTarget.value)}
+          onChange={() => decision.saveMessage()}
+        />
         <span class="decide-spacer" />
         <Show when={error()}>
           {(text) => (
@@ -56,17 +66,18 @@ export function DecideBar(props: { store: PageStore; open: boolean; onOpen(): vo
             </span>
           )}
         </Show>
-        <Show when={decision.override()}>
-          {(next) => (
-            <>
-              <span class="w-hint w-refusal">{next().why}</span>
-              <Button disabled={busy() || store.held()} onClick={() => decision.submit(next().flag)}>
-                {next().label}
-              </Button>
-            </>
-          )}
+        <SubmitRefusal store={store} decision={decision} />
+        <Show when={decision.nothing()}>
+          <span id={nothingId} class="w-hint">
+            Add a comment or a message to submit a comment review
+          </span>
         </Show>
-        <Button variant="primary" disabled={busy() || store.held() || decision.nothing()} onClick={() => decision.submit()}>
+        <Button
+          variant="primary"
+          disabled={busy() || store.held() || decision.nothing()}
+          aria-describedby={decision.nothing() ? nothingId : undefined}
+          onClick={() => decision.submit()}
+        >
           {busy() ? "Submitting…" : "Submit review"}
         </Button>
       </div>

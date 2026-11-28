@@ -146,6 +146,7 @@ const FINDINGS_101: FindingsResult = {
       path: "internal/cacheconfig/config_test.go",
       line: 18,
       side: "RIGHT",
+      in_diff: true,
       title: "The pool bound case repeats a rule TestValidate covers",
       draft:
         "**nit:** The table is here to show that `Open` runs `Config.Validate` before it dials the cache, and one bad config shows that. \"pool bound\" re-checks a rule that `TestValidate` already covers. Could we drop it?",
@@ -156,6 +157,7 @@ const FINDINGS_101: FindingsResult = {
       path: "internal/cacheconfig/config_test.go",
       line: 43,
       side: "RIGHT",
+      in_diff: true,
       title: "The import test could be a depguard rule",
       draft:
         "**nit:** `TestProductionDoesNotImportStore` could be a `depguard` rule in `.golangci.yaml`, which catches the import at lint time for every package. Keeping the test is fine too.",
@@ -174,6 +176,7 @@ const FINDINGS_107: FindingsResult = {
       path: "internal/store/writer.go",
       line: 5,
       side: "RIGHT",
+      in_diff: true,
       title: "A retried write of the same version now fails",
       draft:
         "**issue:** With `<=`, a client that retries a write of the version it just wrote gets `ErrStale`, and the retry loop in `sync.go` gives up after it. `TestWriteRetry` fails at this commit and passes at the merge base.",
@@ -184,6 +187,7 @@ const FINDINGS_107: FindingsResult = {
       path: "internal/store/writer.go",
       line: 8,
       side: "RIGHT",
+      in_diff: true,
       title: "minVersion changes without the writer's lock",
       draft: "**question:** Two writers share this `Writer` in `server.go`. Should this hold `w.mu` like `Flush` does?",
       kind: "question",
@@ -224,7 +228,7 @@ const RETRY_FINDINGS: FindingsResult = {
   skip_reason: "",
   approval: { verdict: "approve_once_ci_passes", reason: "Small and tested." },
   findings: [
-    { id: "1", path: "src/retry.rs", line: 7, side: "RIGHT", title: "The delay overflows", draft: "**nit:** `2u64.pow` overflows after 64 attempts.", kind: "nit" },
+    { id: "1", path: "src/retry.rs", line: 7, side: "RIGHT", in_diff: true, title: "The delay overflows", draft: "**nit:** `2u64.pow` overflows after 64 attempts.", kind: "nit" },
   ],
 };
 
@@ -300,7 +304,7 @@ const NAME_FINDINGS: FindingsResult = {
   status: "reviewed",
   skip_reason: "",
   approval: { verdict: "approve_once_ci_passes", reason: "Small and tested." },
-  findings: [{ id: "1", path: "internal/projects/name.go", line: 6, side: "RIGHT", title: "Two dashes pass", draft: "**nit:** `namePattern` lets `a--b` through.", kind: "nit" }],
+  findings: [{ id: "1", path: "internal/projects/name.go", line: 6, side: "RIGHT", in_diff: true, title: "Two dashes pass", draft: "**nit:** `namePattern` lets `a--b` through.", kind: "nit" }],
 };
 
 /** The overview of the name review: two layers and two places to look, and no calls before and after. */

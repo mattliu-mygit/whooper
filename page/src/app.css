@@ -309,6 +309,11 @@ ul {
   white-space: pre-wrap;
 }
 
+/* The comments a refusal names, one a line, under its reason. */
+.w-refused {
+  padding-inline-start: var(--s-space-12);
+}
+
 /* The page Prompting Time opens at a route: a review's header and body, or a cause's screen. */
 .w-page {
   display: flex;

@@ -1,6 +1,7 @@
 import { fireEvent as dom, screen, waitFor, within } from "@testing-library/dom";
 import { flush } from "solid-js";
 import { describe, expect, it, vi } from "vitest";
+import { reviewRecords } from "./fixtures";
 import { renderWithFakeHost } from "./test/connect";
 
 const RUN = "20310727T010246Z-101";
@@ -171,6 +172,35 @@ describe("Whooper's page with the fake host", () => {
     expect(await within(bar).findByText(/posted the review/)).toBeInTheDocument();
     expect(host.refusals).toEqual([11, 12]);
     expect(host.calls("submit")).toEqual([[newest], [newest, "--approve-anyway"], [newest, "--approve-anyway", "--allow-mentions"]]);
+  }, 30_000);
+
+  it("names the included comments outside the PR's change when whooper-submit refuses them, and submits once they're left out", async () => {
+    const confirmSubmit = vi.fn().mockResolvedValue(true);
+    // Finding 2 moved to line 30 of config_test.go, which the PR leaves alone, so the review run marked it outside the diff.
+    const findings = reviewRecords().find((record) => record.run_id === RUN)!.findings!;
+    const moved = { ...findings, findings: findings.findings.map((f) => (f.id === "2" ? { ...f, line: 30, in_diff: false } : f)) };
+    const host = renderWithFakeHost({ ...OPEN, confirmSubmit, shown: { [RUN]: { findings: moved } } });
+    const outside = await thread("config_test.go:30");
+    const bar = screen.getByRole("region", { name: "Submit review" });
+    fireEvent.click(within(bar).getByRole("button", { name: "Submit review" }));
+    const why = "Some included comments sit on lines outside this PR's change. Leave them out or make the point in the review's message.";
+    expect(await within(bar).findByText(why)).toBeInTheDocument();
+    expect(within(bar).getByText("finding 2: The import test could be a depguard rule (internal/cacheconfig/config_test.go:30)")).toBeInTheDocument();
+    // It is not repeated as an error, and no flag lets it through.
+    expect(within(bar).queryByRole("alert")).not.toBeInTheDocument();
+    expect(within(bar).queryByRole("button", { name: "Approve anyway" })).not.toBeInTheDocument();
+    expect(within(bar).queryByRole("button", { name: "Send with the mentions" })).not.toBeInTheDocument();
+    expect(host.refusals).toEqual([14]);
+    expect(confirmSubmit).not.toHaveBeenCalled();
+
+    // Leaving the comment out lets the review post.
+    fireEvent.click(await enabled(() => within(outside).getByRole("checkbox", { name: "Include in review" })));
+    await waitFor(() => expect(within(bar).getByText("1 comment")).toBeInTheDocument());
+    fireEvent.click(await enabled(() => within(bar).getByRole("button", { name: "Submit review" })));
+    expect(await within(bar).findByText(/posted the review/)).toBeInTheDocument();
+    expect(within(bar).queryByText(why)).not.toBeInTheDocument();
+    const shown = confirmSubmit.mock.calls[0][0] as string;
+    expect(JSON.parse(shown.slice(shown.indexOf("{"))).comments.map((c: { line: number }) => c.line)).toEqual([18]);
   }, 30_000);
 
   it("submits a comment review without comments once its message is saved", async () => {

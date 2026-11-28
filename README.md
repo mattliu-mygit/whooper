@@ -476,7 +476,10 @@ refuses the submit because the run is not safe to approve (exit 11) or the revie
 `--approve-anyway` or `--allow-mentions`, and Prompting Time confirms that submit too. The page
 tells the refusals apart by the exit code Prompting Time passes back, and shows whooper-submit's
 stderr as the reason. Only such a press sends a mention: whooper-post, which Whooper runs on its
-own, still holds back each comment that @-mentions someone. After you press an action button (Skip,
+own, still holds back each comment that @-mentions someone. When an included comment sits on a line
+outside the PR's diff (exit 14), no flag helps: the bar says "Some included comments sit on lines
+outside this PR's change. Leave them out or make the point in the review's message." and names each
+such comment as whooper-submit does. After you press an action button (Skip,
 Remove, Rerun review, Pause, Resume, Submit review, the two refusal buttons, or Ask), the page disables
 the action buttons until 600 ms after the action's reply, and 600 ms more when Prompting Time opens
 another item in that time, so a second click can't act on the item Prompting Time moved on to.
@@ -494,8 +497,13 @@ for that version of the pull request, with Undo. The walkthrough then reads top 
 PR does, before and after; the places to look, each a numbered mark in the code that j and k step
 through; the calls before and after; what Whooper checked and didn't, and the files that usually
 change with these; then the change layer by layer, each folded once you mark it read. The decision
-waits as Decide… in the corner until you click it or reach the end, and offers Comment or Approve
-and Submit review, with the same refusal buttons as the diff's bar. The header's Views menu turns
+waits as Decide… in the corner until you click it or reach the end, and offers Comment or Approve,
+the review's message, and Submit review, with the same refusals as the diff's bar. In both bars the
+message saves with whooper-draft when its box loses focus, and Submit review saves it first, so
+Prompting Time's confirmation shows it: an approval with no comments may say only `lgtm`, and a
+comment review with no comments posts its message alone. A comment review with neither can't be
+submitted, and the decision bar says why: "Add a comment or a message to submit a comment review".
+The header's Views menu turns
 each extra view off or on: how the changed code connects, changes no test would catch, and example
 inputs before and after each show a summary where its question comes up and open in full in the
 walkthrough's place. The page remembers what you last opened, hid, marked read, and turned off only

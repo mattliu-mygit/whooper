@@ -9,6 +9,8 @@ import type { FakeHostOptions } from "../fakeHost";
  * flush() to see its effect. */
 export const fireEvent = {
   click: (element: Element) => (dom.click(element), flush()),
+  input: (element: Element, init: object) => (dom.input(element, init), flush()),
+  change: (element: Element, init: object) => (dom.change(element, init), flush()),
   keyDown: (element: Element | Document | Window, init: object) => (dom.keyDown(element, init), flush()),
   mouseMove: (element: Element | Window, init: object) => (dom.mouseMove(element, init), flush()),
   scroll: (element: Element) => (dom.scroll(element), flush()),

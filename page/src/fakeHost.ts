@@ -5,10 +5,10 @@ import { CallError, PROTOCOL_VERSION, readPageMessage, type Drafts, type Finding
 // A stand-in for Prompting Time, for development (dev/index.html) and the page's tests. It runs the
 // page's calls of the manifest's actions on the invented reviews in fixtures.ts the way Whooper's
 // commands would: drafts change by whooper-draft's rules and refusals, a submit builds
-// whooper-submit's request and asks confirmSubmit first, or is refused as whooper-submit refuses an
-// unsafe approval or an @-mention, an ask answers at once, settings save by whooper-settings set's
-// checks and refusals, and skip, remove, retry, pause, and
-// resume change what status and show-review print, after which it says which files changed. It
+// whooper-submit's request and asks confirmSubmit first, or is refused as whooper-submit refuses a
+// comment outside the diff, an unsafe approval, or an @-mention, an ask answers at once, settings
+// save by whooper-settings set's checks and refusals, and skip, remove, retry, pause, and resume
+// change what status and show-review print, after which it says which files changed. It
 // refuses an action the manifest does not declare, as Prompting Time does. It reaches no Whooper,
 // GitHub, or model.
 
@@ -240,20 +240,26 @@ export function createFakeHost(send: (message: HostMessage) => void, options: Fa
   }
 
   /** whooper-submit --print's request, and the text Prompting Time's confirmation would show for it,
-   * or its refusal of an approval of a run that is not safe to approve (exit 11) or of an @-mention
-   * (exit 12) without the flag that allows it, which it checks in that order. */
-  function submitRequest(runId: string, flags: string[]): { text: string } | { refused: 11 | 12; stderr: string } {
+   * or its refusal of an included comment on a line outside the PR's diff (exit 14), and without the
+   * flag that allows it, of an approval of a run that is not safe to approve (exit 11) or of an
+   * @-mention (exit 12), which it checks in that order. */
+  function submitRequest(runId: string, flags: string[]): { text: string } | { refused: 11 | 12 | 14; stderr: string } {
     if (submitted.has(runId)) throw new Error(`whooper-submit: ${runId} was already submitted; see its submit.json`);
     const { repo, pr } = record(runId, "whooper-submit");
     const findings = findingsOf(runId, "whooper-submit");
     const choices = draftsOf(runId);
-    const comments = findings.findings
-      .filter((f) => choices.findings[f.id]?.included)
-      .map((f) => {
-        const text = (choices.findings[f.id].text ?? f.draft).trim();
-        const body = /^\*\*[A-Za-z]+(?: \([^)]*\))?:\*\*/.test(text) ? text : `${LABELS[f.kind]} ${text}`;
-        return { path: f.path, line: f.line, side: f.side, body: `${VETTED}\n\n${body}` };
-      });
+    const included = findings.findings.filter((f) => choices.findings[f.id]?.included);
+    const outside = included.filter((f) => !f.in_diff);
+    if (outside.length > 0)
+      return {
+        refused: 14,
+        stderr: `whooper-submit: nothing posted: these included comments are on lines outside the PR's diff, where GitHub takes no comment, so it would refuse the whole review:\n${outside.map((f) => `  finding ${f.id}: ${f.title} (${f.path}:${f.line})\n`).join("")}Leave them out with bin/whooper-draft, or make their point in the review's message.\n`,
+      };
+    const comments = included.map((f) => {
+      const text = (choices.findings[f.id].text ?? f.draft).trim();
+      const body = /^\*\*[A-Za-z]+(?: \([^)]*\))?:\*\*/.test(text) ? text : `${LABELS[f.kind]} ${text}`;
+      return { path: f.path, line: f.line, side: f.side, body: `${VETTED}\n\n${body}` };
+    });
     if (comments.length === 0 && choices.event === "COMMENT" && !choices.message.trim())
       throw new Error(
         "whooper-submit: nothing to submit: the drafts include no comment, have no message, and do not approve; change them with bin/whooper-draft",

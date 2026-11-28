@@ -1,18 +1,34 @@
 import { screen, waitFor, within } from "@testing-library/dom";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
 import { RETRY_RUN } from "../fixtures";
-import type { FindingsResult } from "../protocol";
+import type { Finding, FindingsResult } from "../protocol";
 import { enabled, fireEvent, openReview, press, SLOW, viewsButton, walkthrough } from "../test/review";
 
 const RUN = RETRY_RUN;
 const placeCard = () => document.querySelector<HTMLElement>(".place-card");
-/** The retry review's findings with `kind` for its one finding. */
-const findingsOf = (kind: FindingsResult["findings"][number]["kind"], verdict: FindingsResult["approval"]["verdict"] = "approve_once_ci_passes"): FindingsResult => ({
+/** The retry review's findings with `kind` for its one finding, which `where` may move. */
+const findingsOf = (
+  kind: Finding["kind"],
+  verdict: FindingsResult["approval"]["verdict"] = "approve_once_ci_passes",
+  where: Partial<Pick<Finding, "path" | "line" | "in_diff">> = {},
+): FindingsResult => ({
   status: "reviewed",
   skip_reason: "",
   approval: { verdict, reason: "Small and tested." },
-  findings: [{ id: "1", path: "src/retry.rs", line: 7, side: "RIGHT", title: "The delay overflows", draft: "**question:** Does `2u64.pow` overflow?", kind }],
+  findings: [{ id: "1", path: "src/retry.rs", line: 7, side: "RIGHT", in_diff: true, title: "The delay overflows", draft: "**question:** Does `2u64.pow` overflow?", kind, ...where }],
 });
+/** Types text in a box and leaves it, as the click on the next button does, which commits it. */
+const typeAndLeave = (box: HTMLElement, text: string) => {
+  fireEvent.input(box, { target: { value: text } });
+  fireEvent.change(box, { target: { value: text } });
+};
+/** The request Prompting Time's confirmation showed for the first submit. */
+const confirmed = (confirmSubmit: Mock) => {
+  const shown = confirmSubmit.mock.calls[0][0] as string;
+  return JSON.parse(shown.slice(shown.indexOf("{")));
+};
+const NOTHING_TO_SUBMIT = "Add a comment or a message to submit a comment review";
+const OUTSIDE_THE_CHANGE = "Some included comments sit on lines outside this PR's change. Leave them out or make the point in the review's message.";
 
 afterEach(() => {
   document.body.classList.remove("review-dimming");
@@ -218,6 +234,72 @@ describe("a review's walkthrough", () => {
     fireEvent.click(await enabled(() => anyway));
     expect(await screen.findByText(/Submitted\. Whooper says:/)).toBeInTheDocument();
     expect(host.calls("submit")).toEqual([[RUN], [RUN, "--approve-anyway"]]);
+  }, 30_000);
+
+  it("saves the decision bar's message with whooper-draft and submits an approval with no comments that says lgtm", async () => {
+    const confirmSubmit = vi.fn().mockResolvedValue(true);
+    const host = renderReview({ findings: { ...findingsOf("nit"), findings: [] } }, { confirmSubmit });
+    await walkthrough();
+    fireEvent.click(screen.getByRole("button", { name: "Decide…" }));
+    const bar = screen.getByRole("group", { name: "Your decision" });
+    // A safe run without findings starts as an approval with no comments, and the message box empty.
+    expect(bar).toHaveTextContent("0 draft comments, 0 included");
+    expect(within(bar).getByRole("radio", { name: "Approve" })).toBeChecked();
+    const message = within(bar).getByRole("textbox", { name: "Review message" });
+    expect(message).toHaveValue("");
+    // Submit review saves what the box holds first, even when its blur did not.
+    fireEvent.input(message, { target: { value: "lgtm" } });
+    fireEvent.click(await enabled(() => within(bar).getByRole("button", { name: "Submit review" })));
+    expect(await screen.findByText(/Submitted\. Whooper says: posted the review/)).toBeInTheDocument();
+    expect(host.calls("draft").filter((args) => args.length > 1)).toEqual([[RUN, "message", "lgtm"]]);
+    // The confirmation showed the message.
+    const request = confirmed(confirmSubmit);
+    expect([request.event, request.body, request.comments]).toEqual(["APPROVE", "lgtm", []]);
+  }, 30_000);
+
+  it("says why a comment review with no comments and no message can't be submitted, and submits one with a message", async () => {
+    const confirmSubmit = vi.fn().mockResolvedValue(true);
+    const host = renderReview({ findings: findingsOf("question") }, { confirmSubmit });
+    await walkthrough();
+    fireEvent.click(screen.getByRole("button", { name: "Decide…" }));
+    const bar = screen.getByRole("group", { name: "Your decision" });
+    // A run not safe to approve starts as a comment with nothing included.
+    const submit = within(bar).getByRole("button", { name: "Submit review" });
+    expect(submit).toBeDisabled();
+    expect(within(bar).getByText(NOTHING_TO_SUBMIT)).toBeVisible();
+    expect(submit).toHaveAccessibleDescription(NOTHING_TO_SUBMIT);
+    const message = within(bar).getByRole("textbox", { name: "Review message" });
+    expect(message).toHaveAttribute("placeholder", "Message (optional)");
+    // Blanks are no message.
+    typeAndLeave(message, "  ");
+    await waitFor(() => expect(host.calls("draft").filter((args) => args.length > 1)).toEqual([[RUN, "message", "  "]]));
+    expect(submit).toBeDisabled();
+    expect(within(bar).getByText(NOTHING_TO_SUBMIT)).toBeVisible();
+
+    typeAndLeave(message, "Thanks, nothing from me.");
+    expect(within(bar).queryByText(NOTHING_TO_SUBMIT)).not.toBeInTheDocument();
+    fireEvent.click(await enabled(() => submit));
+    expect(await screen.findByText(/Submitted\. Whooper says: posted the review/)).toBeInTheDocument();
+    const request = confirmed(confirmSubmit);
+    expect([request.event, request.body, request.comments]).toEqual(["COMMENT", "Thanks, nothing from me.", []]);
+  }, 30_000);
+
+  it("names the included comments outside the PR's change when whooper-submit refuses them, with no button to send them anyway", async () => {
+    const confirmSubmit = vi.fn().mockResolvedValue(true);
+    // A nit on a line of src/client.rs the PR leaves alone, which the review run marked outside the diff.
+    const host = renderReview({ findings: findingsOf("nit", "approve_once_ci_passes", { path: "src/client.rs", line: 9, in_diff: false }) }, { confirmSubmit });
+    await walkthrough();
+    fireEvent.click(screen.getByRole("button", { name: "Decide…" }));
+    const bar = screen.getByRole("group", { name: "Your decision" });
+    fireEvent.click(await enabled(() => within(bar).getByRole("button", { name: "Submit review" })));
+    expect(await within(bar).findByText(OUTSIDE_THE_CHANGE)).toBeInTheDocument();
+    expect(within(bar).getByText("finding 1: The delay overflows (src/client.rs:9)")).toBeInTheDocument();
+    // It is not repeated as an error, and no flag lets it through.
+    expect(within(bar).queryByRole("alert")).not.toBeInTheDocument();
+    await enabled(() => within(bar).getByRole("button", { name: "Submit review" }));
+    expect(within(bar).getAllByRole("button").map((button) => button.textContent)).toEqual(["Edit drafts in Diff", "Submit review"]);
+    expect(host.refusals).toEqual([14]);
+    expect(confirmSubmit).not.toHaveBeenCalled();
   }, 30_000);
 
   it("opens the decision bar once you scroll to the end", async () => {
