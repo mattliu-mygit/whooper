@@ -26,9 +26,17 @@ else
   oldest="$((started - 86400))"
 fi
 work=""
-agent_group=""
+agent_group="" agent_file=""
 watchdog_pid=""
 finished=false
+# As in whooper-review: stops the run's process group, named by the file lib/whooper.py session writes its ID in, or
+# keeps a run that has not yet made its group from starting.
+stop_group() {
+  if [[ -n "$1" ]] && ! (set -o noclobber; : > "$1") 2>/dev/null; then
+    kill -TERM -- "-$(cat "$1")" 2>/dev/null || true
+    wait "$(cat "$1")" 2>/dev/null || true
+  fi
+}
 cleanup() {
   local status=$?
   # As in whooper-review, a process bash forked for a background command that runs this trap, as when it
@@ -43,10 +51,7 @@ cleanup() {
   if [[ "$finished" != true ]] && ((status == 0)); then
     status=1
   fi
-  if [[ -n "$agent_group" ]]; then
-    kill -TERM -- "-$agent_group" 2>/dev/null || true
-    wait "$agent_group" 2>/dev/null || true
-  fi
+  stop_group "$agent_file"
   if [[ -n "$watchdog_pid" ]]; then
     kill "$watchdog_pid" 2>/dev/null || true
   fi
@@ -81,7 +86,8 @@ slackdump dump -workspace "$WHOOPER_SLACKDUMP_WORKSPACE" -files=false -time-from
 # As in whooper-review, the launcher starts in a session of its own, so the run and everything it
 # starts form one process group that the time limit and the cleanup can stop. Without the limit, a
 # request the network dropped held the loop for 93 minutes on Nov 24, 2026.
-"$root/lib/python" -c 'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
+agent_file="$work/agent.group"
+"$root/lib/python" "$root/lib/whooper.py" session "$agent_file" \
   "$root/agents/$WHOOPER_POLL_AGENT/poll" "$poll/$stamp.prompt.md" "$poll/$stamp.answer.json" "$poll/$stamp" < /dev/null &
 agent_group=$!
 "$root/lib/python" -c 'import os, signal, sys, time

@@ -5482,6 +5482,71 @@ class RunTest(unittest.TestCase):
         self.assertEqual((review.returncode, self.read(run / "failure.txt")), (130, "the review was interrupted\n"))
         self.assertEqual(json.loads((run / "failure.json").read_text()), CAUSES["unknown"])
 
+    def test_a_command_stopped_before_its_run_makes_its_process_group_leaves_none_of_the_run_running(self):
+        # lib/python runs uv before Python, which starts a review, poll, or ask run, or a step of a review, in a session
+        # of its own, its process group. A fake uv stops the lib/python that starts it there, before it has made the
+        # group, as if it lost the processor there, and the test meanwhile stops the command with a TERM to it alone,
+        # as whooper-skip stops a review. The starting process goes on only once the command's cleanup has stopped
+        # whatever group the command knew of and comes to the rm that removes its work folder, which a fake rm holds
+        # until the starting process ends. The command exits without waiting for the run, and the run never starts,
+        # under bash 3.2 and 5 alike: neither claude, for a run, nor the test-gaps step's own lib/python ran.
+        env, item, _ = self.pull_request()
+        self.fake_review_requests()
+        run = self.state / "runs" / "20310727T010246Z-12"
+        run.mkdir(parents=True)
+        (run / "failure.txt").write_text("the review stopped at an unexpected error\n")
+        uv, rm, tmp = shutil.which("uv"), shutil.which("rm"), Path(self.tmp.name)
+
+        def alive(pid):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return False
+            return True
+
+        # (the command and its arguments, what the command line of the lib/python that starts the run names, and the
+        # start of the command line of the step's own lib/python, for the step)
+        for case, (name, args, starts, step) in enumerate([
+            ("whooper-review", [str(item), "--dry-run"], "/agents/claude/review ", None),
+            ("whooper-review", [str(item), "--dry-run"], "/lib/whooper.py test-gaps ",
+             f"bash {ROOT}/lib/python {ROOT}/lib/whooper.py test-gaps "),
+            ("whooper-poll", [], "/agents/claude/poll ", None),
+            ("whooper-ask", [run.name, "Why did it stop?"], "/agents/claude/ask ", None),
+        ]):
+            for n, bash in enumerate(BASHES):
+                with self.subTest(name, starts=starts, bash=str(bash)):
+                    paused, ran = tmp / f"paused-{case}-{n}", tmp / f"ran-{case}-{n}"
+                    self.claude_script(f"touch '{ran}'\nexec sleep 30")
+                    self.script(self.fakes / "uv", "\n".join([
+                        'parent="$(ps -ww -o command= -p "$PPID")"',
+                        f'case "$parent" in *"{starts}"*) if mkdir "{paused}" 2>/dev/null; then',
+                        f'  echo "$PPID" > "{paused}/pid.tmp" && mv "{paused}/pid.tmp" "{paused}/pid"',
+                        f'  until [ -e "{paused}/go" ]; do sleep 0.1; done',
+                        "fi ;; esac",
+                        *([f'case "$parent" in "{step}"*) touch "{ran}" ;; esac'] if step else []),
+                        f'exec "{uv}" "$@"',
+                    ]))
+                    self.script(self.fakes / "rm", "\n".join([
+                        f'if [ -e "{paused}/pid" ] && mkdir "{paused}/released" 2>/dev/null; then',
+                        f'  touch "{paused}/go"',
+                        f'  while kill -0 "$(cat "{paused}/pid")" 2>/dev/null; do sleep 0.1; done',
+                        "fi",
+                        f'exec "{rm}" "$@"',
+                    ]))
+                    folder = bash_folder(bash, tmp / f"bash-{case}-{n}")
+                    command = self.start_command(name, *args, env={**env, "PATH": f"{folder}{os.pathsep}{env['PATH']}"})
+                    self.wait_for(lambda: (paused / "pid").exists() or command.poll() is not None,
+                                  f"{name} to start the run")
+                    starter = int((paused / "pid").read_text())
+                    os.kill(command.pid, signal.SIGTERM)
+                    with suppress(subprocess.TimeoutExpired):
+                        command.wait(timeout=30)
+                    exited = command.returncode
+                    # A cleanup that waits for the run never comes to the rm.
+                    (paused / "go").touch()
+                    self.wait_for(lambda: not alive(starter), "the process that starts the run to end")
+                    self.assertEqual((exited, ran.exists()), (130, False), command.communicate()[1])
+
     def test_skipping_a_review_a_round_runs_stops_it_quietly_and_holds_back_its_pr_until_undone(self):
         env, item, _ = self.pull_request()
         head = json.loads(item.read_text())["head_sha"]

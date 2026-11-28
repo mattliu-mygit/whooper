@@ -127,7 +127,17 @@ finished=false
 # What failure.txt says when the review stops without die's reason: a command failed under set -e,
 # unless the trap below records that a signal stopped the review.
 stop_reason="the review stopped at an unexpected error; see whooper-review's error output"
-work="" agent_group="" watchdog_pid="" step_group=""
+work="" agent_group="" agent_file="" watchdog_pid="" step_file=""
+# Stops the process group of the run or a step, which lib/whooper.py session starts, named by the file $1, where session
+# writes the group's ID once it has made the group. While the file is missing, as when this script stops the moment it
+# starts the run, this makes the file instead, and session, finding it, or no work folder for it once the cleanup removes
+# that, exits without starting the run: however the two meet, the run stops with the cleanup or never starts.
+stop_group() {
+  if [[ -n "$1" ]] && ! (set -o noclobber; : > "$1") 2>/dev/null; then
+    kill -TERM -- "-$(cat "$1")" 2>/dev/null || true
+    wait "$(cat "$1")" 2>/dev/null || true
+  fi
+}
 cleanup() {
   local status=$?
   # bash also runs this trap in a process it forked for a background command, when that process cannot
@@ -157,12 +167,8 @@ cleanup() {
   fi
   # The run and everything it started share one process group, so this also stops a server a
   # probe left running. Each step has a group of its own too.
-  for group in "$agent_group" "$step_group"; do
-    if [[ -n "$group" ]]; then
-      kill -TERM -- "-$group" 2>/dev/null || true
-      wait "$group" 2>/dev/null || true
-    fi
-  done
+  stop_group "$agent_file"
+  stop_group "$step_file"
   if [[ -n "$watchdog_pid" ]]; then
     kill "$watchdog_pid" 2>/dev/null || true
   fi
@@ -338,16 +344,16 @@ done
 # settings, with which gremlins' git diff in the mutation step finds the lines diff.patch adds. Its output
 # goes to the error output, so this script's output stays the run directory alone.
 run_step() {
+  step_file="$work/$1.group"
   (
     exec env GH_TOKEN=disabled GIT_SSH_COMMAND=false GIT_TERMINAL_PROMPT=0 TMPDIR="$run/tmp" \
       "${run_config[@]}" GIT_CONFIG_COUNT="$config_count" \
-      "$root/lib/python" -c 'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
+      "$root/lib/python" "$root/lib/whooper.py" session "$step_file" \
       "$root/lib/python" "$root/lib/whooper.py" "$1" "$run" < /dev/null >&2
   ) &
-  step_group=$!
-  wait "$step_group" || echo "whooper-review: the $1 step failed, so the review has no $2" >&2
-  kill -TERM -- "-$step_group" 2>/dev/null || true
-  step_group=""
+  wait "$!" || echo "whooper-review: the $1 step failed, so the review has no $2" >&2
+  stop_group "$step_file"
+  step_file=""
 }
 
 # Before the run starts, while the head's worktree holds the head as committed, the test-gaps step saves
@@ -382,13 +388,15 @@ EOF
 } > "$run/prompt.md"
 
 # GitHub refuses the run: gh sends the token "disabled", and git's credential helper (gh) hands git
-# the same. The launcher starts in a session of its own, so the run and everything it starts form
-# one process group that the time limit and the cleanup can stop, and none of it reads the terminal.
+# the same. The launcher starts in a session of its own (lib/whooper.py session), so the run and
+# everything it starts form one process group that the time limit and the cleanup can stop, and none
+# of it reads the terminal; the group's ID goes in agent.group in the work folder (stop_group).
+agent_file="$work/agent.group"
 (
   cd "$run/head"
   exec env GH_TOKEN=disabled GIT_SSH_COMMAND=false GIT_TERMINAL_PROMPT=0 TMPDIR="$run/tmp" \
     "${run_config[@]}" GIT_CONFIG_COUNT="$config_count" \
-    "$root/lib/python" -c 'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
+    "$root/lib/python" "$root/lib/whooper.py" session "$agent_file" \
     "$root/agents/$WHOOPER_REVIEW_AGENT/review" "$run/prompt.md" < /dev/null
 ) &
 # Waiting on a background run lets an interrupt reach the cleanup at once.

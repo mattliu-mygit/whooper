@@ -59,6 +59,9 @@ from the user's config file (config_path), never from this code. The bin/ script
   whooper.py status <data dir>                                                     -> whooper-status's JSON
   whooper.py show <data dir> <run-id>                                              -> whooper-show's JSON
   whooper.py settings get | set <json>                                             -> settings JSON | saves the given ones
+  whooper.py session <group file> <program> [<argument>...]                        -> runs program in a session of its
+                                                                                      own, after writing its group's ID
+                                                                                      to the group file
 """
 from collections import Counter
 from contextlib import contextmanager, suppress
@@ -1853,6 +1856,20 @@ JS_NOT_MEASURED = re.compile(r"(?:^|/)(?:__tests__|__mocks__)/|\.(?:test|spec)\.
 # manager the tests start installs nothing.
 NODE_RUNNERS = {"vitest": "Vitest", "jest": "Jest"}
 NODE_OFFLINE = {"CI": "true", "npm_config_offline": "true"}
+
+
+def start_session(group_file, program):
+    """Runs program, a list of arguments, in a session of its own, so it and everything it starts form one process group
+    that the command which started it can stop whole, and none of it reads the terminal. First it writes the group's ID,
+    this process's, to group_file, which must not exist yet. A command that stops before that makes group_file itself,
+    then removes the folder it is in (stop_group in bin/whooper-review), and this then exits without starting program,
+    so however late this makes its group, the command's cleanup stops program, or program never starts."""
+    os.setsid()
+    try:
+        write_file(Path(group_file), f"{os.getpid()}\n", exclusive=True)
+    except (FileExistsError, FileNotFoundError):
+        raise SystemExit(f"whooper: {program[0]} did not start, since the command that starts it is stopping")
+    os.execv(program[0], program)
 
 
 def run_command(command, folder, seconds, env):
@@ -4405,6 +4422,8 @@ def main(command, *args):
             write_settings(values)
         else:
             raise SystemExit("usage: whooper-settings get | set <json>")
+    elif command == "session":
+        start_session(args[0], list(args[1:]))
     elif command == "next-round":
         schedule = read_schedule(load_config())
         # A round starts interval_minutes after the last one ended, or at once when whooper-run starts.

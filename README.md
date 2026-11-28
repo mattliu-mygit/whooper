@@ -748,7 +748,8 @@ one fails, the review has no file from it.
 
 A run that passes
 `[review] timeout_minutes` is stopped, and when whooper-review exits it stops the run and every
-process the run started. When whooper-review stops a review for a reason it names, such as the time
+process the run started, or, when it exits before the run has its process group, keeps the run from
+starting at all. When whooper-review stops a review for a reason it names, such as the time
 limit, a failed setup script, or findings that do not fit the schema, it saves that reason in the
 run directory as `failure.txt`; the reason a failed setup script gets ends with the last line the
 script printed on stderr. A review stopped any other way gets a fixed reason there:

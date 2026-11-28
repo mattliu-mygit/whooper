@@ -88,8 +88,16 @@ fi
 [[ -x "$root/agents/$agent/ask" ]] || die "$run ran on $agent, which has no agents/$agent/ask"
 
 work=""
-agent_group="" watchdog_pid=""
+agent_group="" agent_file="" watchdog_pid=""
 finished=false
+# As in whooper-review: stops the run's process group, named by the file lib/whooper.py session writes its ID in, or
+# keeps a run that has not yet made its group from starting.
+stop_group() {
+  if [[ -n "$1" ]] && ! (set -o noclobber; : > "$1") 2>/dev/null; then
+    kill -TERM -- "-$(cat "$1")" 2>/dev/null || true
+    wait "$(cat "$1")" 2>/dev/null || true
+  fi
+}
 cleanup() {
   local status=$?
   # As in whooper-review, a process bash forked for a background command that runs this trap, as when it
@@ -105,10 +113,7 @@ cleanup() {
     status=1
   fi
   # As in whooper-review, this also stops anything the run left running.
-  if [[ -n "$agent_group" ]]; then
-    kill -TERM -- "-$agent_group" 2>/dev/null || true
-    wait "$agent_group" 2>/dev/null || true
-  fi
+  stop_group "$agent_file"
   if [[ -n "$watchdog_pid" ]]; then
     kill "$watchdog_pid" 2>/dev/null || true
   fi
@@ -138,8 +143,9 @@ started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # As in whooper-review: gh, and git's credential helper (gh), get the token "disabled", and the
 # launcher starts in a session of its own, so the run and everything it starts form one process
 # group that the time limit and the cleanup can stop, and none of it reads the terminal.
+agent_file="$work/agent.group"
 env GH_TOKEN=disabled GIT_SSH_COMMAND=false GIT_TERMINAL_PROMPT=0 WHOOPER_RUN="$run" \
-  "$root/lib/python" -c 'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
+  "$root/lib/python" "$root/lib/whooper.py" session "$agent_file" \
   "$root/agents/$agent/ask" "$asks/$n.prompt.md" "$work/answer.md" "$asks/$n" < /dev/null &
 # Waiting on a background run lets an interrupt reach the cleanup at once.
 agent_group=$!
