@@ -736,7 +736,17 @@ impl Gopls {
         Ok(sites)
     }
 
+    /// Asks the server to shut down and exit, as the protocol has a client do, giving it a second, then
+    /// stops what is left of it and of every process group below it.
     fn close(&mut self) {
+        self.deadline = self.deadline.min(Instant::now() + Duration::from_secs(1));
+        if self.call("shutdown", Value::Null).is_ok() {
+            let _ = self.send(json!({"method": "exit"}));
+            let end = Instant::now() + Duration::from_secs(1);
+            while Instant::now() < end && !matches!(self.child.try_wait(), Ok(Some(_))) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
         proc::stop_tree(self.child.id() as i32);
         let _ = self.child.kill();
         let _ = self.child.wait();
