@@ -414,8 +414,9 @@ whooper-skip tell a review that is still running the same way.
 whooper-ask saves each answer in the run directory as `asks/<n>.json`, numbered in order from 1:
 `question`, `finding` (its ID or null), `answer`, `agent`, `started_at` and `ended_at` in UTC, and
 `transcript`, the transcript's path. `asks/<n>.prompt.md` is the run's prompt. A run that passes
-`[ask] timeout_minutes` (10 by default) is stopped with everything it started and, like a run that
-fails, saves no answer; its number is not used again.
+`[ask] timeout_minutes` (10 by default) is stopped with everything it started, or kept from starting
+when the limit passes before it starts, and, like a run that fails, saves no answer; its number is
+not used again.
 
 ## Retry a review
 
@@ -747,7 +748,8 @@ GitHub login and its temporary files in the run directory, and neither changes h
 one fails, the review has no file from it.
 
 A run that passes
-`[review] timeout_minutes` is stopped, and when whooper-review exits it stops the run and every
+`[review] timeout_minutes` is stopped, or kept from starting when the limit passes before it starts,
+and when whooper-review exits it stops the run and every
 process the run started, or, when it exits before the run has its process group, keeps the run from
 starting at all. When whooper-review stops a review for a reason it names, such as the time
 limit, a failed setup script, or findings that do not fit the schema, it saves that reason in the
@@ -796,7 +798,8 @@ the user chooses to, through whooper-submit.
 The poll's run gets the channel's posts in its prompt and no way to act: Claude gets no tools, and
 Devin starts in an empty directory in accept-edits mode, where anything but writing its answer
 needs an approval nobody gives. A poll run that passes `[poll] timeout_minutes` (10 by default) is
-stopped with everything it started, and the cursor stays put, so the next poll reads the same posts.
+stopped with everything it started, or kept from starting when the limit passes before it starts,
+and the cursor stays put, so the next poll reads the same posts.
 slackdump only reads. Review runs have no GitHub
 login and every Slack write denied, and whooper-review refuses to run without `--dry-run`. An ask run
 has no GitHub login either, and reads files but writes nothing except its answer. Claude gets only

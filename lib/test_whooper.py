@@ -5621,6 +5621,72 @@ class RunTest(unittest.TestCase):
                         self.assertEqual((last["result"], last["reviews"]),
                                          ("interrupted", [{"pr": "example-org/example-repo#12", "outcome": "interrupted"}]))
 
+    def test_a_time_limit_that_passes_before_the_run_makes_its_process_group_keeps_the_run_from_starting(self):
+        # A fake uv stops the lib/python that starts a review, poll, or ask run, before it has made the run's process
+        # group, and lets it go on only once the group file the run would write its group's ID to exists, or after 30
+        # seconds. Meanwhile the run's time limit passes: [ask] timeout_minutes takes a fraction of a minute, so the ask
+        # runs a 0.01-minute limit, while a review's and a poll's limits are whole minutes, of at least 1 and 5, so for
+        # them a fake sleep stands in for the limit passing: the watchdog's sleep, which the command itself starts,
+        # ends at once. Under bash 3.2 and 5 alike, the watchdog stops the run through its group file, as the cleanup
+        # does, so the run never starts, claude never runs, and the command stops at the limit and says so.
+        env, item, _ = self.pull_request()
+        self.fake_review_requests()
+        run = self.state / "runs" / "20310727T010246Z-12"
+        run.mkdir(parents=True)
+        (run / "failure.txt").write_text("the review stopped at an unexpected error\n")
+        config = Path(self.env["WHOOPER_CONFIG"])
+        config.write_text(config.read_text() + "\n[ask]\ntimeout_minutes = 0.01\n")
+        uv, sleep, tmp = shutil.which("uv"), shutil.which("sleep"), Path(self.tmp.name)
+
+        def alive(pid):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return False
+            return True
+
+        # (the command and its arguments, what the command line of the lib/python that starts the run names, whose
+        # sleeps the fake sleep ends at once, if any, and what the command says at the limit)
+        for case, (name, args, starts, quick, limit) in enumerate([
+            ("whooper-review", [str(item), "--dry-run"], "/agents/claude/review ", "/bin/whooper-review ",
+             "the review run passed its 45-minute limit"),
+            ("whooper-poll", [], "/agents/claude/poll ", "/bin/whooper-poll", "the claude poll run passed its 10-minute limit"),
+            ("whooper-ask", [run.name, "Why did it stop?"], "/agents/claude/ask ", None,
+             "the ask run passed its 0.01-minute limit"),
+        ]):
+            for n, bash in enumerate(BASHES):
+                with self.subTest(name, bash=str(bash)):
+                    paused, ran = tmp / f"limit-paused-{case}-{n}", tmp / f"limit-ran-{case}-{n}"
+                    self.claude_script(f"touch '{ran}'\nexec sleep 30")
+                    # The lib/python that starts the run is the fake uv's parent, and its command line names the group
+                    # file right after session.
+                    self.script(self.fakes / "uv", "\n".join([
+                        'parent="$(ps -ww -o command= -p "$PPID")"',
+                        f'case "$parent" in *"{starts}"*) if mkdir "{paused}" 2>/dev/null; then',
+                        f'  echo "$PPID" > "{paused}/pid.tmp" && mv "{paused}/pid.tmp" "{paused}/pid"',
+                        '  group="${parent#* session }"',
+                        f'  until [ -e "${{group%% *}}" ] || [ -e "{paused}/go" ]; do sleep 0.1; done',
+                        "fi ;; esac",
+                        f'exec "{uv}" "$@"',
+                    ]))
+                    self.script(self.fakes / "sleep", "\n".join([
+                        *([f'case "$(ps -ww -o command= -p "$PPID")" in *"{quick}"*) exit 0 ;; esac'] if quick else []),
+                        f'exec "{sleep}" "$@"',
+                    ]))
+                    folder = bash_folder(bash, tmp / f"limit-bash-{case}-{n}")
+                    command = self.start_command(name, *args, env={**env, "PATH": f"{folder}{os.pathsep}{env['PATH']}"})
+                    self.wait_for(lambda: (paused / "pid").exists() or command.poll() is not None,
+                                  f"{name} to start the run")
+                    starter = int((paused / "pid").read_text())
+                    with suppress(subprocess.TimeoutExpired):
+                        command.wait(timeout=30)
+                    exited = command.returncode
+                    (paused / "go").touch()
+                    self.wait_for(lambda: not alive(starter), "the process that starts the run to end")
+                    stderr = command.communicate()[1]
+                    self.assertEqual((exited, ran.exists()), (1, False), stderr)
+                    self.assertIn(limit, stderr)
+
     def test_skipping_a_review_a_round_runs_stops_it_quietly_and_holds_back_its_pr_until_undone(self):
         env, item, _ = self.pull_request()
         head = json.loads(item.read_text())["head_sha"]
@@ -5694,19 +5760,19 @@ class RunTest(unittest.TestCase):
     def test_a_review_limit_typed_as_a_float_gives_the_watchdog_that_many_minutes_under_each_bash(self):
         # whooper-review's watchdog sleeps the limit times 60, which bash multiplies, and bash 3.2 and 5 both stop the
         # review at a syntax error on 45.0. With [review] timeout_minutes = 45.0, edited by hand, the watchdog sleeps
-        # 2700 seconds under each bash, as with 45. The test reads them from the watchdog's arguments, which end with
-        # <seconds> <work folder>/timed-out <the run's process group>, while the review run waits.
+        # 2700 seconds under each bash, as with 45. The test reads them from the watchdog's sleep, the only sleep in
+        # whooper-review's process group, while the review run, whose fake claude sleeps in a group of its own, waits.
         config = Path(self.env["WHOOPER_CONFIG"])
         config.write_text(config.read_text().replace("timeout_minutes = 45\n", "timeout_minutes = 45.0\n"))
         env, item, _ = self.pull_request()
         self.fake_claude(review="exec sleep 30")
 
         def watchdog_seconds(review):
-            found = subprocess.run(["pgrep", "-g", str(review.pid), "-f", "/timed-out"], capture_output=True,
+            found = subprocess.run(["pgrep", "-g", str(review.pid), "-x", "sleep"], capture_output=True,
                                    text=True).stdout.split()
             commands = [subprocess.run(["ps", "-o", "command=", "-p", pid], capture_output=True, text=True).stdout
                         for pid in found]
-            return next((m[1] for c in commands if (m := re.search(r"(\S+) \S+/timed-out \d+$", c.strip()))), None)
+            return next((m[1] for c in commands if (m := re.fullmatch(r"sleep (\S+)", c.strip()))), None)
 
         for n, bash in enumerate(BASHES):
             with self.subTest(bash=str(bash)):

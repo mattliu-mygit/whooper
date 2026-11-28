@@ -37,6 +37,17 @@ stop_group() {
     wait "$(cat "$1")" 2>/dev/null || true
   fi
 }
+# As in whooper-review: once the time limit passes, the watchdog marks the run timed out and stops it with stop_group, so
+# a run that has not yet made its process group never starts, and a TERM to the watchdog stops its sleep too.
+watchdog() {
+  local me
+  me="$(exec /bin/sh -c 'echo "$PPID"')"
+  trap 'pkill -P "$me"; exit' TERM
+  sleep "$1" &
+  wait "$!" || exit 0
+  : > "$work/timed-out"
+  stop_group "$agent_file"
+}
 cleanup() {
   local status=$?
   # As in whooper-review, a process bash forked for a background command that runs this trap, as when it
@@ -90,10 +101,7 @@ agent_file="$work/agent.group"
 "$root/lib/python" "$root/lib/whooper.py" session "$agent_file" \
   "$root/agents/$WHOOPER_POLL_AGENT/poll" "$poll/$stamp.prompt.md" "$poll/$stamp.answer.json" "$poll/$stamp" < /dev/null &
 agent_group=$!
-"$root/lib/python" -c 'import os, signal, sys, time
-time.sleep(float(sys.argv[1]))
-open(sys.argv[2], "w").close()
-os.killpg(int(sys.argv[3]), signal.SIGTERM)' "$((WHOOPER_POLL_TIMEOUT_MINUTES * 60))" "$work/timed-out" "$agent_group" &
+watchdog "$((WHOOPER_POLL_TIMEOUT_MINUTES * 60))" &
 watchdog_pid=$!
 # set -e would stop the script at a failed wait, before it says where the run's errors are.
 agent_exit=0
