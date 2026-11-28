@@ -4526,7 +4526,7 @@ class RunTest(unittest.TestCase):
                                   "approval": {"verdict": "approve_once_ci_passes", "reason": "Read the diff."}}}))
         (self.fakes / "overview.json").write_text(json.dumps(self.overview_of_the_pr()))
         self.script(self.fakes / "claude", "\n".join([
-            f"git diff {merge_base} HEAD > '{run_diff}'",
+            f"git diff --no-ext-diff --no-textconv {merge_base} HEAD > '{run_diff}'",
             'cp "${0%/*}/overview.json" "$WHOOPER_RUN/"',
             'cat "${0%/*}/result.json"',
         ]))
@@ -4646,14 +4646,20 @@ class RunTest(unittest.TestCase):
         self.assertEqual(((run / "diff.patch").read_text(), (tmp / "changed.txt").read_text()), (plain, names))
 
     def test_the_run_reads_its_own_git_diff_as_the_kept_diff_whatever_the_git_config_says(self):
-        env, item, merge_base = self.pull_request(app=self.APP_IN_TWO_HUNKS, more=self.MORE_FILES)
+        # The repo's own .gitattributes names app.txt's diff driver, so the textconv filter the user's config gives that
+        # driver reaches a git diff without --no-textconv, as diff.external reaches one without --no-ext-diff: no git
+        # setting turns either off, and an empty diff.external makes git fail to start it.
+        attributes = "generated.txt -diff\napp.txt diff=shout\n"
+        env, item, merge_base = self.pull_request(app=self.APP_IN_TWO_HUNKS,
+                                                  more={**self.MORE_FILES, ".gitattributes": (attributes, attributes)})
         plain = self.plain_patch(env, merge_base)
-        # Every setting but diff.external, which no git setting turns off: an empty one makes git fail to start it.
-        self.write_git_config(env, [setting for setting in self.diff_settings() if "diff.external" not in setting])
+        self.write_git_config(env, self.diff_settings())
         tmp = Path(self.tmp.name)
-        # The run reads the change as prompts/review.md tells it to, with a plain git diff, and stops.
-        self.script(self.fakes / "claude", f"git diff {merge_base} HEAD > '{tmp / 'run.diff'}'\n"
-                                           f"git config whooper.kept > '{tmp / 'kept.txt'}'")
+        # The run reads the change with the git diff prompts/review.md names, and stops.
+        self.script(self.fakes / "claude", "\n".join([
+            "command=\"$(sed -n 's/.*Read the change with `\\([^`]*\\)`.*/\\1/p' \"$WHOOPER_RUN/prompt.md\")\"",
+            f"eval \"$(echo \"$command\" | sed 's/<merge base>/{merge_base}/')\" > '{tmp / 'run.diff'}'",
+            f"git config whooper.kept > '{tmp / 'kept.txt'}'"]))
         # The environment Whooper starts in already holds git config: a setting the review sets again, which
         # the review's own wins over, and one the run keeps.
         self.command("whooper-review", str(item), "--dry-run",

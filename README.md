@@ -618,13 +618,15 @@ around each change from `GIT_DIFF_OPTS`, whatever its config says, the second ev
 so whooper-review runs everything without them, as whooper-show's rebuild does. The list of
 changed files the repo's setup script gets (`WHOOPER_CHANGED`) takes the same rename detection,
 order, quoting, and submodules. Some of your git config still reaches those diffs, since no setting
-can pin it. git fails to start an empty `diff.external` rather than turning it off, so the run's own
-git diff and gremlins' still run an external diff tool your config names. The reviewed repo's own
-`.gitattributes` is part of the PR, so Whooper keeps it, and with it the settings your config gives a
-diff driver it names: that driver's hunk-header pattern (`xfuncname`) and `binary` reach every diff,
-and its `textconv` filter, `command`, and `algorithm` the run's and gremlins'. And a submodule's own
-`ignore` setting, in the repo's `.gitmodules` or your config, hides that submodule's change from all of
-them alike, which `--ignore-submodules` would override for `diff.patch` alone. Then it runs the repo's
+can pin it. git fails to start an empty `diff.external` rather than turning it off, and the reviewed
+repo's own `.gitattributes` is part of the PR, so Whooper keeps it, and with it the settings your
+config gives a diff driver it names. So `prompts/review.md` tells the run to read the change with
+`git diff --no-ext-diff --no-textconv`, which leaves out an external diff tool your config names and
+that driver's `textconv` filter and `command`; a run that ignores the prompt still gets them, and
+gremlins' git diff always does. The driver's hunk-header pattern (`xfuncname`) and `binary` reach
+every diff, and its `algorithm` the run's and gremlins'. And a submodule's own `ignore` setting, in
+the repo's `.gitmodules` or your config, hides that submodule's change from all of them alike, which
+`--ignore-submodules` would override for `diff.patch` alone. Then it runs the repo's
 setup script, if the config names one, which may add variables to the run's environment and prints
 a paragraph for the prompt. Then, when the diff adds lines to Go, JavaScript, or TypeScript code, a step
 saves `test_gaps.json`: which of those lines no test ran ([See reviews](#see-reviews)). For Go, it runs
