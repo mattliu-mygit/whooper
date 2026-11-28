@@ -751,17 +751,22 @@ def read_reviews(data, now):
     return reviews
 
 
-# The arguments of the git diff that writes a review's diff.patch in bin/whooper-review, from its -c on,
-# which keep it a plain patch whatever the user's git config says: no external diff tool, textconv
-# filter, or color, a/ and b/ before the paths, a submodule's commit lines rather than its log, git's
-# default hunks (3 unchanged lines around each change, and a new hunk wherever more than 6 unchanged
-# lines separate two changes), algorithm (myers), and rename detection (renames but not copies), no
-# order file, a blank line of context printed with its leading space, which only -c can set, and
-# object names of at least 12 digits, which bin/whooper-review says why it chose. rebuilt_diff passes
-# the same ones, so keep the two lists the same.
-PLAIN_DIFF = ("-c", "diff.suppressBlankEmpty=false", "diff", "--no-ext-diff", "--no-textconv", "--no-color",
-              "--src-prefix=a/", "--dst-prefix=b/", "--submodule=short", "--unified=3", "--inter-hunk-context=0",
-              "--diff-algorithm=myers", "-O/dev/null", "--find-renames", "--abbrev=12")
+# The arguments of the git diff that writes a review's diff.patch in bin/whooper-review, from its first -c
+# on, which keep it a plain patch, as git's defaults print it whatever the user's git config says: no
+# external diff tool, textconv filter, or color, a/ and b/ before the paths, a submodule's commit lines
+# rather than its log, hunks of 3 unchanged lines around each change, and a new one wherever more than 6
+# unchanged lines separate two changes, found by the myers algorithm with the indent heuristic, a blank line
+# of context printed with its leading space, renames found but not copies, among at most 1,000 files, no
+# order file, paths with unusual characters quoted, each file up to 512 MiB compared as text, no
+# attributes from the user's attributes file, such as a hunk-header pattern, each changed submodule
+# shown, unless the repo's .gitmodules or the user's config says to ignore that one, and object names
+# of at least 12 digits, which bin/whooper-review says why it chose. The settings git diff has no flag
+# for go before it with -c. rebuilt_diff passes the same ones, so keep the two lists the same.
+PLAIN_DIFF = ("-c", "diff.suppressBlankEmpty=false", "-c", "core.quotePath=true", "-c", "core.bigFileThreshold=512m",
+              "-c", "core.attributesFile=/dev/null", "-c", "diff.ignoreSubmodules=none", "diff", "--no-ext-diff",
+              "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", "--submodule=short", "--unified=3",
+              "--inter-hunk-context=0", "--diff-algorithm=myers", "--indent-heuristic", "--find-renames", "-l1000",
+              "-O/dev/null", "--abbrev=12")
 
 
 def repo_clone(repo):
@@ -2412,10 +2417,11 @@ MUTATIONS = {
     "INCREMENT_DECREMENT": {"++": "--", "--": "++"},
     "INVERT_NEGATIVES": {"-": "+"},
 }
-# git settings for the git diff gremlins runs to find the changed lines, in the folder it starts in: paths relative to
-# that folder, which gremlins compares with paths relative to it; no lines around each change, since gremlins takes a
-# hunk's lines as one range from its first added line, so with context it would change unchanged lines and miss later
-# changed ones; and no color, which gremlins cannot read, so it would change every line.
+# git settings for the git diff gremlins runs to find the changed lines, in the folder it starts in, which the step
+# gives git after the run's own, so these win: paths relative to that folder, which gremlins compares with paths
+# relative to it; no lines around each change, since gremlins takes a hunk's lines as one range from its first added
+# line, so with context it would change unchanged lines and miss later changed ones; and no color, which gremlins
+# cannot read, so it would change every line.
 MUTATION_GIT = {"diff.relative": "true", "diff.context": "0", "color.diff": "false"}
 
 
@@ -2463,8 +2469,10 @@ def mutation(run, seconds=MUTATION_SECONDS):
             else:
                 (head / edited).unlink(missing_ok=True)
         deadline = monotonic() + seconds
-        env = {**os.environ, **GO_OFFLINE, "GIT_CONFIG_COUNT": str(len(MUTATION_GIT)),
-               **{f"GIT_CONFIG_{kind}_{i}": value for i, pair in enumerate(MUTATION_GIT.items())
+        # The git config entries the environment holds, such as the run's that whooper-review gives every step, stay.
+        count = int(os.environ.get("GIT_CONFIG_COUNT") or 0)
+        env = {**os.environ, **GO_OFFLINE, "GIT_CONFIG_COUNT": str(count + len(MUTATION_GIT)),
+               **{f"GIT_CONFIG_{kind}_{i}": value for i, pair in enumerate(MUTATION_GIT.items(), count)
                   for kind, value in zip(("KEY", "VALUE"), pair)}}
         options = ["--workers", str(MUTATION_WORKERS), "--timeout-coefficient", str(MUTATION_TIMEOUT_COEFFICIENT)]
         with tempfile.TemporaryDirectory() as scratch:

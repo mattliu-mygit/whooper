@@ -228,19 +228,29 @@ git -C "$core" worktree add --quiet --detach "$run/base" "$merge_base"
 # The worktrees go when the review ends, so the diff the run reads stays as diff.patch, for showing a
 # past review and for asks about it. It runs in the head worktree, as the run's git diff does, because
 # git applies the .gitattributes it finds there: a file marked -diff shows as binary. The arguments
-# keep it a plain patch whatever the user's git config says: no external diff tool, textconv filter,
-# or color, a/ and b/ before the paths, a submodule's commit lines rather than its log, git's default
-# hunks (3 unchanged lines around each change, and a new hunk wherever more than 6 unchanged lines
-# separate two changes), algorithm (myers), and rename detection (renames but not copies), no order
-# file, a blank line of context printed with its leading space, which only -c can set, and object
-# names of at least 12 digits. git's default, core.abbrev=auto, sizes names by how many objects the
-# clone holds, so they would grow as the cache's clone does; no two objects in a clone share 12
-# digits in practice, so those stay put, and they stay as short as the names in the run's other git
-# output, which its environment below gives 12 digits too. whooper-show rebuilds the diff of a run
+# keep it a plain patch, as git's defaults print it whatever the user's git config says:
+#   - no external diff tool, textconv filter, or color, a/ and b/ before the paths, and a submodule's
+#     commit lines rather than its log;
+#   - hunks of 3 unchanged lines around each change, and a new one wherever more than 6 unchanged lines
+#     separate two changes, found by the myers algorithm with the indent heuristic, and a blank line of
+#     context printed with its leading space;
+#   - renames found but not copies, among at most 1,000 files, and no order file;
+#   - paths with unusual characters quoted, each file up to 512 MiB compared as text, and no attributes
+#     from the user's attributes file, such as a hunk-header pattern, so only the repo's .gitattributes
+#     count;
+#   - each changed submodule shown, unless the repo's .gitmodules or the user's config says to ignore
+#     that one: the run's config entries below cannot override that, as --ignore-submodules would, so
+#     diff.patch keeps it too;
+#   - object names of at least 12 digits. git's default, core.abbrev=auto, sizes names by how many
+#     objects the clone holds, so they would grow as the cache's clone does; no two objects in a clone
+#     share 12 digits in practice, so those stay put, and they stay as short as the names in the run's
+#     other git output, which its environment below gives 12 digits too.
+# The settings git diff has no flag for go before it with -c. whooper-show rebuilds the diff of a run
 # from before this file with the same arguments, lib/whooper.py's PLAIN_DIFF.
-git -C "$run/head" -c diff.suppressBlankEmpty=false diff --no-ext-diff --no-textconv --no-color --src-prefix=a/ \
-  --dst-prefix=b/ --submodule=short --unified=3 --inter-hunk-context=0 --diff-algorithm=myers -O/dev/null --find-renames \
-  --abbrev=12 "$merge_base" HEAD > "$run/diff.patch"
+git -C "$run/head" -c diff.suppressBlankEmpty=false -c core.quotePath=true -c core.bigFileThreshold=512m \
+  -c core.attributesFile=/dev/null -c diff.ignoreSubmodules=none diff --no-ext-diff --no-textconv --no-color \
+  --src-prefix=a/ --dst-prefix=b/ --submodule=short --unified=3 --inter-hunk-context=0 --diff-algorithm=myers \
+  --indent-heuristic --find-renames -l1000 -O/dev/null --abbrev=12 "$merge_base" HEAD > "$run/diff.patch"
 # skills holds a content hash of every skill the run can load, so a finding traces to the skill version behind it.
 jq --arg run_id "$run_id" --arg merge_base "$merge_base" --arg as_of "$as_of" --arg agent "$WHOOPER_REVIEW_AGENT" \
   --argjson skills "$("$root/lib/python" "$root/lib/whooper.py" skills "$HOME/.claude/skills")" \
@@ -260,8 +270,11 @@ fi
 
 # The repo's setup script gets the run's paths and changed files, may append KEY=value lines for
 # the run's environment to WHOOPER_SETUP_ENV, and prints what the run can use for the prompt.
-# Exporting the paths here also gives them to the teardown script.
-git -C "$core" diff --name-only "$merge_base" "$head_sha" > "$work/changed.txt"
+# Exporting the paths here also gives them to the teardown script. The list of changed files takes
+# those of diff.patch's settings that change which files git lists and how: a moved file listed by
+# its new path, among at most 1,000 files, no order file, quoted paths, and each changed submodule.
+git -C "$core" -c core.quotePath=true -c diff.ignoreSubmodules=none diff --name-only --find-renames -l1000 -O/dev/null \
+  "$merge_base" "$head_sha" > "$work/changed.txt"
 : > "$work/setup.env"
 export WHOOPER_RUN_ID="$run_id" WHOOPER_RUN="$run" WHOOPER_HEAD="$run/head" WHOOPER_BASE="$run/base" \
   WHOOPER_CHANGED="$work/changed.txt" WHOOPER_SETUP_ENV="$work/setup.env"
@@ -281,15 +294,36 @@ if [[ -n "$WHOOPER_REPO_SETUP" ]]; then
 fi
 step=review step_log=""
 
+# The run reads the change with its own git diff (prompts/review.md), so its environment gives git, as
+# config entries, which outrank the user's config files, the settings diff.patch's arguments pin, with
+# color.diff=never for --no-color, and diff.noprefix=false, diff.srcPrefix=a/, and diff.dstPrefix=b/ for
+# a/ and b/. --no-ext-diff and --no-textconv have no such entry: git fails to start an empty
+# diff.external rather than turn it off, and a textconv filter goes with the diff attribute that names
+# it, so core.attributesFile=/dev/null leaves the run only those the repo's .gitattributes names
+# (README.md). The entries come after any the environment already holds, so of two entries of the same
+# name the run's wins. The run then sees the hunks, and so the lines inside them, that diff.patch shows,
+# and that GitHub takes comments on.
+config_count="${GIT_CONFIG_COUNT:-0}"
+run_config=()
+for setting in diff.context=3 diff.interHunkContext=0 diff.algorithm=myers diff.indentHeuristic=true \
+  diff.suppressBlankEmpty=false diff.renames=true diff.renameLimit=1000 diff.orderFile=/dev/null core.quotePath=true \
+  core.bigFileThreshold=512m core.attributesFile=/dev/null diff.ignoreSubmodules=none diff.submodule=short \
+  diff.noprefix=false diff.srcPrefix=a/ diff.dstPrefix=b/ color.diff=never core.abbrev=12; do
+  run_config+=("GIT_CONFIG_KEY_$config_count=${setting%%=*}" "GIT_CONFIG_VALUE_$config_count=${setting#*=}")
+  config_count=$((config_count + 1))
+done
+
 # Each step runs lib/whooper.py <step> <run directory> to save one file for the review screen, and stops at
 # a time limit of its own. Whatever it finds, and even if it fails, the review goes on as it would without
 # the file. A step runs in a process group of its own, as the run does, so an interrupt reaches the cleanup
 # at once and the cleanup stops everything the step started, and with the run's environment, since a step
-# may run the PR's tests: no GitHub login, and temporary files in the run directory. Its output goes to the
-# error output, so this script's output stays the run directory alone.
+# may run the PR's tests: no GitHub login, temporary files in the run directory, and the run's git
+# settings, with which gremlins' git diff in the mutation step finds the lines diff.patch adds. Its output
+# goes to the error output, so this script's output stays the run directory alone.
 run_step() {
   (
     exec env GH_TOKEN=disabled GIT_SSH_COMMAND=false GIT_TERMINAL_PROMPT=0 TMPDIR="$run/tmp" \
+      "${run_config[@]}" GIT_CONFIG_COUNT="$config_count" \
       "$root/lib/python" -c 'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
       "$root/lib/python" "$root/lib/whooper.py" "$1" "$run" < /dev/null >&2
   ) &
@@ -330,18 +364,6 @@ fi
 EOF
 } > "$run/prompt.md"
 
-# The run reads the change with its own git diff (prompts/review.md), so its environment gives git the
-# hunks, algorithm, order file, rename detection, blank lines, and object names diff.patch's arguments
-# pin, as git config entries, which outrank the user's config files, after any the environment already
-# holds, so of two entries of the same name the run's wins. The run then sees the hunks, and so the
-# lines inside them, that diff.patch shows, and that GitHub takes comments on.
-config_count="${GIT_CONFIG_COUNT:-0}"
-run_config=()
-for setting in diff.context=3 diff.interHunkContext=0 diff.algorithm=myers diff.orderFile=/dev/null diff.renames=true \
-  diff.suppressBlankEmpty=false core.abbrev=12; do
-  run_config+=("GIT_CONFIG_KEY_$config_count=${setting%%=*}" "GIT_CONFIG_VALUE_$config_count=${setting#*=}")
-  config_count=$((config_count + 1))
-done
 # GitHub refuses the run: gh sends the token "disabled", and git's credential helper (gh) hands git
 # the same. The launcher starts in a session of its own, so the run and everything it starts form
 # one process group that the time limit and the cleanup can stop, and none of it reads the terminal.

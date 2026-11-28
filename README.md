@@ -170,7 +170,7 @@ review stopped before whooper-review checked it. It reads files only: the run di
 locks, the files that name the PR's newest head, which whooper-status reads too, and the repo's
 clone. It refuses a run ID that names no run directory. Reviews kept no `diff.patch` before
 whooper-review saved one, and for such a run whooper-show has git rebuild the diff from the repo's
-clone in the cache: `git diff` between the merge base and the head `run.json` records, with the flags
+clone in the cache: `git diff` between the merge base and the head `run.json` records, with the arguments
 whooper-review's diff uses and the head's `.gitattributes`. git fetches nothing and writes nothing
 there, so the diff is null when the clone lacks either commit or one of their files. Prompting Time
 runs it as the manifest's `show-review` action, which puts `--json` before the run ID; either order
@@ -599,15 +599,28 @@ whooper-review takes the PR's lock, then fetches with the user's login everythin
 read: the head and the merge base of the head and `base_ref`, checked out as two worktrees, and the
 PR's conversation as `github.json`. It saves the diff the run reads, `git diff <merge base> HEAD`
 in the head worktree, as `diff.patch`, which stays when the worktrees go. `diff.patch` is a plain
-patch whatever your git config says: no external diff tool, textconv filter, or color, `a/` and
-`b/` before the paths, a submodule's commit lines rather than its log, git's default hunks (3
-unchanged lines around each change, and a new hunk wherever more than 6 unchanged lines separate two
-changes), algorithm (myers), and rename detection (renames but not copies), no order file, a blank
-line of context with its leading space, and object names of at least 12 digits. git's default for
-those, `core.abbrev=auto`, lengthens names as the cache's clone grows, while 12 digits stay put. The
-run's own git diff takes the same hunks, algorithm, rename detection, order file, blank lines, and
-names from config entries its environment gives git (`GIT_CONFIG_COUNT`), after any your environment
-already holds, so it sees the hunks `diff.patch` shows, and GitHub takes comments in. Then it runs the repo's
+patch, as git's defaults print it whatever your git config says: no external diff tool, textconv
+filter, or color, `a/` and `b/` before the paths, a submodule's commit lines rather than its log,
+hunks of 3 unchanged lines around each change, and a new one wherever more than 6 unchanged lines
+separate two changes, from the myers algorithm with the indent heuristic, a blank line of context
+with its leading space, renames found but not copies, among at most 1,000 files, no order file,
+paths with unusual characters quoted (`core.quotePath`), each file up to 512 MiB compared as text
+(`core.bigFileThreshold`), nothing from your own attributes file (`core.attributesFile`), such as a
+hunk-header pattern, each changed submodule shown (`diff.ignoreSubmodules`), and object names of at
+least 12 digits. git's default for those, `core.abbrev=auto`, lengthens names as the cache's clone
+grows, while 12 digits stay put. The run's own git diff, and the one gremlins runs in the mutation
+step below, take the same settings from config entries their environment gives git
+(`GIT_CONFIG_COUNT`), after any your environment already holds, with `color.diff=never` for no
+color, so the run sees the hunks `diff.patch` shows, and GitHub takes comments in. The list of
+changed files the repo's setup script gets (`WHOOPER_CHANGED`) takes the same rename detection,
+order, quoting, and submodules. Some of your git config still reaches those diffs, since no setting
+can pin it. git fails to start an empty `diff.external` rather than turning it off, so the run's own
+git diff and gremlins' still run an external diff tool your config names. The reviewed repo's own
+`.gitattributes` is part of the PR, so Whooper keeps it, and with it the settings your config gives a
+diff driver it names: that driver's hunk-header pattern (`xfuncname`) and `binary` reach every diff,
+and its `textconv` filter, `command`, and `algorithm` the run's and gremlins'. And a submodule's own
+`ignore` setting, in the repo's `.gitmodules` or your config, hides that submodule's change from all of
+them alike, which `--ignore-submodules` would override for `diff.patch` alone. Then it runs the repo's
 setup script, if the config names one, which may add variables to the run's environment and prints
 a paragraph for the prompt. Then, when the diff adds lines to Go, JavaScript, or TypeScript code, a step
 saves `test_gaps.json`: which of those lines no test ran ([See reviews](#see-reviews)). For Go, it runs
@@ -687,10 +700,11 @@ which changed Go lines that tests ran still pass their tests when changed. It fi
 text of each Go file the run changed in the head's worktree, and removes those it added, so gremlins reads the
 reviewed commit. Then it runs `gremlins unleash --diff <merge base> --workers 2 --timeout-coefficient 10` once
 in the folder of each changed Go file, but for one inside another such folder, with `GOPROXY=off
-GOTOOLCHAIN=local` and git set to `diff.relative=true`, `diff.context=0`, and `color.diff=false`, since
-gremlins compares paths relative to its folder, takes each hunk's added lines as one range, and cannot read
-color. gremlins runs the folder's tests with coverage, then for each changed line they run makes one small
-change at a time, such as `>` to `>=`, in a copy of the module, and runs the line's package's tests again.
+GOTOOLCHAIN=local` and the run's git settings, so gremlins finds the lines `diff.patch` adds, then
+`diff.relative=true`, `diff.context=0`, and `color.diff=false`, since gremlins compares paths relative to
+its folder, takes each hunk's added lines as one range, and cannot read color. gremlins runs the folder's
+tests with coverage, then for each changed line they run makes one small change at a time, such as `>` to
+`>=`, in a copy of the module, and runs the line's package's tests again.
 Whooper keeps only lines the diff adds and `test_gaps.json` does not list as not run, a surviving change first,
 one change a line, and at most 7 lines a file, and leaves out changes that ran out of time or did not compile.
 It stops after 15 minutes, keeping the folders gremlins finished, and `limits` says what it did not do: without

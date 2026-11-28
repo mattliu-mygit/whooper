@@ -4496,72 +4496,96 @@ class RunTest(unittest.TestCase):
          "}", "", "// Prints the total of the prices.", "void report(int total)", "{", "    if (total > 0)", "    {",
          '        printf("%d\\n", total);', "    }", "}"],
     ))
-    # The PR's other files, for diff_settings: report.c; notes.txt, which moves to docs/notes.txt; and
-    # app-copy.txt, a copy of app.txt as it was, which git's default rename detection shows as a new file.
+    # The PR's other files, for diff_settings: report.c; notes.txt, which moves to docs/notes.txt; app-copy.txt, a copy
+    # of app.txt as it was, which git's default rename detection shows as a new file; greeting.txt, which moves to
+    # hello.txt with its last line changed, a rename git finds only by comparing greeting.txt with each new file,
+    # app-copy.txt and hello.txt; café.txt, whose name git quotes; and sliders.txt, which gains 3 lines that git could
+    # show in more than one place, and its indent heuristic picks one.
+    GREETING = "".join(f"{word}\n" for word in ["hello", "there", "one", "two", "three", "four", "five", "six", "seven",
+                                                 "eight"])
     MORE_FILES = {"report.c": REPORT_C, "notes.txt": ("first\nsecond\nthird\n", None),
-                  "docs/notes.txt": (None, "first\nsecond\nthird\n"), "app-copy.txt": (None, APP_IN_TWO_HUNKS[0])}
+                  "docs/notes.txt": (None, "first\nsecond\nthird\n"), "app-copy.txt": (None, APP_IN_TWO_HUNKS[0]),
+                  "greeting.txt": (GREETING, None), "hello.txt": (None, GREETING.replace("eight", "EIGHT")),
+                  "café.txt": ("one\n", "one\ntwo\n"),
+                  "sliders.txt": ("1\n2\na\n\nb\n3\n4\n", "1\n2\na\n\nb\na\n\nb\n3\n4\n")}
 
     def diff_settings(self):
-        """The git settings, as (section, name, value), each of which changes the patch git diff prints of
-        the PR that pull_request makes with APP_IN_TWO_HUNKS and MORE_FILES, and which whooper-review pins,
-        to git's defaults but for 12-digit object names, both in diff.patch and in its run's environment: 10
-        unchanged lines around each change instead of 3, hunks at most 5 lines apart joined into one, the
-        patience algorithm, an order file that puts the submodule and report.c first, copies found as well
-        as renames, a blank line of context printed without its leading space, and object names of at
-        least 20 digits."""
-        order = Path(self.tmp.name) / "order"
-        order.write_text("vendor/*\nreport.c\n")
-        return [("diff", "context", "10"), ("diff", "interHunkContext", "5"), ("diff", "algorithm", "patience"),
-                ("diff", "orderFile", str(order)), ("diff", "renames", "copies"), ("diff", "suppressBlankEmpty", "true"),
-                ("core", "abbrev", "20")]
-
-    def write_git_config(self, env, settings):
-        """Writes settings, as (section, name, value), as the git config of env's home."""
-        Path(env["GIT_CONFIG_GLOBAL"]).write_text("".join(f"[{section}]\n\t{name} = {value}\n"
-                                                          for section, name, value in settings))
-
-    def change_every_diff(self, env):
-        """Writes the git config of env's home, in which each setting changes what git diff prints: an
-        external diff tool, a textconv filter for app.txt, color, paths without a/ and b/, a submodule's
-        log instead of its commit lines, and diff_settings."""
+        """The git settings, each as the config entries it takes, by name, each of which changes the patch git diff
+        prints of the PR that pull_request makes with APP_IN_TWO_HUNKS and MORE_FILES, and which whooper-review pins,
+        to git's defaults but for 12-digit object names, in diff.patch, in its run's environment, but for the external
+        diff tool, and in the setup script's list of changed files where they change it: 10 unchanged lines around each
+        change instead of 3, hunks at most 5 lines apart joined into one, the patience algorithm, an order file that
+        puts the submodule and report.c first, no rename detection, a blank line of context printed without its leading
+        space, object names of at least 20 digits, café.txt's name unquoted, the submodule left out, rename detection
+        that compares at most 1 file with 1 other, a hunk-header pattern and a textconv filter that the user's
+        attributes file gives hello.txt and app.txt, an external diff tool, color, set through color.ui and through
+        color.diff, paths without a/ and b/, and with others before them, a submodule's log instead of its commit
+        lines, each file over 10 bytes shown as binary, and no indent heuristic."""
         tmp = Path(self.tmp.name)
+        order, attributes = tmp / "order", tmp / "attributes"
+        order.write_text("vendor/*\nreport.c\n")
+        attributes.write_text("app.txt diff=shout\nhello.txt diff=hello\n")
         self.script(tmp / "external", 'echo "external diff of $1"')
         self.script(tmp / "shout", 'tr a-z A-Z < "$1"')
-        (tmp / "attributes").write_text("app.txt diff=shout\n")
-        self.write_git_config(env, [
-            ("core", "attributesFile", str(tmp / "attributes")), ("color", "ui", "always"),
-            ("diff", "external", str(tmp / "external")), ("diff", "noprefix", "true"), ("diff", "submodule", "log"),
-            ('diff "shout"', "textconv", str(tmp / "shout")), *self.diff_settings(),
-        ])
+        return [{"diff.context": "10"}, {"diff.interHunkContext": "5"}, {"diff.algorithm": "patience"},
+                {"diff.orderFile": str(order)}, {"diff.renames": "false"}, {"diff.suppressBlankEmpty": "true"},
+                {"core.abbrev": "20"}, {"core.quotePath": "false"}, {"diff.ignoreSubmodules": "all"},
+                {"diff.renameLimit": "1"}, {"core.attributesFile": str(attributes), "diff.hello.xfuncname": "^hello$"},
+                {"core.attributesFile": str(attributes), "diff.shout.textconv": str(tmp / "shout")},
+                {"diff.external": str(tmp / "external")}, {"color.ui": "always"}, {"color.diff": "always"},
+                {"diff.noprefix": "true"}, {"diff.srcPrefix": "SRC/"}, {"diff.dstPrefix": "DST/"},
+                {"diff.submodule": "log"}, {"core.bigFileThreshold": "10"}, {"diff.indentHeuristic": "false"}]
 
-    def plain_patch(self, env, merge_base, *config):
-        """git's own patch of the PR, with whooper-review's 12-digit object names, then config, such as
-        -c diff.context=10, but none from env's home, which tests write only after this."""
-        return subprocess.run(["git", "-c", "core.abbrev=12", *config, "diff", merge_base, "pr-12"],
-                              cwd=Path(self.tmp.name) / "origin", env=env, check=True, capture_output=True, text=True).stdout
+    def write_git_config(self, env, settings):
+        """Writes settings, each as diff_settings gives it, as the git config of env's home."""
+        lines = []
+        for key, value in {key: value for setting in settings for key, value in setting.items()}.items():
+            section, _, name = key.rpartition(".")
+            top, _, subsection = section.partition(".")
+            lines += [f'[{top} "{subsection}"]' if subsection else f"[{top}]", f"\t{name} = {value}"]
+        Path(env["GIT_CONFIG_GLOBAL"]).write_text("".join(f"{line}\n" for line in lines))
+
+    def plain_patch(self, env, merge_base, setting=None, names=False):
+        """git's own patch of the PR, with whooper-review's 12-digit object names, or with names its list of the files
+        the PR changes, under setting, as diff_settings gives it, but no config from env's home, which tests write only
+        after this."""
+        config = [arg for key, value in (setting or {}).items() for arg in ("-c", f"{key}={value}")]
+        return subprocess.run(["git", "-c", "core.abbrev=12", *config, "diff", *(["--name-only"] if names else []),
+                               merge_base, "pr-12"], cwd=Path(self.tmp.name) / "origin", env=env, check=True,
+                              capture_output=True, text=True).stdout
 
     def test_each_diff_setting_changes_the_patch_of_the_pr(self):
-        # Without this, the tests below of diff.patch, its rebuild, and the run's own git diff could pass with
-        # a setting left as git's default.
+        # Without this, the tests below of diff.patch, its rebuild, the run's own git diff, gremlins' git diff, and the
+        # setup script's list of changed files could pass with a setting left as git's default.
         env, _, merge_base = self.pull_request(app=self.APP_IN_TWO_HUNKS, more=self.MORE_FILES)
-        plain = self.plain_patch(env, merge_base)
-        for section, name, value in self.diff_settings():
-            with self.subTest(setting=f"{section}.{name}"):
-                self.assertNotEqual(self.plain_patch(env, merge_base, "-c", f"{section}.{name}={value}"), plain)
+        plain, names = self.plain_patch(env, merge_base), self.plain_patch(env, merge_base, names=True)
+        listed = set()
+        for setting in self.diff_settings():
+            with self.subTest(setting=", ".join(setting)):
+                self.assertNotEqual(self.plain_patch(env, merge_base, setting), plain)
+            if self.plain_patch(env, merge_base, setting, names=True) != names:
+                listed.update(setting)
+        # The ones that change which files git diff --name-only lists, in what order, or how it writes their names.
+        self.assertEqual(listed, {"diff.orderFile", "diff.renames", "core.quotePath", "diff.ignoreSubmodules",
+                                  "diff.renameLimit"})
 
     def test_the_kept_diff_is_a_plain_patch_whatever_the_git_config_says(self):
         env, item, merge_base = self.pull_request(app=self.APP_IN_TWO_HUNKS, more=self.MORE_FILES)
-        plain = self.plain_patch(env, merge_base)
-        self.change_every_diff(env)
+        plain, names = self.plain_patch(env, merge_base), self.plain_patch(env, merge_base, names=True)
+        self.write_git_config(env, self.diff_settings())
+        # The setup script keeps the list of changed files it gets.
+        tmp = Path(self.tmp.name)
+        self.setup_script(f'cp "$WHOOPER_CHANGED" "{tmp / "changed.txt"}"')
         # The review itself fails, since claude is the fake that exits 1, after it saved the diff.
         self.command("whooper-review", str(item), "--dry-run", env=env)
         [run] = (self.state / "runs").iterdir()
-        self.assertEqual((run / "diff.patch").read_text(), plain)
+        self.assertEqual(((run / "diff.patch").read_text(), (tmp / "changed.txt").read_text()), (plain, names))
 
     def test_the_run_reads_its_own_git_diff_as_the_kept_diff_whatever_the_git_config_says(self):
         env, item, merge_base = self.pull_request(app=self.APP_IN_TWO_HUNKS, more=self.MORE_FILES)
         plain = self.plain_patch(env, merge_base)
-        self.write_git_config(env, self.diff_settings())
+        # Every setting but diff.external, which no git setting turns off: an empty one makes git fail to start it.
+        self.write_git_config(env, [setting for setting in self.diff_settings() if "diff.external" not in setting])
         tmp = Path(self.tmp.name)
         # The run reads the change as prompts/review.md tells it to, with a plain git diff, and stops.
         self.script(self.fakes / "claude", f"git diff {merge_base} HEAD > '{tmp / 'run.diff'}'\n"
@@ -4582,7 +4606,7 @@ class RunTest(unittest.TestCase):
         kept = (run / "diff.patch").read_text()
         # Reviews kept no diff.patch before whooper-review saved one.
         (run / "diff.patch").unlink()
-        self.change_every_diff(env)
+        self.write_git_config(env, self.diff_settings())
         clone = Path(self.tmp.name) / "cache" / "whooper" / "repos" / "sample-org-plain-repo"
         before = files(clone)
         shown = self.command("whooper-show", run.name, "--json", env=env)
@@ -5057,6 +5081,27 @@ class RunTest(unittest.TestCase):
                       " test_gaps.json\n", result.stderr)
         self.assertEqual(self.shown_fields(run, "outcome", "failure", "test_gaps"),
                          {"outcome": "reviewed", "failure": None, "test_gaps": self.PRICES_GAPS})
+
+    def test_gremlins_reads_the_lines_the_diff_adds_whatever_the_git_config_says(self):
+        # Every setting but diff.external, which no git setting turns off.
+        self.write_git_config(self.git_env(), [setting for setting in self.diff_settings()
+                                               if "diff.external" not in setting])
+        tmp = Path(self.tmp.name)
+        # gremlins finds the changed lines with git diff --merge-base in the folder it starts in, and finds nothing to
+        # change. The fake also has git print the same diff with no config but the mutation step's own, and with only
+        # the step's own over the user's config.
+        step = "-c diff.relative=true -c diff.context=0 -c color.diff=false"
+        self.script(self.fakes / "gremlins", "\n".join([
+            f'git diff --merge-base "$3" > "{tmp}/gremlins.diff"',
+            f'GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_COUNT=0 git -c core.abbrev=12 {step} diff --merge-base "$3"'
+            f' > "{tmp}/plain.diff"',
+            f'GIT_CONFIG_COUNT=0 git {step} diff --merge-base "$3" > "{tmp}/config.diff"']))
+        result, _ = self.prices_review("true")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        plain = (tmp / "plain.diff").read_text()
+        self.assertIn("\n+func Half(n int) int {\n", plain)
+        self.assertNotEqual((tmp / "config.diff").read_text(), plain)
+        self.assertEqual((tmp / "gremlins.diff").read_text(), plain)
 
     def test_show_gives_the_commits_since_the_review_and_the_files_that_change_with_the_prs_from_the_clone(self):
         env = {**self.git_env(), "TZ": "America/Los_Angeles"}
