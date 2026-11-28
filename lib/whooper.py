@@ -44,6 +44,8 @@ from the user's config file (config_path), never from this code. The bin/ script
   whooper.py classify <data dir> <run dir>                                         -> verdicts, digest, record
   whooper.py post <data dir> <run dir> <head now> <review comments.json>          -> post.json, digest, record
   whooper.py draft <data dir> <run-id> [<change>]                                  -> the run's drafts JSON
+  whooper.py run-dir <data dir> <run-id> <command>                                 -> the run's directory, or
+                                                                                      command's refusal
   whooper.py submit <data dir> <run dir> <head now> [--print] [--allow-mentions] [--approve-anyway]
                     [--expect=<fingerprint>]                                       -> submit-request.json, submit.json
   whooper.py summary <run dir>                                                     -> the summary channel's text
@@ -4118,12 +4120,16 @@ def main(command, *args):
     elif command == "draft":
         if len(args) < 2:
             raise SystemExit(DRAFT_USAGE)
-        run, change = Path(args[0]) / "runs" / args[1], args[2:]
+        run, change = run_dir(Path(args[0]), args[1], "whooper-draft"), args[2:]
         if not (run / "run.json").exists():
             raise SystemExit(f"whooper-draft: no run {args[1]} in {run.parent}")
         # Drafts start from the run's findings (read_drafts), which only a finished review has.
         read_valid_findings(run, command)
         print(json.dumps(change_drafts(run, *change) if change else read_drafts(run), indent=2))
+    elif command == "run-dir":
+        # bin/ scripts that take a run ID, such as whooper-submit, find its directory here (run_dir).
+        data, run_id, name = args
+        print(run_dir(Path(data), run_id, name))
     elif command == "submit-check":
         review_to_submit(Path(args[0]), Path(args[1]).resolve())
     elif command == "submit":

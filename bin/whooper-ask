@@ -57,7 +57,8 @@ while (($#)); do
   shift
 done
 [[ -n "$run_id" && -n "$question" ]] || die "$usage"
-run="$WHOOPER_STATE/runs/$run_id"
+# A run ID names a folder right under runs/, so lib/whooper.py refuses one such as ../x.
+run="$("$root/lib/python" "$root/lib/whooper.py" run-dir "$WHOOPER_STATE" "$run_id" whooper-ask)" || exit 1
 # whooper-review fills run.json with one jq, and the file stays empty when that jq fails, as when the
 # skills cannot be hashed, so a run.json jq cannot read counts as missing.
 if jq -e . "$run/run.json" > /dev/null 2>&1; then

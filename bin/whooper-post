@@ -36,7 +36,8 @@ while (($#)); do
 done
 [[ -n "$run_id" ]] || die "$usage"
 [[ "$print" == true ]] || die "live posting waits for the user's approval of the rule-file edits; pass --print"
-run="$data/runs/$run_id"
+# A run ID names a folder right under runs/, so lib/whooper.py refuses one such as ../x.
+run="$("$root/lib/python" "$root/lib/whooper.py" run-dir "$data" "$run_id" whooper-post)" || exit 1
 [[ -f "$run/run.json" ]] || die "no run $run_id in $data/runs"
 # whooper-review fills run.json with one jq, and the file stays empty when that jq fails, as when the
 # skills cannot be hashed. jq then prints nothing, and read, left without a line, would stop this

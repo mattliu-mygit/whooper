@@ -4220,6 +4220,25 @@ class RunTest(unittest.TestCase):
         self.stop(review)
         self.assertEqual(holder, f"{review.pid}\n", review.communicate()[1])
 
+    def test_commands_that_take_a_run_id_refuse_a_path_outside_runs(self):
+        # A run ID names a folder right under runs/, so a path such as ../x reads nothing outside it, even
+        # a folder that holds what a run does.
+        runs = self.state / "runs"
+        run, outside = runs / "20310727T010246Z-12", self.state / "elsewhere"
+        for folder in (run, outside):
+            folder.mkdir(parents=True)
+            (folder / "run.json").write_text(json.dumps({"repo": "sample-org/plain-repo", "pr": 12, "head_sha": "1" * 40,
+                                                         "agent": "claude", "run_id": run.name}))
+            (folder / "findings.json").write_text(json.dumps({"status": "reviewed", "skip_reason": "", "findings": [],
+                                                              "approval": {"verdict": "look_first", "reason": "r"}}))
+        for name, extra in [("whooper-draft", []), ("whooper-submit", []), ("whooper-post", ["--print"]),
+                            ("whooper-ask", ["Why?"]), ("whooper-retry", [])]:
+            for run_id in [f"../runs/{run.name}", "../elsewhere", ".."]:
+                with self.subTest(name, run_id=run_id):
+                    result = self.command(name, run_id, *extra)
+                    self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                     (1, "", f"{name}: no run {run_id} in {runs}\n"))
+
     def test_a_signal_the_moment_a_command_makes_its_temporary_folder_leaves_no_folder_behind(self):
         # mktemp makes the folder, inside the test's folder rather than the user's temporary folder, then
         # sends TERM to the command's whole process group, as Ctrl-C or kill -- -<pid> does, before it

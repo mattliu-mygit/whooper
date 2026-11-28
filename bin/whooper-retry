@@ -33,8 +33,8 @@ die() {
 [[ $# == 2 && "$1" == --item ]] && shift
 [[ $# == 1 && "$1" != --item ]] || { echo "usage: whooper-retry [--item] <run-id>" >&2; exit 1; }
 run_id="$1"
-run="$data/runs/$run_id"
-[[ -d "$run" ]] || die "no run $run_id in $data/runs"
+# A run ID names a folder right under runs/, so lib/whooper.py refuses one such as ../x.
+run="$("$root/lib/python" "$root/lib/whooper.py" run-dir "$data" "$run_id" whooper-retry)" || exit 1
 # whooper-review writes run.json after its fetch, with one jq, so a review it stopped before then has
 # none, and one whose skills could not be hashed has an empty one. jq then prints nothing, and read,
 # left without a line, would stop this script under set -e without saying why.
