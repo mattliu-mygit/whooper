@@ -828,7 +828,8 @@ the recheck list while the commands above write to it.
   the listed head is done or has failed 3 times, or once it asks again for a review you removed.
 - `locks/<owner>-<repo>-<pr>/`: the lock of the review that holds the PR, with its process ID in
   `pid` and its run ID in `run_id`. A lock whose process is gone is stale: the next review takes
-  it, and whooper-ask, whooper-status, and whooper-show no longer count its review as running.
+  it, and whooper-ask, whooper-status, and whooper-show no longer count its review as running. The
+  next review also takes over a lock whose process is now some other program.
 - `run.lock/`: the running whooper-run's lock, with its process ID in `pid`. A lock whose process is
   gone, or is now some other program, is stale, and the next whooper-run takes it over.
 - `next-round`: the Unix time of the round whooper-run waits for, written before each wait and

@@ -4205,6 +4205,21 @@ class RunTest(unittest.TestCase):
                 self.stop(process)
                 self.assertEqual(holder, f"{process.pid}\n", process.communicate()[1])
 
+    def test_a_review_takes_over_a_pr_lock_whose_process_is_some_other_program(self):
+        # After a kill -9 or a restart, the lock's process ID can belong to anything, here this test. The
+        # review takes the lock over, then waits in its GitHub fetch, so it holds the lock until the test
+        # stops it.
+        env, item, _ = self.pull_request()
+        self.script(self.fakes / "gh", "exec sleep 30")
+        lock = self.state / "locks" / "sample-org-plain-repo-12"
+        self.hold(lock, os.getpid())
+        review = self.start_command("whooper-review", str(item), "--dry-run", env=env)
+        self.wait_for(lambda: review.poll() is not None or self.read(lock / "pid") == f"{review.pid}\n",
+                      "whooper-review to stop or take the lock")
+        holder = self.read(lock / "pid")
+        self.stop(review)
+        self.assertEqual(holder, f"{review.pid}\n", review.communicate()[1])
+
     def test_a_signal_the_moment_a_command_makes_its_temporary_folder_leaves_no_folder_behind(self):
         # mktemp makes the folder, inside the test's folder rather than the user's temporary folder, then
         # sends TERM to the command's whole process group, as Ctrl-C or kill -- -<pid> does, before it

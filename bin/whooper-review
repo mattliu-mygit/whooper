@@ -178,18 +178,19 @@ trap 'stop_reason="the review was interrupted" step=interrupted step_log=""; exi
 # before it prints its name, runs in a subshell that ignores those signals, so it always prints it.
 work="$(trap '' INT TERM HUP; mktemp -d)"
 
-# A lock whose process is gone is stale, and this review takes it over. As in whooper-run, the traps
-# come before the lock, take makes the lock and writes its pid in a subshell that ignores INT, TERM,
-# and HUP, so no such signal leaves the lock behind, and a review holds flock on <state>/locks from
-# before take until it holds the lock or refuses, so no review reads a lock another review is still
-# making, and of two reviews that find the same stale lock only one takes it over.
+# A lock whose process is gone, or is now some other program, is stale, and this review takes it over.
+# As in whooper-run, the traps come before the lock, take makes the lock and writes its pid in a
+# subshell that ignores INT, TERM, and HUP, so no such signal leaves the lock behind, and a review
+# holds flock on <state>/locks from before take until it holds the lock or refuses, so no review reads
+# a lock another review is still making, and of two reviews that find the same stale lock only one
+# takes it over.
 mkdir -p "$data/locks"
 take() { (trap '' INT TERM HUP; mkdir "$lock" 2>/dev/null && echo "$$" > "$lock/pid"); }
 {
   "$root/lib/python" -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX)'
   if ! take; then
     holder="$(cat "$lock/pid" 2>/dev/null || true)"
-    if [[ -n "$holder" ]] && kill -0 "$holder" 2>/dev/null; then
+    if [[ -n "$holder" ]] && ps -o command= -p "$holder" 2>/dev/null | grep -q whooper-review; then
       die "process $holder is already reviewing $repo#$pr"
     fi
     rm -rf "$lock"
