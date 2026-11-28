@@ -4017,6 +4017,12 @@ def main(command, *args):
         # A poll takes 2 to 3 minutes, so a shorter limit would stop every poll.
         if type(poll_timeout) is not int or poll_timeout < 5:
             raise SystemExit(f"whooper: [poll] timeout_minutes takes a whole number of minutes, at least 5; see {config_path()}")
+        # whooper-review's watchdog multiplies the limit by 60 in bash, which knows whole numbers only, so 1.5
+        # would stop the watchdog and leave the review with no time limit. bool is an int in Python, so true
+        # would otherwise pass as 1.
+        review_timeout = config.get("review", {}).get("timeout_minutes")
+        if type(review_timeout) is not int or review_timeout < 1:
+            raise SystemExit(f"whooper: [review] timeout_minutes takes a whole number of minutes, at least 1; see {config_path()}")
         # whooper-ask's watchdog multiplies the limit in Python, so a fraction of a minute works too.
         ask_timeout = config.get("ask", {}).get("timeout_minutes", ASK_TIMEOUT_MINUTES)
         if type(ask_timeout) not in (int, float) or ask_timeout <= 0:
@@ -4032,7 +4038,7 @@ def main(command, *args):
             "WHOOPER_SUMMARY_CHANNEL": config["slack"]["summary_channel"],
             "WHOOPER_SUMMARY_CHANNEL_NAME": config["slack"]["summary_channel_name"],
             "WHOOPER_SLACKDUMP_WORKSPACE": config["slack"]["slackdump_workspace"],
-            "WHOOPER_REVIEW_TIMEOUT_MINUTES": config["review"]["timeout_minutes"],
+            "WHOOPER_REVIEW_TIMEOUT_MINUTES": review_timeout,
             # A poll run that hangs, such as on a request the network dropped, holds up the loop.
             "WHOOPER_POLL_TIMEOUT_MINUTES": poll_timeout,
             "WHOOPER_ASK_TIMEOUT_MINUTES": ask_timeout,

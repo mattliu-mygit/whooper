@@ -5984,6 +5984,24 @@ class ConfigTest(unittest.TestCase):
                         with self.assertRaises(SystemExit):
                             self.command("env")
 
+    def test_a_review_limit_that_is_not_a_whole_number_of_minutes_fails(self):
+        # whooper-review's watchdog multiplies the limit by 60 in bash, which knows whole numbers only, so 1.5 would
+        # leave the review with no time limit.
+        for value, works in [("45", True), ("1", True), ("1.5", False), ("0", False), ("-5", False), ('"45"', False),
+                             ("true", False), (None, False)]:
+            with self.subTest(value), tempfile.TemporaryDirectory() as tmp:
+                config = Path(tmp) / "config.toml"
+                config.write_text(CONFIG.replace("timeout_minutes = 45\n",
+                                                 "" if value is None else f"timeout_minutes = {value}\n"))
+                with mock.patch.dict(os.environ, WHOOPER_CONFIG=str(config)):
+                    if works:
+                        self.assertIn(f"WHOOPER_REVIEW_TIMEOUT_MINUTES={value}\n", self.command("env"))
+                    else:
+                        with self.assertRaises(SystemExit) as stop:
+                            self.command("env")
+                        self.assertEqual(str(stop.exception), "whooper: [review] timeout_minutes takes a whole number of"
+                                                              f" minutes, at least 1; see {config}")
+
     def test_a_job_on_an_agent_without_a_launcher_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "config.toml"
