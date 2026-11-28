@@ -1182,8 +1182,35 @@ class LanguageServerError(Exception):
     """A language server answered a request with an error, as gopls does for a position where it finds no declaration."""
 
 
-# LanguageServer.stop gives a language server, and each program it started, LANGUAGE_SERVER_STOP_SECONDS to end after
-# the TERM that stops them, then sends whatever is left a SIGKILL and waits as long again for it to end.
+def signal_group(group, signum):
+    """Sends signum, or with 0 nothing, to the process group group, and says whether any of its processes has not ended.
+    killpg fails with ESRCH once nothing of the group is left, and on macOS with EPERM while all that is left has ended
+    but waits for its parent to reap it."""
+    try:
+        os.killpg(group, signum)
+    except (ProcessLookupError, PermissionError):
+        return False
+    return True
+
+
+def groups_below(groups):
+    """The process groups of the processes in groups and of every process those started, however deep, found by parent
+    process ID in what ps lists now, as lib/stop-group finds them."""
+    table = subprocess.run(["ps", "-A", "-o", "pid=", "-o", "ppid=", "-o", "pgid="], capture_output=True,
+                           text=True).stdout
+    rows = [[int(number) for number in line.split()] for line in table.splitlines()]
+    below = found = {pid for pid, _, group in rows if group in groups}
+    while found:
+        found = {pid for pid, parent, _ in rows if parent in found} - below
+        below |= found
+    return {group for pid, _, group in rows if pid in below}
+
+
+# LanguageServer.close gives a language server LANGUAGE_SERVER_SHUTDOWN_SECONDS to answer shutdown and, told to exit,
+# end, before it stops whatever is left (LanguageServer.stop). stop gives the server, and each program it started,
+# LANGUAGE_SERVER_STOP_SECONDS to end after the TERM that stops them, then sends whatever is left a SIGKILL and waits as
+# long again for it to end.
+LANGUAGE_SERVER_SHUTDOWN_SECONDS = 1
 LANGUAGE_SERVER_STOP_SECONDS = 1
 
 
@@ -1196,9 +1223,10 @@ class LanguageServer:
     extensions that the review run changed in the worktree, and those it added, such as a probe's test, so neither the
     run's edits nor its probes reach the server's answers. A request the server answers with an error raises
     LanguageServerError, and the server exiting or writing something other than the protocol raises OSError or
-    ValueError. The server runs in a process group of its own, with the programs it starts, such as the go commands
-    gopls runs, and close stops the whole group (stop), so none of them goes on writing in the worktree once it is
-    closed. Given seconds, stop runs once they pass too, and what the server was asked then raises TimeoutError."""
+    ValueError. The server runs in a process group of its own. close asks it to end, and then stops whatever is left of
+    it and of every program it started, such as the go commands gopls runs, in whatever process group (stop), so none of
+    them goes on writing in the worktree once it is closed. Given seconds, stop runs once they pass too, and what the
+    server was asked then raises TimeoutError."""
 
     def __init__(self, command, tree, commit, env=None, seconds=None, options=None):
         self.tree, self.commit, self.requests, self.opened, self.errors = tree, commit, 0, set(), []
@@ -1230,22 +1258,25 @@ class LanguageServer:
             self.out_of_time = True
             self.stop()
 
-    def stop(self):
-        """Stops the server and the programs it started, which share the process group it leads: a TERM, then a SIGKILL
-        to whatever is left once LANGUAGE_SERVER_STOP_SECONDS pass, and waits as long again for that to end. A program
-        that makes a group of its own escapes this. gopls v0.24.0 runs each go command in gopls's group, but
-        golang.org/x/tools v0.52.0 gives each one a group of its own (golang/go#81408), so once gopls is built on it,
-        this has to find the server's descendants by parent, as lib/stop-group does."""
+    def stop(self, groups=()):
+        """Stops the server and every program it started, however deep: the process groups of the server, of each
+        process below it, as groups_below finds them as stop begins, and groups, which close found before it asked the
+        server to end. Each gets a TERM, then whatever is left a SIGKILL once LANGUAGE_SERVER_STOP_SECONDS pass, and
+        stop waits as long again for that to end. gopls v0.24.0 runs each go command in gopls's group, but
+        golang.org/x/tools v0.52.0 gives each one a group of its own (golang/go#81408), which a stop of the server's
+        group alone would miss."""
+        groups = {self.process.pid, *groups}
+        # Once all of these have ended, ps would find nothing below them.
+        if not any(signal_group(group, 0) for group in groups):
+            return
+        groups |= groups_below(groups)
         for signum in (signal.SIGTERM, signal.SIGKILL):
             deadline = monotonic() + LANGUAGE_SERVER_STOP_SECONDS
-            try:
-                os.killpg(self.process.pid, signum)
-                while monotonic() < deadline:
-                    sleep(0.05)
-                    os.killpg(self.process.pid, 0)
-            # killpg fails with ESRCH once nothing of the group is left, and on macOS with EPERM while all that is left
-            # has ended but waits to be reaped, as the server does until close or gone waits for it.
-            except (ProcessLookupError, PermissionError):
+            groups = {group for group in groups if signal_group(group, signum)}
+            while groups and monotonic() < deadline:
+                sleep(0.05)
+                groups = {group for group in groups if signal_group(group, 0)}
+            if not groups:
                 return
 
     def gone(self):
@@ -1264,11 +1295,12 @@ class LanguageServer:
         except BrokenPipeError:
             raise self.gone() from None
 
-    def call(self, method, params):
-        """The server's answer to the request method with params. Meanwhile the server's notifications are dropped,
+    def call(self, method, params=None):
+        """The server's answer to the request method with params, or with no params at all for None, as for shutdown,
+        which TypeScript 7's language server refuses with params null. Meanwhile the server's notifications are dropped,
         except that each error it shows the user is kept in errors, and a request of the server's own gets null."""
         self.requests += 1
-        self.send({"id": self.requests, "method": method, "params": params})
+        self.send({"id": self.requests, "method": method, **({} if params is None else {"params": params})})
         while True:
             length = None
             while line := self.process.stdout.readline().strip():
@@ -1319,16 +1351,36 @@ class LanguageServer:
         return sorted(sites)
 
     def close(self):
-        """Stops the server, with the programs it started (stop), and closes its pipes."""
-        self.stop()
-        self.process.wait()
-        self.process.stdout.close()
-        # A request the time limit cut off can leave bytes to flush, which the server, now gone, cannot read. close still
-        # closes the pipe then.
-        with suppress(BrokenPipeError):
-            self.process.stdin.close()
-        if self.watchdog:
-            self.watchdog.join()
+        """Stops the server, with the programs it started, and closes its pipes. First close asks the server to end the
+        Language Server Protocol's way, so it can stop the programs it started itself, as gopls cancels its go commands:
+        a shutdown request, then, once the server answers, the exit notification and the end of its input. Once the
+        server ends, or LANGUAGE_SERVER_SHUTDOWN_SECONDS pass, stop ends whatever is left, with the process groups below
+        the server as they were when close began, so a program the server left running in a group of its own as it
+        ended stops too."""
+        groups = groups_below({self.process.pid})
+        # Once the seconds pass, stop ends the server, and with it a wait below for the server's answer or its end.
+        timer = threading.Timer(LANGUAGE_SERVER_SHUTDOWN_SECONDS, self.stop, [groups])
+        timer.start()
+        try:
+            # A server that is gone, ran out of time, or answers with an error is asked no more; the timer ends one that
+            # still runs.
+            with suppress(OSError, ValueError, LanguageServerError):
+                self.call("shutdown")
+                self.send({"method": "exit"})
+                self.process.stdin.close()
+            self.process.wait()
+        finally:
+            timer.cancel()
+            timer.join()
+            self.stop(groups)
+            self.process.wait()
+            self.process.stdout.close()
+            # A request the time limit cut off can leave bytes to flush, which the server, now gone, cannot read. close
+            # still closes the pipe then.
+            with suppress(BrokenPipeError):
+                self.process.stdin.close()
+            if self.watchdog:
+                self.watchdog.join()
 
 
 class Gopls(LanguageServer):

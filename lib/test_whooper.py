@@ -2089,18 +2089,28 @@ class LanguageServerTest(RunDirTest):
     """LanguageServer, through which the connections step asks gopls and TypeScript 7's language server, here run in a
     throwaway repo."""
 
-    def start_server(self):
+    def start_server(self, own_group=False, shuts_down=False):
         """Starts gopls (Gopls) as a fake that starts a child, which ignores TERM and writes a line to a file every
         tenth of a second, as a go command gopls starts writes its build folder, and then answers initialize and waits.
-        Returns the server, the child's process ID, and the file, once the child has written to it."""
+        Given own_group, the child runs in a process group of its own, as gopls built on golang.org/x/tools v0.52.0 runs
+        each go command. Given shuts_down, the fake also answers shutdown, request 2 here, before it comes, keeps what
+        it reads in the file received, and ends once its input ends, as gopls ends once exit closes the connection,
+        though it leaves the child running. Returns the server, the child's process ID, and the file, once the child
+        has written to it."""
         tree, child, written = self.tmp / "tree", self.tmp / "child.pid", self.tmp / "written"
         subprocess.run(["git", "init", "--quiet", str(tree)], env=self.env, check=True)
-        answer = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"capabilities": {}}})
+        answers = [json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"capabilities": {}}})]
+        if shuts_down:
+            answers.append(json.dumps({"jsonrpc": "2.0", "id": 2, "result": None}))
+        start = f"(trap '' TERM; while :; do echo x >> '{written}'; sleep 0.1; done) < /dev/null > /dev/null 2>&1 &"
+        if own_group:
+            # sh starts each job in background in a process group of its own while job control is on.
+            start = f"set -m\n{start}\nset +m"
         fake(self.tmp / "fakes" / "gopls", "\n".join([
-            f"(trap '' TERM; while :; do echo x >> '{written}'; sleep 0.1; done) < /dev/null > /dev/null 2>&1 &",
+            start,
             f"echo $! > '{child}'",
-            f"printf 'Content-Length: {len(answer)}\\r\\n\\r\\n%s' '{answer}'",
-            "exec sleep 60"]))
+            *(f"printf 'Content-Length: {len(answer)}\\r\\n\\r\\n%s' '{answer}'" for answer in answers),
+            f"exec cat > '{self.tmp / 'received'}'" if shuts_down else "exec sleep 60"]))
         with mock.patch.dict(os.environ, self.env, clear=True):
             server = whooper.Gopls(str(self.tmp / "fakes" / "gopls"), tree, "HEAD")
         self.addCleanup(server.close)
@@ -2128,17 +2138,56 @@ class LanguageServerTest(RunDirTest):
                 sleep(0.05)
         self.assertEqual(written.stat().st_size, size)
 
-    def test_a_closed_language_server_leaves_nothing_it_started_running(self):
-        server, child, written = self.start_server()
+    def check_closed(self, own_group):
+        """Checks that close stops the fake, which never answers shutdown, and its child, in a process group of its own
+        given own_group, within the time close allows."""
+        server, child, written = self.start_server(own_group)
+        started = monotonic()
         server.close()
+        took = monotonic() - started
+        self.check_stopped(child, written)
+        # close waits LANGUAGE_SERVER_SHUTDOWN_SECONDS for an answer that never comes, then gives the child, which
+        # ignores the TERM, LANGUAGE_SERVER_STOP_SECONDS before the SIGKILL and as long again to end. The 2 seconds more
+        # are for ps on a busy machine.
+        self.assertLess(took, whooper.LANGUAGE_SERVER_SHUTDOWN_SECONDS + 2 * whooper.LANGUAGE_SERVER_STOP_SECONDS + 2)
+
+    def test_a_closed_language_server_leaves_nothing_it_started_running(self):
+        self.check_closed(own_group=False)
+
+    def test_a_closed_language_server_stops_a_program_it_started_in_a_process_group_of_its_own(self):
+        self.check_closed(own_group=True)
+
+    def test_close_asks_the_server_to_shut_down_and_stops_a_program_it_leaves_running(self):
+        server, child, written = self.start_server(own_group=True, shuts_down=True)
+        server.close()
+        # close asked the server to shut down and then to exit, as the Language Server Protocol has a client do, and
+        # closed its input, at which the server ended by itself.
+        bodies = re.split(rb"Content-Length: \d+\r\n\r\n", (self.tmp / "received").read_bytes())
+        self.assertEqual([json.loads(body) for body in bodies[-2:]],
+                         [{"jsonrpc": "2.0", "id": 2, "method": "shutdown"}, {"jsonrpc": "2.0", "method": "exit"}])
+        self.assertEqual(server.process.returncode, 0)
+        # The child, which the server left running in a group of its own as it ended, stopped all the same.
         self.check_stopped(child, written)
 
-    def test_a_language_server_that_runs_out_of_time_leaves_nothing_it_started_running(self):
-        server, child, written = self.start_server()
+    def check_out_of_time(self, own_group):
+        """Checks that the time limit stops the fake and its child, in a process group of its own given own_group,
+        within the time stop allows."""
+        server, child, written = self.start_server(own_group)
+        started = monotonic()
         # The watchdog thread runs watch with the server's seconds, as TypeScript 7's language server has them; with 0
         # they run out at once.
         server.watch(0)
+        took = monotonic() - started
         self.check_stopped(child, written)
+        # stop gives the child, which ignores the TERM, LANGUAGE_SERVER_STOP_SECONDS before the SIGKILL and as long
+        # again to end. The 2 seconds more are for ps on a busy machine.
+        self.assertLess(took, 2 * whooper.LANGUAGE_SERVER_STOP_SECONDS + 2)
+
+    def test_a_language_server_that_runs_out_of_time_leaves_nothing_it_started_running(self):
+        self.check_out_of_time(own_group=False)
+
+    def test_a_language_server_that_runs_out_of_time_stops_a_program_it_started_in_a_process_group_of_its_own(self):
+        self.check_out_of_time(own_group=True)
 
 
 # The limits test_gaps.json gives whenever it measures, in plain words.
