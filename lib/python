@@ -12,6 +12,12 @@
 # pyproject.toml, and .python-version from the directory it runs in, so it runs in this one.
 set -euo pipefail
 
+# lib/run-tests names in WHOOPER_TEST_PYTHON the Python this script would find, so the thousands of calls in a
+# test run skip uv's two runs, most of a call's cost on a Mac whose security software checks each program that
+# starts.
+if [[ -n "${WHOOPER_TEST_PYTHON:-}" ]]; then
+  exec "$WHOOPER_TEST_PYTHON" -I "$@"
+fi
 lib="$(cd "$(dirname "$0")" && pwd)"
 uv --directory "$lib" sync --locked --quiet --script whooper.py
 python="$(uv --directory "$lib" python find --script whooper.py)"

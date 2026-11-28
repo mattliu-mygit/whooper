@@ -89,8 +89,16 @@ def setUpModule():
     config.write_text(CONFIG)
     (folder / "notes.md").write_text("Run `make test` from the service's directory.")
     os.environ["WHOOPER_CONFIG"] = str(config)
-    # Every test that runs go shares one build cache, so only the first compiles the standard library.
-    os.environ["GOCACHE"] = str(folder / "go-build")
+    # Every test that runs go shares one build cache, so only the first compiles the standard library. lib/run-tests,
+    # which runs the tests in several processes, gives them all one, in WHOOPER_TEST_GOCACHE.
+    os.environ["GOCACHE"] = os.environ.get("WHOOPER_TEST_GOCACHE") or str(folder / "go-build")
+
+
+def memory_heavy(test):
+    """Marks a test that runs gopls, TypeScript, or Vitest, which take up to about 0.7 GB a test, so lib/run-tests runs
+    only a few such tests at once."""
+    test.memory_heavy = True
+    return test
 
 
 # The first line of each fake claude that a command which runs agents may call: it answers --version as Claude
@@ -1922,6 +1930,7 @@ class ConnectionsTest(RunDirTest):
             whooper.connections(run, **options)
         return json.loads((run / "connections.json").read_text())
 
+    @memory_heavy
     def test_go_files_link_by_gopls_and_other_files_by_name_search(self):
         if not self.gopls:
             self.skipTest("gopls is not installed; go install golang.org/x/tools/gopls@latest to run this test")
@@ -2062,12 +2071,16 @@ class ConnectionsTest(RunDirTest):
             folder = Path(tempfile.mkdtemp())
             cls.addClassCleanup(shutil.rmtree, folder, ignore_errors=True)
             cls.typescript_7 = folder if typescript_7_from_bun(folder) else None
+            # lib/run-tests runs each test with its class's setup and cleanups around it, so a later test of the class in
+            # the same process makes the folder again rather than linking to the one this cleanup deleted.
+            cls.addClassCleanup(delattr, cls, "typescript_7")
         if not cls.typescript_7:
             self.skipTest(f"TypeScript 7 is not installed offline: bun's cache, ~/.bun/install/cache, has no"
                           f" {whooper.TYPESCRIPT_SERVER_PACKAGE}@7; bun add typescript@7 in any folder puts one there")
         (package / "node_modules").mkdir(parents=True, exist_ok=True)
         (package / "node_modules" / "typescript").symlink_to(cls.typescript_7 / "node_modules" / "typescript")
 
+    @memory_heavy
     def test_typescript_5_and_6_link_through_ts_callers_to_the_code_that_calls_them(self):
         self.need_typescript()
         run = self.run_dir(TS_SHOP, TS_SHOP_PR)
@@ -2080,6 +2093,7 @@ class ConnectionsTest(RunDirTest):
         self.assertEqual({tuple(call.args[0][:2]) for call in ran.call_args_list}, {("node", str(whooper.TS_CALLERS))})
         self.assertEqual(graph, ts_shop_by_typescript())
 
+    @memory_heavy
     def test_typescript_7_links_through_its_language_server_to_the_code_that_calls_them(self):
         # TS_SHOP's PR with type acquisition on, with which TypeScript 7's language server would download type declarations
         # for the package's dependencies with npm, here a fake that notes each time it runs.
@@ -2099,6 +2113,7 @@ class ConnectionsTest(RunDirTest):
         self.assertFalse((self.tmp / "npm.log").exists())
         self.assertEqual(subprocess.run(["pgrep", "-f", type(self).typescript_7.name]).returncode, 1)
 
+    @memory_heavy
     def test_typescript_7_reads_jsx_and_finds_the_callers_of_a_default_export_without_a_name(self):
         run = self.run_dir(JSX, JSX_PR)
         self.install_typescript_7(run / "head" / "web")
@@ -2187,13 +2202,16 @@ class ConnectionsTest(RunDirTest):
             "limits": [ONE_LEVEL, TYPESCRIPT_MISSES, REMOVED],
         })
 
+    @memory_heavy
     def test_moved_typescript_code_shows_the_callers_typescript_finds_at_each_commit(self):
         self.need_typescript()
         self.check_moved_code(install_typescript)
 
+    @memory_heavy
     def test_moved_code_shows_the_callers_typescript_7_finds_at_each_commit(self):
         self.check_moved_code(self.install_typescript_7)
 
+    @memory_heavy
     def test_typescript_stops_at_its_share_of_the_time_limit_and_name_search_finds_the_rest(self):
         self.need_typescript()
         run = self.run_dir(TS_SHOP, TS_SHOP_PR)
@@ -2475,6 +2493,7 @@ class NodeGapsTest(RunDirTest):
         if not ((PAGE_MODULES / ".bin" / "vitest").exists() and (PAGE_MODULES / "@vitest" / "coverage-v8").is_dir()):
             self.skipTest("Vitest and @vitest/coverage-v8 are not installed offline; npm ci in page/ installs both")
 
+    @memory_heavy
     def test_lists_the_changed_lines_no_vitest_test_ran_in_each_package_whose_tests_run_with_it(self):
         self.need_vitest()
         run = self.run_dir(WEB, WEB_PR)
@@ -2565,6 +2584,7 @@ class NodeGapsTest(RunDirTest):
                     "limits": []})
                 self.assertTrue(gaps["reason"].startswith(why), gaps["reason"])
 
+    @memory_heavy
     def test_the_tests_of_a_package_stop_at_the_steps_time_limit_and_the_go_lines_stay_measured(self):
         self.need_vitest()
         pid = self.tmp / "test.pid"
@@ -3781,6 +3801,12 @@ BASHES = list(dict.fromkeys(
     path.resolve()
     for path in [Path("/bin/bash"), *(Path(entry) / "bash" for entry in os.environ["PATH"].split(os.pathsep))]
     if os.access(path, os.X_OK)))
+
+
+def with_uv(env):
+    """env without WHOOPER_TEST_PYTHON, with which lib/run-tests lets lib/python skip uv, for a test whose fake uv stops
+    lib/python there."""
+    return {name: value for name, value in env.items() if name != "WHOOPER_TEST_PYTHON"}
 
 
 def bash_folder(bash, folder):
@@ -5228,6 +5254,7 @@ class RunTest(unittest.TestCase):
         (tmp / "gobin").mkdir()
         return without_gopls(env, tmp / "gobin"), item
 
+    @memory_heavy
     def test_a_review_saves_how_the_changed_code_connects_before_its_worktrees_go_and_show_prints_it(self):
         env, item = self.shop_pull_request()
         gopls, _ = whooper.find_go_tool("gopls")
@@ -5634,7 +5661,8 @@ class RunTest(unittest.TestCase):
                         f'exec "{rm}" "$@"',
                     ]))
                     folder = bash_folder(bash, tmp / f"bash-{case}-{n}")
-                    command = self.start_command(name, *args, env={**env, "PATH": f"{folder}{os.pathsep}{env['PATH']}"})
+                    command = self.start_command(name, *args,
+                                                 env=with_uv({**env, "PATH": f"{folder}{os.pathsep}{env['PATH']}"}))
                     self.wait_for(lambda: (paused / "pid").exists() or command.poll() is not None,
                                   f"{name} to start the run")
                     starter = int((paused / "pid").read_text())
@@ -5683,8 +5711,8 @@ class RunTest(unittest.TestCase):
                         f'exec "{uv}" "$@"',
                     ]))
                     folder = bash_folder(bash, tmp / f"bash-{case}-{n}")
-                    command = self.start_command(name, env={**self.env, "XDG_STATE_HOME": str(home),
-                                                            "PATH": f"{folder}{os.pathsep}{self.env['PATH']}"})
+                    command = self.start_command(name, env=with_uv({**self.env, "XDG_STATE_HOME": str(home),
+                                                                    "PATH": f"{folder}{os.pathsep}{self.env['PATH']}"}))
                     self.wait_for(lambda: (paused / "pid").exists() or command.poll() is not None,
                                   f"{name} to start {child.strip()}")
                     starter = int((paused / "pid").read_text())
@@ -5748,8 +5776,8 @@ class RunTest(unittest.TestCase):
                         f'exec "{uv}" "$@"',
                     ]))
                     folder = bash_folder(bash, tmp / f"bash-{case}-{n}")
-                    command = self.start_command("whooper-round", env={**env, "XDG_STATE_HOME": str(home),
-                                                                       "PATH": f"{folder}{os.pathsep}{env['PATH']}"})
+                    command = self.start_command("whooper-round", env=with_uv({**env, "XDG_STATE_HOME": str(home),
+                                                                               "PATH": f"{folder}{os.pathsep}{env['PATH']}"}))
                     self.wait_for(lambda: (paused / "pid").exists() or command.poll() is not None,
                                   f"whooper-round to start {child.strip()}")
                     starter = int((paused / "pid").read_text())
@@ -6028,7 +6056,8 @@ class RunTest(unittest.TestCase):
                         f'exec "{sleep}" "$@"',
                     ]))
                     folder = bash_folder(bash, tmp / f"limit-bash-{case}-{n}")
-                    command = self.start_command(name, *args, env={**env, "PATH": f"{folder}{os.pathsep}{env['PATH']}"})
+                    command = self.start_command(name, *args,
+                                                 env=with_uv({**env, "PATH": f"{folder}{os.pathsep}{env['PATH']}"}))
                     self.wait_for(lambda: (paused / "pid").exists() or command.poll() is not None,
                                   f"{name} to start the run")
                     starter = int((paused / "pid").read_text())

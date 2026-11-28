@@ -118,7 +118,14 @@ it, and its only Slack call, `slack_schedule_message`, is pinned by `hooks/slack
 composed text, channel, and time. Devin cannot reach Slack, so it writes `summary.md` in the run
 directory instead.
 
-Tests: `lib/python -m unittest discover -s lib`. They run on a made-up config and never read yours.
+Tests: `lib/run-tests`. It runs every test twice at once, under your PATH and with `/usr/bin:/bin`
+first, where macOS's bash 3.2 and Apple's git run the scripts, in worker processes, half as many per
+PATH as the Mac has CPUs unless `-j <workers>` says otherwise. It prints each failure, error, and
+warning, then the counts, and exits 1 when a test fails or errs or a ResourceWarning appears.
+`-k <pattern>` runs only the tests whose names match, as unittest's `-k` does. On an 18-core Mac both
+runs take about 2½ minutes together, where `lib/python -m unittest discover -s lib`, which runs one
+test at a time under one PATH, takes about 9 minutes. The tests run on a made-up config and never
+read yours; the TypeScript and Vitest tests skip until `npm ci` in page/ installs them.
 
 ## Change settings
 
