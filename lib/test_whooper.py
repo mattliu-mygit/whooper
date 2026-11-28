@@ -4338,6 +4338,43 @@ class RunTest(unittest.TestCase):
                 result = self.run_script(ROOT / path, *args, env=self.git_env())
                 self.assertEqual((result.returncode, list(temporary.iterdir())), (130, []), result.stderr)
 
+    def test_a_background_command_that_cannot_expand_its_words_leaves_the_work_folder_to_the_command(self):
+        # bash runs a script's EXIT trap in the process it forks for a background command too, when that process cannot
+        # expand the command's words, as `sleep "$unset" &` under set -u, in bash 3.2 and 5 alike, and $$ there is still
+        # the script's process ID. None of these commands' own background commands fails so, so BASH_ENV, which bash
+        # runs before a script's first line, gives each a function named after a command it runs in its own process
+        # once it made its work folder: whooper-poll's slackdump, whooper-ask's mkdir, and whooper-review's gh, which
+        # comes once it holds the PR's lock and has its worktrees. The function starts such a background command, waits
+        # for it, notes what is left of the command's work folder, lock, and head worktree, and ends the command. mktemp
+        # makes the work folder inside the test's folder, so the test sees it.
+        env, item, _ = self.pull_request()
+        mktemp, tmp = shutil.which("mktemp"), Path(self.tmp.name)
+        run = self.state / "runs" / "20310727T010246Z-12"
+        run.mkdir(parents=True)
+        (run / "run.json").write_text(json.dumps({"repo": "sample-org/plain-repo", "pr": 12, "agent": "claude"}))
+        lock = self.state / "locks" / "sample-org-plain-repo-12"
+        for path, args, command, kept in [("bin/whooper-poll", [], "slackdump", "folder\n"),
+                                          ("bin/whooper-ask", [run.name, "Why?"], "mkdir", "folder\n"),
+                                          ("bin/whooper-review", [str(item), "--dry-run"], "gh", "folder\nlock\nhead\n")]:
+            with self.subTest(path):
+                temporary, left = tmp / "temporary" / path.replace("/", "-"), tmp / f"{command}.left"
+                temporary.mkdir(parents=True)
+                self.script(self.fakes / "mktemp", f'exec {mktemp} -d "{temporary}/folder.XXXXXX"')
+                bash_env = tmp / f"{command}.bash"
+                bash_env.write_text("\n".join([
+                    f"{command}() {{",
+                    '  sleep "$whooper_test_unset" &',
+                    '  wait "$!" || true',
+                    f'  {{ [ -n "$(ls -A "{temporary}")" ] && echo folder; [ -d "{lock}" ] && echo lock;',
+                    f'    ls -d "{self.state}"/runs/*/head > /dev/null 2>&1 && echo head; }} > "{left}" || true',
+                    "  exit 7",
+                    "}",
+                ]) + "\n")
+                result = self.run_script(ROOT / path, *args, env={**env, "BASH_ENV": str(bash_env)})
+                # The command's own process cleaned up as it ended.
+                self.assertEqual((result.returncode, left.read_text(), list(temporary.iterdir()), lock.exists()),
+                                 (7, kept, [], False), result.stderr)
+
     def test_a_round_refuses_to_start_while_another_round_runs(self):
         holder = self.holder("whooper-round")
         self.hold(self.state / "round.lock", holder)

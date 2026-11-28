@@ -123,6 +123,14 @@ stop_reason="the review stopped at an unexpected error; see whooper-review's err
 work="" agent_group="" watchdog_pid="" step_group=""
 cleanup() {
   local status=$?
+  # bash also runs this trap in a process it forked for a background command, when that process cannot
+  # expand the command's words, as under set -u, and $$ there is still this script's process ID, so that
+  # process would pass the lock check below and clean up the review from under this one. Only this
+  # script's own process cleans up; a forked one exits at once. bash 3.2 has no BASHPID, so the ID of the
+  # process that runs this comes from a sh it starts with exec, whose parent it is.
+  if [[ "$(exec /bin/sh -c 'echo "$PPID"')" != "$$" ]]; then
+    exit "$status"
+  fi
   # bash 3.2, macOS's /bin/bash, runs this with $? at 0 when set -u stops the script on an unset
   # variable. A review that did not finish exits 1 then, so whooper-round does not count it as
   # reviewed.

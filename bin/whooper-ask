@@ -87,6 +87,12 @@ work=""
 agent_group="" watchdog_pid=""
 cleanup() {
   local status=$?
+  # As in whooper-review, a process bash forked for a background command that runs this trap, as when it
+  # cannot expand the command's words, exits at once, so only this script's own process stops the run and
+  # removes the work folder.
+  if [[ "$(exec /bin/sh -c 'echo "$PPID"')" != "$$" ]]; then
+    exit "$status"
+  fi
   # As in whooper-review, this also stops anything the run left running.
   if [[ -n "$agent_group" ]]; then
     kill -TERM -- "-$agent_group" 2>/dev/null || true
