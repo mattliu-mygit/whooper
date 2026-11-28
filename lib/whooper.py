@@ -2326,10 +2326,11 @@ def examples(run, seconds=EXAMPLES_SECONDS):
     functions = [{**function, "line": defined("head", function["path"]).get(go_name(function["name"]), function["line"])}
                  for function in request["functions"]]
     tree, commit = sides["base"]
-    listing = subprocess.run(["git", "-C", str(tree), "--no-lazy-fetch", "ls-tree", "--name-only", commit, "--",
-                              f"{package}/" if package != "." else "."], capture_output=True, text=True).stdout
+    # -z lists each path as it is, ended by a NUL, where git would quote one with a character outside ASCII.
+    listing = subprocess.run(["git", "-C", str(tree), "--no-lazy-fetch", "ls-tree", "-z", "--name-only", commit,
+                              "--", f"{package}/" if package != "." else "."], capture_output=True).stdout
     at_base = set()
-    for path in listing.split("\n"):
+    for path in listing.decode(errors="replace").split("\0"):
         if path.endswith(".go") and not path.endswith("_test.go"):
             at_base |= defined("base", path).keys()
     others = other_languages((run / "diff.patch").read_text(errors="replace"))

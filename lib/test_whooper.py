@@ -2779,6 +2779,16 @@ class ExamplesTest(RunDirTest):
                          {"before": None, "after": "100", "status": "error", "label": "not_compared"})
         self.assertRegex(clamp["note"], r"^The test does not compile at the merge base: .*undefined: Half")
 
+    def test_a_function_the_merge_base_defines_in_a_file_whose_name_git_quotes_runs_there_too(self):
+        # git quotes a path with a character outside ASCII, as prices/größe.go, unless it lists paths ended by NUL.
+        base = {"go.mod": PRICES["go.mod"], "prices/größe.go": PRICES["prices/prices.go"]}
+        head = {"go.mod": PRICES["go.mod"], "prices/größe.go": PRICES_PR["prices/prices.go"]}
+        run = self.run_dir(base, head)
+        request = {"package": "prices", "functions": [{"name": "Clamp", "path": "prices/größe.go", "line": 9}],
+                   "inputs": [{"function": "Clamp", "input": "Clamp(101)"}]}
+        result = self.examples(run, request, examples_test(("Clamp", "Clamp(101)", "Clamp(101)")))
+        self.assertEqual(result["rows"], [example_row("Clamp", "Clamp(101)", "101", "100", "different", "ran_base_and_head")])
+
     def test_a_test_that_does_not_compile_at_the_head_gives_errors(self):
         run = self.run_dir(PRICES, PRICES_PR)
         result = self.examples(run, examples_request([("Clamp", 9)], [("Clamp", "Clamp(50)")]),
