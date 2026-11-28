@@ -1124,4 +1124,277 @@ mod tests {
         starts.sort();
         assert_eq!(starts, (0..8).map(|n| now + n).collect::<Vec<_>>());
     }
+
+    fn v2_now() -> Zoned {
+        "2031-07-30T15:00:00-07:00[America/Los_Angeles]"
+            .parse()
+            .unwrap()
+    }
+
+    /// A review that started minutes_ago before v2_now and ended a minute later, look_first, waiting for
+    /// the user.
+    fn v2_review(minutes_ago: i64, pr: i64, fields: Value) -> Value {
+        let at = |m: i64| {
+            v2_now()
+                .checked_sub(jiff::Span::new().minutes(m))
+                .unwrap()
+                .strftime("%Y-%m-%dT%H:%M:%S%:z")
+                .to_string()
+        };
+        let mut r = json!({"run_id": format!("run-{pr}-{minutes_ago}"), "repo": "example-org/example-repo", "pr": pr,
+            "title": "T", "author": null, "url": null, "started_at": at(minutes_ago), "ended_at": at(minutes_ago - 1),
+            "outcome": "reviewed", "verdict": "look_first", "skipped": false, "findings": 0, "safe_to_approve": false,
+            "submitted": null, "needs_you": true, "cause": null, "head_sha": "h1", "pr_head_sha": null,
+            "skipped_by_user": false, "removed_by_user": false});
+        for (k, v) in fields.as_object().unwrap() {
+            r[k] = v.clone();
+        }
+        r
+    }
+
+    fn v2(reviews: Vec<Value>, fields: Value) -> Object {
+        let mut status = json!({"blocked": null, "last_round": null, "round": {"running": false, "reviewing": null},
+            "paused": false, "next_round": null, "reviews": reviews});
+        for (k, v) in fields.as_object().unwrap() {
+            status[k] = v.clone();
+        }
+        status_v2(status.as_object().unwrap(), &v2_now())
+    }
+
+    fn with_fields(a: Value, b: Value) -> Value {
+        let mut a = a;
+        for (k, v) in b.as_object().unwrap() {
+            a[k] = v.clone();
+        }
+        a
+    }
+
+    #[test]
+    fn each_review_goes_in_the_group_prompting_time_placed_it_in_before_format_2() {
+        let failed = json!({"outcome": "failed", "verdict": null});
+        let running =
+            json!({"outcome": "running", "verdict": null, "needs_you": false, "ended_at": null});
+        let waiting = json!({"outcome": "waiting", "verdict": null, "needs_you": false});
+        for (fields, group, dot) in [
+            (json!({}), "look", "attention"),
+            (
+                json!({"safe_to_approve": true, "verdict": "approve_once_ci_passes"}),
+                "ready",
+                "success",
+            ),
+            // A review the user skipped is done, even one that failed.
+            (
+                json!({"skipped_by_user": true, "needs_you": false}),
+                "done",
+                "idle",
+            ),
+            (
+                with_fields(
+                    failed.clone(),
+                    json!({"skipped_by_user": true, "needs_you": false}),
+                ),
+                "done",
+                "idle",
+            ),
+            (
+                with_fields(failed.clone(), json!({"cause": cause("time_limit")})),
+                "failed",
+                "error",
+            ),
+            // A failure at a cause that stops every review waits with the others it stopped, still red.
+            (
+                with_fields(
+                    failed.clone(),
+                    json!({"cause": cause("docker_unavailable")}),
+                ),
+                "waiting",
+                "error",
+            ),
+            (
+                with_fields(
+                    waiting.clone(),
+                    json!({"cause": cause("docker_unavailable")}),
+                ),
+                "waiting",
+                "idle",
+            ),
+            (
+                with_fields(waiting.clone(), json!({"cause": cause("unknown")})),
+                "reviewing",
+                "idle",
+            ),
+            (running.clone(), "reviewing", "running"),
+            // skip stopped the review.
+            (
+                with_fields(running.clone(), json!({"skipped_by_user": true})),
+                "done",
+                "idle",
+            ),
+        ] {
+            let status = v2(vec![v2_review(5, 12, fields.clone())], json!({}));
+            let item = &status["items"][0];
+            assert_eq!(
+                (&item["group"], &item["dot"]),
+                (&json!(group), &json!(dot)),
+                "{fields}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_review_that_runs_offers_only_skip_which_stops_it() {
+        let running =
+            json!({"outcome": "running", "verdict": null, "needs_you": false, "ended_at": null});
+        for (fields, actions) in [
+            (running.clone(), json!(["skip"])),
+            (json!({}), json!(["retry", "skip", "remove"])),
+            (
+                json!({"skipped_by_user": true, "needs_you": false}),
+                json!(["retry", "remove"]),
+            ),
+            (
+                with_fields(running.clone(), json!({"skipped_by_user": true})),
+                json!([]),
+            ),
+        ] {
+            let status = v2(vec![v2_review(5, 12, fields.clone())], json!({}));
+            assert_eq!(status["items"][0]["actions"], actions, "{fields}");
+        }
+        // A review the user removed is in no group.
+        let removed = v2(
+            vec![v2_review(
+                5,
+                12,
+                json!({"removed_by_user": true, "needs_you": false}),
+            )],
+            json!({}),
+        );
+        assert_eq!(removed["items"], json!([]));
+    }
+
+    #[test]
+    fn status_lists_the_current_items_before_the_finished_ones_and_at_most_50() {
+        let done = v2_review(1, 1, json!({"skipped_by_user": true, "needs_you": false}));
+        let current: Vec<Value> = (0..50)
+            .map(|i| v2_review(10 + i, 100 + i, json!({})))
+            .collect();
+        let mut all = vec![done.clone()];
+        all.extend(current.clone());
+        let status = v2(all, json!({}));
+        let ids: Vec<&Value> = status["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| &i["id"])
+            .collect();
+        let want: Vec<&Value> = current.iter().map(|r| &r["run_id"]).collect();
+        assert_eq!(ids, want);
+        assert_eq!(status["truncated"], true);
+        let mut fewer = vec![done.clone()];
+        fewer.extend(current[..49].iter().cloned());
+        let status = v2(fewer, json!({}));
+        assert_eq!(
+            status["items"].as_array().unwrap().last().unwrap()["id"],
+            done["run_id"]
+        );
+        assert_eq!(status["truncated"], false);
+    }
+
+    #[test]
+    fn blockers_name_the_blocked_cause_then_each_other_one_a_newest_review_waits_at() {
+        let blocked = with_fields(
+            cause("gh_signed_out"),
+            json!({"since": "2031-07-30T15:00:00-07:00", "waiting": 0}),
+        );
+        let reviews = vec![
+            v2_review(
+                5,
+                1,
+                json!({"outcome": "failed", "cause": cause("setup_failed")}),
+            ),
+            v2_review(
+                6,
+                2,
+                json!({"outcome": "waiting", "needs_you": false, "cause": cause("setup_failed")}),
+            ),
+            // A failure of the PR's own stops no other review.
+            v2_review(
+                7,
+                3,
+                json!({"outcome": "failed", "cause": cause("time_limit")}),
+            ),
+        ];
+        let status = v2(reviews, json!({ "blocked": blocked }));
+        let got: Vec<Value> = status["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| json!([b["id"], b["title"], b["route"]]))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                json!([
+                    "gh_signed_out",
+                    "gh isn't signed in to GitHub",
+                    "/causes/gh_signed_out"
+                ]),
+                json!([
+                    "setup_failed",
+                    "The repo's setup script failed",
+                    "/causes/setup_failed"
+                ]),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_agent_row_says_what_whooper_does_as_prompting_time_worded_it_before_format_2() {
+        let (today, monday) = ("2031-07-30T15:45:00-07:00", "2031-07-28T10:00:00-07:00");
+        let now = v2_now();
+        assert_eq!(
+            (short_time(today, &now), short_time(monday, &now)),
+            ("3:45 PM".into(), "Mon 10:00 AM".into())
+        );
+        assert_eq!(
+            (
+                short_date(today, &now),
+                short_date(monday, &now),
+                short_date("2030-11-24T09:05:00-08:00", &now)
+            ),
+            ("3:45 PM".into(), "Jul 28".into(), "Nov 24, 2030".into())
+        );
+        let failed = json!({"started_at": monday, "ended_at": "2031-07-30T14:50:00-07:00", "result": "poll_failed",
+            "selected": 0, "reviews": []});
+        for (fields, agent) in [
+            (json!({}), json!({"words": "Running", "dot": "idle"})),
+            (
+                json!({"next_round": today}),
+                json!({"words": "Running · next poll 3:45 PM", "dot": "idle"}),
+            ),
+            (
+                json!({"last_round": failed, "next_round": today}),
+                json!({"words": "Poll failed 2:50 PM · next try 3:45 PM", "dot": "error"}),
+            ),
+            (
+                json!({"paused": true, "next_round": today}),
+                json!({"words": "Paused", "dot": "idle"}),
+            ),
+            (
+                json!({"round": {"running": true, "reviewing": null}}),
+                json!({"words": "Polling now", "dot": "running"}),
+            ),
+            (
+                json!({"round": {"running": true, "reviewing": "example-org/example-repo#12"}, "paused": true}),
+                json!({"words": "Reviewing example-org/example-repo#12", "dot": "running"}),
+            ),
+            (
+                json!({"blocked": with_fields(cause("docker_unavailable"), json!({"since": today, "waiting": 2})),
+                    "round": {"running": true, "reviewing": null}}),
+                json!({"words": "Can't review · Docker isn't running", "dot": "error"}),
+            ),
+        ] {
+            assert_eq!(v2(vec![], fields.clone())["agent"], agent, "{fields}");
+        }
+    }
 }

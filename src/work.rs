@@ -285,3 +285,44 @@ pub fn wait_review(state: &Path, item: &Object, cause: &Value, agent: &str) -> R
     fs::rename(staging.keep(), &run)?;
     Ok(run)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ask(ts: &str) -> Object {
+        json!({"kind": "first_review", "repo": "example-org/example-repo", "pr": 13, "head_sha": "h7",
+               "base_ref": "master", "source": "slack_ask", "reason": "Alex asked for a review.",
+               "slack": {"ts": ts, "tagged_user": true, "permalink": "p"}})
+        .as_object()
+        .unwrap()
+        .clone()
+    }
+
+    #[test]
+    fn a_new_request_for_a_removed_review_that_waits_waits_in_a_run_of_its_own() {
+        let state = tempfile::tempdir().unwrap();
+        let cause =
+            json!({"id": "docker_unavailable", "summary": "Docker isn't running", "scope": "all"});
+        let waits = wait_review(state.path(), &ask("1943194837.000100"), &cause, "claude").unwrap();
+        assert!(recheck_path(state.path(), &ask("1")).exists());
+        // A round that waits again reuses the run that waits.
+        assert_eq!(
+            wait_review(state.path(), &ask("1943194837.000100"), &cause, "claude").unwrap(),
+            waits
+        );
+        fs::write(waits.join(REMOVED_BY_USER), "").unwrap();
+        let again_ask = ask("1943198437.000200");
+        let again = wait_review(state.path(), &again_ask, &cause, "claude").unwrap();
+        assert_ne!(again, waits);
+        assert_eq!(
+            read_object(&again.join("run.json")).unwrap()["slack"],
+            again_ask["slack"]
+        );
+        assert!(waits.join(REMOVED_BY_USER).exists());
+        assert_eq!(
+            wait_review(state.path(), &again_ask, &cause, "claude").unwrap(),
+            again
+        );
+    }
+}
