@@ -1,5 +1,6 @@
 import { For, Show } from "solid-js";
 import { StatusDot } from "@prompting-time/ui";
+import { RoundsChart } from "./RoundsChart";
 import type { PageStore } from "./store";
 import { TabHeader } from "./TabHeader";
 import { shortDate, waitingText } from "./text";
@@ -25,7 +26,8 @@ export function newestAtCause(store: PageStore, cause: string) {
 /**
  * The Causes tab, at /causes and at a cause's own route, /causes/<id>, which Prompting Time opens from
  * a blocker of whooper-status's status format 2: each cause that stops every review, the one the route
- * names first, with since when and the reviews it holds back, each of which opens here. The header's
+ * names first, with since when and the reviews it holds back, each of which opens here, then Whooper's
+ * rounds per day, unless the status is an older Whooper's, which has no rounds_by_day. The header's
  * Poll now runs a round, which reviews them again.
  */
 export function CausesTab(props: { store: PageStore; cause: string | null }) {
@@ -43,6 +45,7 @@ export function CausesTab(props: { store: PageStore; cause: string | null }) {
             <p class="w-tab-hint">A round reviews the waiting pull requests again once the cause is fixed.</p>
             <For each={causes()}>{(id) => <Cause store={store} cause={id} />}</For>
           </Show>
+          <Show when={store.state.status?.rounds_by_day}>{(days) => <RoundsChart days={days()} />}</Show>
         </Show>
       </div>
     </>

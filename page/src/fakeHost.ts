@@ -1,6 +1,6 @@
 import settingsSchema from "../../schemas/settings.json";
 import * as fixtures from "./fixtures";
-import { CallError, PROTOCOL_VERSION, readPageMessage, type Drafts, type FindingsResult, type HostMessage, type HostUpdate, type PageMessage, type Shown } from "./protocol";
+import { CallError, PROTOCOL_VERSION, readPageMessage, type Drafts, type FindingsResult, type HostMessage, type HostUpdate, type PageMessage, type Shown, type WhooperStatus } from "./protocol";
 
 // A stand-in for Prompting Time, for development (dev/index.html) and the page's tests. It runs the
 // page's calls of the manifest's actions on the invented reviews in fixtures.ts the way Whooper's
@@ -22,6 +22,9 @@ export interface FakeHostOptions {
   /** Top-level fields of what show-review prints, by run ID, that replace the fixture's, as a test's
    * variation of a review, such as one without connections. */
   shown?: Record<string, Partial<Shown>>;
+  /** Top-level fields of what status prints that replace the fixture's, as a test's variation of the
+   * status, such as an older Whooper's without rounds_by_day. */
+  status?: Partial<WhooperStatus>;
   /** What whooper-settings get prints, in place of the fixture's settings. */
   settings?: Record<string, unknown>;
   /** The error a call of action with args fails with instead of running, as whooper-retry's when gh
@@ -168,7 +171,7 @@ export function createFakeHost(send: (message: HostMessage) => void, options: Fa
 
   /** What bin/whooper-status --json prints, with the user's marks and submissions since. */
   function status() {
-    const base = fixtures.status();
+    const base: WhooperStatus = { ...fixtures.status(), ...structuredClone(options.status) };
     for (const review of base.reviews) {
       review.skipped_by_user = skipped.has(review.run_id);
       review.removed_by_user = removed.has(review.run_id);

@@ -105,6 +105,9 @@ export interface WhooperStatus {
     selected: number;
     reason: string | null;
   }[];
+  /** How many rounds started on each of the last 15 local days, oldest first and today last, by how
+   * they ended: date is the local day, such as 2031-07-30. An older Whooper leaves it out. */
+  rounds_by_day?: { date: string; done: number; poll_failed: number; interrupted: number; skipped: number }[];
   // Prompting Time's status format 2 (schemas/prompting-time-status.json), beside format 1.
   format: 2;
   /** Whooper's row in Prompting Time, such as "Running · next poll 3:45 PM". */
@@ -135,6 +138,9 @@ export interface StatusItem {
 
 /** One review in the reviews of `bin/whooper-status --json`. */
 export type StatusReview = WhooperStatus["reviews"][number];
+
+/** One day in the rounds_by_day of `bin/whooper-status --json`. */
+export type RoundsOfDay = NonNullable<WhooperStatus["rounds_by_day"]>[number];
 
 /** `bin/whooper-show --json <run-id>`, format version 1; its header describes each field. */
 export interface Shown {

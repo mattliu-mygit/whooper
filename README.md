@@ -455,7 +455,12 @@ reviews waiting on you, and its header says that and how many it lists. Each row
 review, and its ⋯ menu opens it, skips it or undoes the skip, removes it from the list, with Undo, or
 retries it. Past reviews, at `/past`, lists the reviews you removed, which its ⋯ menu restores, and
 earlier reviews of a pull request that a newer one replaced. Causes, at `/causes`, lists each cause
-that stops every review with the reviews it holds back. In Reviews and Past reviews, j and k select
+that stops every review with the reviews it holds back, then Whooper's rounds per day over the last
+15 days, from whooper-status's `rounds_by_day`: a bar per day, stacked by how its rounds ended, red
+for a poll that failed, orange for a round interrupted, gray for one done, and an outline for one
+skipped while paused, under a legend that names each color with its total. A click on a bar, or
+Enter on the bar j and k move to once the strip has the focus, shows that day's counts in a line
+below; an older Whooper's status, without `rounds_by_day`, shows no chart. In Reviews and Past reviews, j and k select
 the next and previous row, around the ends, as they step through a walkthrough, and Enter opens it;
 Escape closes any open menu. To act on several reviews at once, x selects the selected row's
 checkbox, which shows on that row and on every row once one is selected, Shift and a click selects

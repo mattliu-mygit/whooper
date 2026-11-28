@@ -542,6 +542,9 @@ export function reviewRecords(): RunRecord[] {
 /** A review the user neither skipped nor removed. */
 const UNMARKED = { skipped_by_user: false, removed_by_user: false };
 
+/** One day of whooper-status's rounds_by_day: how many of its rounds ended with each result. */
+const day = (date: string, done: number, poll_failed = 0, interrupted = 0, skipped = 0) => ({ date, done, poll_failed, interrupted, skipped });
+
 export function status(): WhooperStatus {
   return {
     version: 1,
@@ -601,6 +604,26 @@ export function status(): WhooperStatus {
     ],
     rounds: [
       { started_at: "2031-07-27T15:15:01-07:00", ended_at: "2031-07-27T15:22:40-07:00", result: "done", selected: 2, reason: null },
+    ],
+    // Polls that failed two days in a row, Jul 16 and 17, as while GitHub can't be reached; rounds stopped
+    // partway on Jul 15 and 24; an afternoon paused on Jul 22; no rounds on Jul 13, 19, and 20; and today,
+    // the round above.
+    rounds_by_day: [
+      day("2031-07-13", 0),
+      day("2031-07-14", 28),
+      day("2031-07-15", 27, 0, 1),
+      day("2031-07-16", 9, 19),
+      day("2031-07-17", 0, 29),
+      day("2031-07-18", 26, 1),
+      day("2031-07-19", 0),
+      day("2031-07-20", 0),
+      day("2031-07-21", 29),
+      day("2031-07-22", 13, 0, 0, 15),
+      day("2031-07-23", 28),
+      day("2031-07-24", 27, 0, 2),
+      day("2031-07-25", 28),
+      day("2031-07-26", 3),
+      day("2031-07-27", 1),
     ],
     // The same reviews in status format 2, as lib/whooper.py's status_v2 lists them.
     format: 2,
