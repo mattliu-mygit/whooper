@@ -120,9 +120,9 @@
       "properties": {
         "timeout_minutes": {
           "title": "Stop an answer after (minutes)",
-          "description": "whooper-ask stops a run that takes longer to answer a question about a review, and saves no answer.",
-          "type": "integer",
-          "minimum": 1
+          "description": "whooper-ask stops a run that takes longer to answer a question about a review, and saves no answer. Any number above 0, such as 2.5.",
+          "type": "number",
+          "exclusiveMinimum": 0
         }
       }
     }

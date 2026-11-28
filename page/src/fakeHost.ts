@@ -73,6 +73,7 @@ interface SchemaNode {
   enum?: unknown[];
   items?: SchemaNode;
   minimum?: number;
+  exclusiveMinimum?: number;
 }
 
 /** check_schema in lib/whooper.py, for the keywords schemas/settings.json uses: the first place value
@@ -88,6 +89,7 @@ function schemaProblem(value: unknown, node: SchemaNode, where: string): string 
   if (node.type && !types[node.type](value)) return `${where} is not of type ${node.type}`;
   if (node.enum && !node.enum.includes(value)) return `${where} is ${JSON.stringify(value)}, not one of ${JSON.stringify(node.enum)}`;
   if (node.minimum !== undefined && typeof value === "number" && value < node.minimum) return `${where} is below ${node.minimum}`;
+  if (node.exclusiveMinimum !== undefined && typeof value === "number" && value <= node.exclusiveMinimum) return `${where} is not above ${node.exclusiveMinimum}`;
   if (node.properties && types.object(value)) {
     const extra = Object.keys(value as object).filter((key) => !(key in node.properties!));
     if (extra.length > 0) return `${where} has unexpected ${extra.sort().join(", ")}`;

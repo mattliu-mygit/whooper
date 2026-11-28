@@ -2719,9 +2719,12 @@ def fill(template, values):
 def check_schema(value, schema, where="the value", root=None):
     """Raises ValueError at the first place value breaks schema. Covers the JSON Schema keywords
     Whooper's schemas and the copy of Prompting Time's status schema use: type, one or a list of them,
-    enum, const, minimum, minLength, pattern, properties, required, additionalProperties, items,
-    minItems, maxItems, uniqueItems, and $ref to one of the schema's own $defs. format only annotates,
-    as JSON Schema's default has it, so it checks nothing."""
+    enum, const, minimum, exclusiveMinimum, minLength, pattern, properties, required,
+    additionalProperties, items, minItems, maxItems, uniqueItems, and $ref to one of the schema's own
+    $defs. format only annotates, as JSON Schema's default has it, so it checks nothing. An integer is
+    an int: JSON Schema also counts a number with no fraction, such as 12.0, as one, but the code that
+    reads a finding's line or an overview's lines takes ints, so the check refuses 12.0, and
+    write_settings turns such a setting into an int before it checks it (whole_numbers)."""
     root = root or schema
     if "$ref" in schema:
         check_schema(value, root["$defs"][schema["$ref"].removeprefix("#/$defs/")], where, root)
@@ -2742,6 +2745,9 @@ def check_schema(value, schema, where="the value", root=None):
         raise ValueError(f"{where} is shorter than {schema['minLength']} characters")
     if "minimum" in schema and isinstance(value, (int, float)) and not isinstance(value, bool) and value < schema["minimum"]:
         raise ValueError(f"{where} is below {schema['minimum']}")
+    if ("exclusiveMinimum" in schema and isinstance(value, (int, float)) and not isinstance(value, bool)
+            and value <= schema["exclusiveMinimum"]):
+        raise ValueError(f"{where} is not above {schema['exclusiveMinimum']}")
     if "pattern" in schema and isinstance(value, str) and not re.search(schema["pattern"], value):
         raise ValueError(f"{where} is {value!r}, which does not match {schema['pattern']}")
     if isinstance(value, dict):
@@ -2788,6 +2794,15 @@ def whole_number(value):
     return int(value) if type(value) is float and value.is_integer() else value
 
 
+def whole_numbers(value, schema):
+    """value, part of the settings in SETTINGS_SCHEMA, with each setting the schema types as an integer read as
+    whole_number reads it, so 45.0 becomes 45, as JSON Schema counts it, and the rest as it is."""
+    if isinstance(value, dict):
+        properties = schema.get("properties", {})
+        return {key: whole_numbers(item, properties.get(key, {})) for key, item in value.items()}
+    return whole_number(value) if schema.get("type") == "integer" else value
+
+
 def check_config(config):
     """Fails unless config's [jobs] passes check_jobs and each of [poll], [review], and [ask] timeout_minutes is a
     time limit its command, whooper-poll, whooper-review, or whooper-ask, can use. Returns the three limits, with
@@ -2808,7 +2823,8 @@ def check_config(config):
     review_timeout = whole_number(config.get("review", {}).get("timeout_minutes"))
     if type(review_timeout) is not int or review_timeout < 1:
         raise SystemExit(f"whooper: [review] timeout_minutes takes a whole number of minutes, at least 1; see {config_path()}")
-    # whooper-ask's watchdog multiplies the limit in Python, so a fraction of a minute works too.
+    # whooper-ask's watchdog multiplies the limit in Python, so a fraction of a minute works too, and
+    # schemas/settings.json takes the same: any number above 0.
     ask_timeout = config.get("ask", {}).get("timeout_minutes", ASK_TIMEOUT_MINUTES)
     if type(ask_timeout) not in (int, float) or ask_timeout <= 0:
         raise SystemExit(f"whooper: [ask] timeout_minutes takes a number of minutes above 0; see {config_path()}")
@@ -2856,15 +2872,12 @@ SETTINGS_SCHEMA = ROOT / "schemas" / "settings.json"
 
 def read_settings(config):
     """The config's values for the settings in SETTINGS_SCHEMA, with Whooper's defaults for what the
-    config leaves out, such as SCHEDULE_DEFAULTS. A setting with neither is left out. [schedule]
-    interval_minutes and [poll] and [review] timeout_minutes read as read_schedule and check_config
-    read them, so 45.0 reads as 45."""
+    config leaves out, such as SCHEDULE_DEFAULTS. A setting with neither is left out. A setting the
+    schema types as an integer, such as [schedule] interval_minutes or [review] timeout_minutes,
+    reads as read_schedule and check_config read it, so 45.0 reads as 45 (whole_numbers)."""
     values = {**config, "schedule": {**SCHEDULE_DEFAULTS, **config.get("schedule", {})},
               "poll": {"timeout_minutes": POLL_TIMEOUT_MINUTES, **config.get("poll", {})},
               "ask": {"timeout_minutes": ASK_TIMEOUT_MINUTES, **config.get("ask", {})}}
-    for table, key in (("schedule", "interval_minutes"), ("poll", "timeout_minutes"), ("review", "timeout_minutes")):
-        if key in values.get(table, {}):
-            values[table] = {**values[table], key: whole_number(values[table][key])}
 
     def pick(value, schema):
         # Only what the schema names, at every level.
@@ -2872,16 +2885,21 @@ def read_settings(config):
             return value
         return {key: pick(value[key], sub) for key, sub in schema["properties"].items() if key in value}
 
-    return pick(values, json.loads(SETTINGS_SCHEMA.read_text()))
+    schema = json.loads(SETTINGS_SCHEMA.read_text())
+    return whole_numbers(pick(values, schema), schema)
 
 
 def write_settings(values):
     """Saves values, part of the settings in SETTINGS_SCHEMA such as {"schedule": {"interval_minutes": 30}},
     in the config file. Only the lines of those keys change, keeping their comments, and a table the file
     lacks is added. Nothing is written unless the values fit the schema and the config as it would be
-    saved passes the checks Whooper runs when it starts."""
+    saved passes the checks Whooper runs when it starts. A setting the schema types as an integer may
+    come as a float with no fraction, such as 45.0, which JSON Schema counts as an integer, and is
+    saved as that int (whole_numbers)."""
+    schema = json.loads(SETTINGS_SCHEMA.read_text())
+    values = whole_numbers(values, schema)
     try:
-        check_schema(values, json.loads(SETTINGS_SCHEMA.read_text()), "settings")
+        check_schema(values, schema, "settings")
     except ValueError as e:
         raise SystemExit(f"whooper-settings: {e}")
 

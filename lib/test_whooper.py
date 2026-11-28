@@ -1313,6 +1313,8 @@ class CheckSchemaTest(unittest.TestCase):
             ("a string where an integer belongs", self.result(findings=[finding(line="88")])),
             ("true where an integer belongs", self.result(findings=[finding(line=True)])),
             ("an integer below its minimum", self.result(findings=[finding(line=0)])),
+            # JSON Schema counts 12.0 as an integer, but the code that reads a finding's line takes an int.
+            ("a float with no fraction where an integer belongs", self.result(findings=[finding(line=12.0)])),
             ("an integer where a boolean belongs", self.result(findings=[finding(in_diff=1)])),
         ]:
             with self.subTest(name), self.assertRaises(ValueError):
@@ -1336,6 +1338,17 @@ class CheckSchemaTest(unittest.TestCase):
         ]:
             with self.subTest(name), self.assertRaises(ValueError):
                 check_schema({**status, **changes}, schema)
+
+    def test_an_exclusive_minimum_takes_only_numbers_above_it(self):
+        # schemas/settings.json takes an [ask] limit of any number of minutes above 0.
+        schema = {"type": "number", "exclusiveMinimum": 0}
+        for value in [0.05, 2.5, 10]:
+            with self.subTest(value):
+                check_schema(value, schema)
+        for value in [0, 0.0, -1]:
+            with self.subTest(value), self.assertRaises(ValueError) as refused:
+                check_schema(value, schema, "settings.ask.timeout_minutes")
+            self.assertEqual(str(refused.exception), "settings.ask.timeout_minutes is not above 0")
 
     def test_the_check_command_fails_on_a_file_that_does_not_fit(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -7973,6 +7986,43 @@ class SettingsTest(unittest.TestCase):
                 self.settings("set", json.dumps(values))
                 self.assertEqual(path.read_text(), EXAMPLE.replace(line, saved, 1))
 
+    def test_a_whole_number_sent_as_a_float_saves_as_that_number(self):
+        # JSON Schema counts 45.0 as an integer, so a save of {"review": {"timeout_minutes": 45.0}}, as Python's
+        # json.dumps writes 45, goes through and writes 45, which the checks read as they read 45.
+        for values, line, saved in [
+            ({"review": {"timeout_minutes": 45.0}}, "timeout_minutes = 30 ", "timeout_minutes = 45 "),
+            ({"schedule": {"interval_minutes": 20.0}}, "interval_minutes = 15\n", "interval_minutes = 20\n"),
+            ({"poll": {"timeout_minutes": 5.0}}, "timeout_minutes = 10 ", "timeout_minutes = 5 "),
+        ]:
+            with self.subTest(values):
+                edited = EXAMPLE.replace("timeout_minutes = 45 ", "timeout_minutes = 30 ", 1)
+                path = self.use_config(edited)
+                self.settings("set", json.dumps(values))
+                self.assertEqual(path.read_text(), edited.replace(line, saved, 1))
+
+    def test_a_save_takes_the_ask_limits_whooper_ask_starts_on_and_refuses_the_rest(self):
+        # whooper-ask's watchdog sleeps the limit times 60 in Python, so any number of minutes above 0 works, such as
+        # 0.05 for 3 seconds, and the schema and the config check both take exactly those.
+        # (the value, in JSON and in TOML alike, whether whooper-ask starts on it)
+        line = "timeout_minutes = 10               # whooper-ask"
+        for text, works in [("2.5", True), ("0.05", True), ("15", True), ("0", False), ("-1", False), ("true", False),
+                            ('"7"', False)]:
+            with self.subTest(text):
+                path = self.use_config(EXAMPLE)
+                if works:
+                    self.settings("set", f'{{"ask": {{"timeout_minutes": {text}}}}}')
+                    self.assertEqual(path.read_text(), EXAMPLE.replace(line, line.replace("10 ", f"{text} "), 1))
+                    with redirect_stdout(io.StringIO()) as env:
+                        main("env")
+                    self.assertIn(f"WHOOPER_ASK_TIMEOUT_MINUTES={text}\n", env.getvalue())
+                else:
+                    with self.assertRaises(SystemExit):
+                        self.settings("set", f'{{"ask": {{"timeout_minutes": {text}}}}}')
+                    self.assertEqual(path.read_text(), EXAMPLE)
+                    self.use_config(EXAMPLE.replace(line, line.replace("10 ", f"{text} "), 1))
+                    with self.assertRaises(SystemExit), redirect_stdout(io.StringIO()):
+                        main("env")
+
     def test_set_changes_only_the_given_line_and_keeps_every_comment(self):
         for values, old, new in [
             ({"schedule": {"interval_minutes": 30}}, "interval_minutes = 15\n", "interval_minutes = 30\n"),
@@ -8029,7 +8079,9 @@ class SettingsTest(unittest.TestCase):
             ("an interval in quotes", '{"schedule": {"interval_minutes": "30"}}', "interval_minutes is not of type integer"),
             # A poll takes 2 to 3 minutes, so a shorter limit would stop every poll.
             ("a poll limit under 5 minutes", '{"poll": {"timeout_minutes": 4}}', "timeout_minutes is below 5"),
-            ("an ask limit under a minute", '{"ask": {"timeout_minutes": 0}}', "timeout_minutes is below 1"),
+            ("an ask limit of 0 minutes", '{"ask": {"timeout_minutes": 0}}', "settings.ask.timeout_minutes is not above 0"),
+            ("a review limit with part of a minute", '{"review": {"timeout_minutes": 1.5}}',
+             "settings.review.timeout_minutes is not of type integer"),
             ("a budget of nothing", '{"agents": {"claude": {"budget_usd": 0}}}', "budget_usd is below 1"),
             ("an unknown key", '{"schedule": {"interval": 30}}', "unexpected interval"),
             ("a setting the form does not edit", '{"slack": {"ask_channel": "C0000000009"}}', "unexpected slack"),
