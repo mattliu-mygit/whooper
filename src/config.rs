@@ -495,3 +495,114 @@ fn toml_value(value: &Value) -> toml_edit::Value {
         Value::Null => "".into(),
     }
 }
+
+/// What the commands that poll, review, and ask read from the checked config.
+pub struct Whooper {
+    pub values: Object,
+    pub dir: PathBuf,
+    pub limits: Limits,
+    pub state: PathBuf,
+    pub login: String,
+    pub orgs: Vec<String>,
+}
+
+/// A repo's table in the config: its clone in the cache and its setup and teardown scripts, which are
+/// relative to the config's folder.
+pub struct Repo {
+    pub clone: PathBuf,
+    pub setup: Option<PathBuf>,
+    pub teardown: Option<PathBuf>,
+}
+
+impl Whooper {
+    /// Reads and checks the config.
+    pub fn load() -> Result<Whooper> {
+        let (config, limits) = load_checked()?;
+        let login = required(&config.values, "user", "github_login")?.to_string();
+        let orgs = table(&config.values, "github")
+            .get("orgs")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|o| o.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(Whooper {
+            values: config.values,
+            dir: config.dir,
+            limits,
+            state: state_dir(),
+            login,
+            orgs,
+        })
+    }
+
+    /// A string the config must hold, such as [slack] user_id.
+    pub fn get(&self, section: &str, key: &str) -> Result<String> {
+        required(&self.values, section, key).map(str::to_string)
+    }
+
+    /// The agent the config's [jobs] names for job, review or poll; check made sure it has one.
+    pub fn agent(&self, job: &str) -> String {
+        table(&self.values, "jobs")
+            .get(job)
+            .and_then(Value::as_str)
+            .unwrap_or("claude")
+            .to_string()
+    }
+
+    /// One of an agent's settings, such as [agents.claude] review_model, as text, or None.
+    pub fn agent_setting(&self, agent: &str, key: &str) -> Option<String> {
+        let value = table(table(&self.values, "agents"), agent)
+            .get(key)
+            .or(None)?;
+        Some(match value {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        })
+    }
+
+    /// An agent's setting the agent's launcher needs.
+    pub fn agent_required(&self, agent: &str, key: &str) -> Result<String> {
+        match self.agent_setting(agent, key) {
+            Some(value) => Ok(value),
+            None => fail!(
+                "whooper: the config's [agents.{agent}] has no {key}; see {}",
+                config_path().display()
+            ),
+        }
+    }
+
+    /// The script [schedule] notify names, in the config's folder, or None.
+    pub fn notify(&self) -> Option<PathBuf> {
+        table(&self.values, "schedule")
+            .get("notify")
+            .and_then(Value::as_str)
+            .map(|n| self.dir.join(n))
+    }
+
+    /// The repo's table, or the config's message for a repo without one.
+    pub fn repo(&self, repo: &str) -> Result<Repo> {
+        let Some(settings) = table(&self.values, "repos")
+            .get(repo)
+            .and_then(Value::as_object)
+        else {
+            fail!(
+                "whooper: {repo} has no [repos.\"{repo}\"] table in {}",
+                config_path().display()
+            )
+        };
+        let script = |key: &str| {
+            settings
+                .get(key)
+                .and_then(Value::as_str)
+                .map(|s| self.dir.join(s))
+        };
+        Ok(Repo {
+            clone: repo_clone(repo),
+            setup: script("setup"),
+            teardown: script("teardown"),
+        })
+    }
+}

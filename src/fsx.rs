@@ -241,3 +241,9 @@ pub fn last_line(text: &str) -> Option<&str> {
         .map(str::trim_end)
         .find(|line| !line.trim().is_empty())
 }
+
+/// This program, bin/whooper, with links resolved, so a child it starts runs the subcommand it names
+/// rather than the one a bin/whooper-<command> link would.
+pub fn me() -> std::io::Result<PathBuf> {
+    fs::canonicalize(std::env::current_exe()?)
+}

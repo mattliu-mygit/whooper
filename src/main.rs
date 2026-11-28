@@ -7,13 +7,23 @@
 // Remove this once the last bin/whooper-<command> script is gone.
 #![allow(dead_code)]
 
+mod agent;
 mod ask;
 mod config;
+mod connections;
 mod diff;
+mod examples;
 mod fsx;
+mod gaps;
 mod gh;
 mod lock;
+mod poll;
+mod proc;
+mod prompt;
+mod review;
+mod round;
 mod schema;
+mod select;
 mod status;
 mod submit;
 mod work;
@@ -90,6 +100,39 @@ enum Command {
         #[arg(num_args = 0..)]
         args: Vec<String>,
     },
+    /// Runs rounds on the config's [schedule] until stopped.
+    Run,
+    /// Runs one round now: fetch, poll, select, and a review of each selected item. Posts nothing.
+    Round,
+    /// Answers a question about a review: <run-id> <question> [--finding <finding-id>].
+    Ask {
+        #[arg(allow_hyphen_values = true, num_args = 0..)]
+        args: Vec<String>,
+    },
+    /// Writes the user's open GitHub review requests to <state>/poll/github.json.
+    #[command(hide = true)]
+    Fetch,
+    /// Lists the review work in <state>/poll/<time>.json and prints its path.
+    #[command(hide = true)]
+    Poll,
+    /// Prints the work items a round starts, one JSON object a line.
+    #[command(hide = true)]
+    Select,
+    /// Reviews one work item and prints its run directory, as for a replay with --as-of.
+    #[command(hide = true)]
+    Review {
+        item: std::path::PathBuf,
+        #[arg(long = "as-of")]
+        as_of: Option<String>,
+        #[arg(long = "dry-run", hide = true)]
+        dry_run: bool,
+    },
+    /// Runs one of a review's steps on its run directory: connections, test-gaps, examples, or mutation.
+    #[command(hide = true)]
+    Step {
+        name: String,
+        run: std::path::PathBuf,
+    },
 }
 
 /// The arguments, with bin/whooper-<command>'s command put first when the program runs by that name.
@@ -133,6 +176,35 @@ fn run(cli: Cli) -> Result<()> {
                     config::write_settings(&values)?;
                 }
                 _ => fail!("usage: whooper-settings get | set <json>"),
+            }
+            return Ok(());
+        }
+        Command::Run => return round::run(),
+        Command::Round => return round::round(),
+        Command::Ask { args } => return ask::ask(&args),
+        Command::Review { item, as_of, .. } => {
+            proc::catch_signals();
+            return review::review(&item, as_of.as_deref());
+        }
+        Command::Step { name, run } => {
+            proc::catch_signals();
+            let Some(step) = review::steps().get(name.as_str()).copied() else {
+                fail!("whooper: no step {name}")
+            };
+            return step(&run);
+        }
+        Command::Fetch => {
+            proc::catch_signals();
+            return poll::fetch(&config::Whooper::load()?);
+        }
+        Command::Poll => {
+            proc::catch_signals();
+            return poll::poll(&config::Whooper::load()?);
+        }
+        Command::Select => {
+            let whooper = config::Whooper::load()?;
+            for item in select::select(&whooper.state, config::table(&whooper.values, "repos"))? {
+                println!("{}", serde_json::to_string(&item)?);
             }
             return Ok(());
         }
@@ -203,7 +275,7 @@ fn run(cli: Cli) -> Result<()> {
                 Command::Resume => {
                     let _ = std::fs::remove_file(state.join("paused"));
                 }
-                Command::Settings { .. } => unreachable!(),
+                _ => unreachable!(),
             }
         }
     }
@@ -223,6 +295,7 @@ fn usage(command: &str) -> Option<&'static str> {
         "skip" => "usage: whooper-skip [--item] <run-id> [--undo]",
         "remove" => "usage: whooper-remove [--item] <run-id> [--undo]",
         "settings" => "usage: whooper-settings get | set <json>",
+        "review" => "whooper-review: usage: whooper review <work-item.json> [--as-of <time>]",
         _ => return None,
     })
 }
