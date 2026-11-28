@@ -1773,7 +1773,7 @@ class RunDirTest(unittest.TestCase):
             subprocess.run(["git", "worktree", "add", "--quiet", "--detach", str(run / tree), commit],
                            cwd=self.tmp / "origin", env=self.env, check=True)
         (run / "run.json").write_text(json.dumps({"head_sha": head_sha, "merge_base": merge_base}))
-        (run / "diff.patch").write_text(subprocess.run(["git", "diff", *whooper.PLAIN_DIFF, merge_base, "HEAD"],
+        (run / "diff.patch").write_text(subprocess.run(["git", *whooper.PLAIN_DIFF, merge_base, "HEAD"],
                                                        cwd=run / "head", env=self.env, check=True, capture_output=True,
                                                        text=True).stdout)
         return run
@@ -4005,10 +4005,11 @@ class RunTest(unittest.TestCase):
                 "GIT_AUTHOR_NAME": "Sam", "GIT_AUTHOR_EMAIL": "sam@example.com",
                 "GIT_COMMITTER_NAME": "Sam", "GIT_COMMITTER_EMAIL": "sam@example.com"}
 
-    def pull_request(self, app=("one\n", "one\ntwo\n")):
+    def pull_request(self, app=("one\n", "one\ntwo\n"), more=None):
         """Makes PR 12 of sample-org/plain-repo in a local origin, the cache's clone of it, and its work
         item, and returns the environment for git and the review (git_env), the work item's path, and
-        the PR's merge base. app is app.txt at the merge base and at the head."""
+        the PR's merge base. app is app.txt at the merge base and at the head, and more maps each other
+        file the PR changes to its text at the merge base and at the head, None where it is missing."""
         tmp = Path(self.tmp.name)
         origin = tmp / "origin"
         env = self.git_env()
@@ -4017,20 +4018,26 @@ class RunTest(unittest.TestCase):
             return subprocess.run(["git", *args], cwd=origin, env=env, check=True, capture_output=True,
                                   text=True).stdout.strip()
 
+        def write(files):
+            for name, content in files.items():
+                if content is None:
+                    (origin / name).unlink(missing_ok=True)
+                else:
+                    (origin / name).parent.mkdir(parents=True, exist_ok=True)
+                    (origin / name).write_text(content)
+
         # PR 12 branches off main, which moves on after it, and adds the submodule vendor/lib. The
         # repo's .gitattributes marks generated.txt -diff, which git reads from the worktree it runs in.
         origin.mkdir()
         git("init", "--quiet", "--initial-branch=main")
-        for name, content in [("app.txt", app[0]), ("generated.txt", "g1\n"),
-                              (".gitattributes", "generated.txt -diff\n")]:
-            (origin / name).write_text(content)
+        write({"app.txt": app[0], "generated.txt": "g1\n", ".gitattributes": "generated.txt -diff\n",
+               **{name: texts[0] for name, texts in (more or {}).items()}})
         git("add", ".")
         git("commit", "--quiet", "-m", "base")
         merge_base = git("rev-parse", "HEAD")
         git("checkout", "--quiet", "-b", "pr-12")
-        (origin / "app.txt").write_text(app[1])
-        (origin / "generated.txt").write_text("g2\n")
-        git("add", "app.txt", "generated.txt")
+        write({"app.txt": app[1], "generated.txt": "g2\n", **{name: texts[1] for name, texts in (more or {}).items()}})
+        git("add", "--all")
         git("update-index", "--add", "--cacheinfo", f"160000,{'1' * 40},vendor/lib")
         git("commit", "--quiet", "-m", "the PR")
         head = git("rev-parse", "HEAD")
@@ -4363,37 +4370,97 @@ class RunTest(unittest.TestCase):
     # lines between the hunks left out.
     APP_IN_TWO_HUNKS = ("".join(f"line {n}\n" for n in range(1, 35)),
                         "".join(f"changed {n}\n" if n in (13, 22) else f"line {n}\n" for n in range(1, 35)))
+    # report.c at the merge base and at the head, which adds count above report and drops sum: myers, git's
+    # default algorithm, shows the change otherwise than patience does, around a blank line.
+    REPORT_C = tuple("".join(f"{line}\n" for line in lines) for lines in (
+        ["// Prints the total of the prices.", "void report(int total)", "{", "    if (total > 0)", "    {",
+         '        printf("Total: ");', '        printf("%d\\n", total);', "    }", "}", "",
+         "int sum(int n)", "{", "    if (n > 0)", "    {", "        return sum(n - 1) + n;", "    }", "    return 0;", "}"],
+        ["int count(int n)", "{", "    if (n > 0)", "    {", "        return count(n - 1) + 1;", "    }", "    return 0;",
+         "}", "", "// Prints the total of the prices.", "void report(int total)", "{", "    if (total > 0)", "    {",
+         '        printf("%d\\n", total);', "    }", "}"],
+    ))
+    # The PR's other files, for diff_settings: report.c; notes.txt, which moves to docs/notes.txt; and
+    # app-copy.txt, a copy of app.txt as it was, which git's default rename detection shows as a new file.
+    MORE_FILES = {"report.c": REPORT_C, "notes.txt": ("first\nsecond\nthird\n", None),
+                  "docs/notes.txt": (None, "first\nsecond\nthird\n"), "app-copy.txt": (None, APP_IN_TWO_HUNKS[0])}
+
+    def diff_settings(self):
+        """The git settings, as (section, name, value), each of which changes the patch git diff prints of
+        the PR that pull_request makes with APP_IN_TWO_HUNKS and MORE_FILES, and which whooper-review pins,
+        to git's defaults but for 12-digit object names, both in diff.patch and in its run's environment: 10
+        unchanged lines around each change instead of 3, hunks at most 5 lines apart joined into one, the
+        patience algorithm, an order file that puts the submodule and report.c first, copies found as well
+        as renames, a blank line of context printed without its leading space, and object names of at
+        least 20 digits."""
+        order = Path(self.tmp.name) / "order"
+        order.write_text("vendor/*\nreport.c\n")
+        return [("diff", "context", "10"), ("diff", "interHunkContext", "5"), ("diff", "algorithm", "patience"),
+                ("diff", "orderFile", str(order)), ("diff", "renames", "copies"), ("diff", "suppressBlankEmpty", "true"),
+                ("core", "abbrev", "20")]
+
+    def write_git_config(self, env, settings):
+        """Writes settings, as (section, name, value), as the git config of env's home."""
+        Path(env["GIT_CONFIG_GLOBAL"]).write_text("".join(f"[{section}]\n\t{name} = {value}\n"
+                                                          for section, name, value in settings))
 
     def change_every_diff(self, env):
         """Writes the git config of env's home, in which each setting changes what git diff prints: an
         external diff tool, a textconv filter for app.txt, color, paths without a/ and b/, a submodule's
-        log instead of its commit lines, 10 unchanged lines around each change instead of 3, and hunks
-        at most 5 lines apart joined into one."""
+        log instead of its commit lines, and diff_settings."""
         tmp = Path(self.tmp.name)
         self.script(tmp / "external", 'echo "external diff of $1"')
         self.script(tmp / "shout", 'tr a-z A-Z < "$1"')
         (tmp / "attributes").write_text("app.txt diff=shout\n")
-        Path(env["GIT_CONFIG_GLOBAL"]).write_text("\n".join([
-            "[core]", f"attributesFile = {tmp / 'attributes'}",
-            "[color]", "ui = always",
-            "[diff]", f"external = {tmp / 'external'}", "noprefix = true", "submodule = log", "context = 10",
-            "interHunkContext = 5",
-            '[diff "shout"]', f"textconv = {tmp / 'shout'}",
-        ]) + "\n")
+        self.write_git_config(env, [
+            ("core", "attributesFile", str(tmp / "attributes")), ("color", "ui", "always"),
+            ("diff", "external", str(tmp / "external")), ("diff", "noprefix", "true"), ("diff", "submodule", "log"),
+            ('diff "shout"', "textconv", str(tmp / "shout")), *self.diff_settings(),
+        ])
+
+    def plain_patch(self, env, merge_base, *config):
+        """git's own patch of the PR, with whooper-review's 12-digit object names, then config, such as
+        -c diff.context=10, but none from env's home, which tests write only after this."""
+        return subprocess.run(["git", "-c", "core.abbrev=12", *config, "diff", merge_base, "pr-12"],
+                              cwd=Path(self.tmp.name) / "origin", env=env, check=True, capture_output=True, text=True).stdout
+
+    def test_each_diff_setting_changes_the_patch_of_the_pr(self):
+        # Without this, the tests below of diff.patch, its rebuild, and the run's own git diff could pass with
+        # a setting left as git's default.
+        env, _, merge_base = self.pull_request(app=self.APP_IN_TWO_HUNKS, more=self.MORE_FILES)
+        plain = self.plain_patch(env, merge_base)
+        for section, name, value in self.diff_settings():
+            with self.subTest(setting=f"{section}.{name}"):
+                self.assertNotEqual(self.plain_patch(env, merge_base, "-c", f"{section}.{name}={value}"), plain)
 
     def test_the_kept_diff_is_a_plain_patch_whatever_the_git_config_says(self):
-        env, item, merge_base = self.pull_request(app=self.APP_IN_TWO_HUNKS)
-        # git's own patch of the PR, made before the config exists.
-        plain = subprocess.run(["git", "diff", merge_base, "pr-12"], cwd=Path(self.tmp.name) / "origin", env=env,
-                               check=True, capture_output=True, text=True).stdout
+        env, item, merge_base = self.pull_request(app=self.APP_IN_TWO_HUNKS, more=self.MORE_FILES)
+        plain = self.plain_patch(env, merge_base)
         self.change_every_diff(env)
         # The review itself fails, since claude is the fake that exits 1, after it saved the diff.
         self.command("whooper-review", str(item), "--dry-run", env=env)
         [run] = (self.state / "runs").iterdir()
         self.assertEqual((run / "diff.patch").read_text(), plain)
 
+    def test_the_run_reads_its_own_git_diff_as_the_kept_diff_whatever_the_git_config_says(self):
+        env, item, merge_base = self.pull_request(app=self.APP_IN_TWO_HUNKS, more=self.MORE_FILES)
+        plain = self.plain_patch(env, merge_base)
+        self.write_git_config(env, self.diff_settings())
+        tmp = Path(self.tmp.name)
+        # The run reads the change as prompts/review.md tells it to, with a plain git diff, and stops.
+        self.script(self.fakes / "claude", f"git diff {merge_base} HEAD > '{tmp / 'run.diff'}'\n"
+                                           f"git config whooper.kept > '{tmp / 'kept.txt'}'")
+        # The environment Whooper starts in already holds git config: a setting the review sets again, which
+        # the review's own wins over, and one the run keeps.
+        self.command("whooper-review", str(item), "--dry-run",
+                     env={**env, "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "diff.context", "GIT_CONFIG_VALUE_0": "10",
+                          "GIT_CONFIG_KEY_1": "whooper.kept", "GIT_CONFIG_VALUE_1": "yes"})
+        [run] = (self.state / "runs").iterdir()
+        self.assertEqual(((tmp / "run.diff").read_text(), (run / "diff.patch").read_text(), (tmp / "kept.txt").read_text()),
+                         (plain, plain, "yes\n"))
+
     def test_show_rebuilds_the_diff_of_a_review_from_before_reviews_kept_it(self):
-        env, item, _ = self.pull_request(app=self.APP_IN_TWO_HUNKS)
+        env, item, merge_base = self.pull_request(app=self.APP_IN_TWO_HUNKS, more=self.MORE_FILES)
         self.command("whooper-review", str(item), "--dry-run", env=env)
         [run] = (self.state / "runs").iterdir()
         kept = (run / "diff.patch").read_text()

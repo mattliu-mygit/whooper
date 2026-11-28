@@ -226,14 +226,20 @@ git -C "$core" worktree add --quiet --detach "$run/head" "$head_sha"
 git -C "$core" worktree add --quiet --detach "$run/base" "$merge_base"
 # The worktrees go when the review ends, so the diff the run reads stays as diff.patch, for showing a
 # past review and for asks about it. It runs in the head worktree, as the run's git diff does, because
-# git applies the .gitattributes it finds there: a file marked -diff shows as binary. The flags keep
-# it a plain patch whatever the user's git config says: no external diff tool, textconv filter, or
-# color, a/ and b/ before the paths, a submodule's commit lines rather than its log, and git's default
-# hunks: 3 unchanged lines around each change, and a new hunk wherever more than 6 unchanged lines
-# separate two changes. whooper-show rebuilds the diff of a run from before this file with the same
-# flags, lib/whooper.py's PLAIN_DIFF.
-git -C "$run/head" diff --no-ext-diff --no-textconv --no-color --src-prefix=a/ --dst-prefix=b/ --submodule=short \
-  --unified=3 --inter-hunk-context=0 "$merge_base" HEAD > "$run/diff.patch"
+# git applies the .gitattributes it finds there: a file marked -diff shows as binary. The arguments
+# keep it a plain patch whatever the user's git config says: no external diff tool, textconv filter,
+# or color, a/ and b/ before the paths, a submodule's commit lines rather than its log, git's default
+# hunks (3 unchanged lines around each change, and a new hunk wherever more than 6 unchanged lines
+# separate two changes), algorithm (myers), and rename detection (renames but not copies), no order
+# file, a blank line of context printed with its leading space, which only -c can set, and object
+# names of at least 12 digits. git's default, core.abbrev=auto, sizes names by how many objects the
+# clone holds, so they would grow as the cache's clone does; no two objects in a clone share 12
+# digits in practice, so those stay put, and they stay as short as the names in the run's other git
+# output, which its environment below gives 12 digits too. whooper-show rebuilds the diff of a run
+# from before this file with the same arguments, lib/whooper.py's PLAIN_DIFF.
+git -C "$run/head" -c diff.suppressBlankEmpty=false diff --no-ext-diff --no-textconv --no-color --src-prefix=a/ \
+  --dst-prefix=b/ --submodule=short --unified=3 --inter-hunk-context=0 --diff-algorithm=myers -O/dev/null --find-renames \
+  --abbrev=12 "$merge_base" HEAD > "$run/diff.patch"
 # skills holds a content hash of every skill the run can load, so a finding traces to the skill version behind it.
 jq --arg run_id "$run_id" --arg merge_base "$merge_base" --arg as_of "$as_of" --arg agent "$WHOOPER_REVIEW_AGENT" \
   --argjson skills "$("$root/lib/python" "$root/lib/whooper.py" skills "$HOME/.claude/skills")" \
@@ -323,12 +329,25 @@ fi
 EOF
 } > "$run/prompt.md"
 
+# The run reads the change with its own git diff (prompts/review.md), so its environment gives git the
+# hunks, algorithm, order file, rename detection, blank lines, and object names diff.patch's arguments
+# pin, as git config entries, which outrank the user's config files, after any the environment already
+# holds, so of two entries of the same name the run's wins. The run then sees the hunks, and so the
+# lines inside them, that diff.patch shows, and that GitHub takes comments on.
+config_count="${GIT_CONFIG_COUNT:-0}"
+run_config=()
+for setting in diff.context=3 diff.interHunkContext=0 diff.algorithm=myers diff.orderFile=/dev/null diff.renames=true \
+  diff.suppressBlankEmpty=false core.abbrev=12; do
+  run_config+=("GIT_CONFIG_KEY_$config_count=${setting%%=*}" "GIT_CONFIG_VALUE_$config_count=${setting#*=}")
+  config_count=$((config_count + 1))
+done
 # GitHub refuses the run: gh sends the token "disabled", and git's credential helper (gh) hands git
 # the same. The launcher starts in a session of its own, so the run and everything it starts form
 # one process group that the time limit and the cleanup can stop, and none of it reads the terminal.
 (
   cd "$run/head"
   exec env GH_TOKEN=disabled GIT_SSH_COMMAND=false GIT_TERMINAL_PROMPT=0 TMPDIR="$run/tmp" \
+    "${run_config[@]}" GIT_CONFIG_COUNT="$config_count" \
     "$root/lib/python" -c 'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
     "$root/agents/$WHOOPER_REVIEW_AGENT/review" "$run/prompt.md" < /dev/null
 ) &

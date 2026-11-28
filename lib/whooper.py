@@ -749,13 +749,17 @@ def read_reviews(data, now):
     return reviews
 
 
-# The flags of the git diff that writes a review's diff.patch in bin/whooper-review, which keep it a
-# plain patch whatever the user's git config says: no external diff tool, textconv filter, or color,
-# a/ and b/ before the paths, a submodule's commit lines rather than its log, and git's default hunks:
-# 3 unchanged lines around each change, and a new hunk wherever more than 6 unchanged lines separate
-# two changes. rebuilt_diff passes the same ones, so keep the two lists the same.
-PLAIN_DIFF = ("--no-ext-diff", "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", "--submodule=short",
-              "--unified=3", "--inter-hunk-context=0")
+# The arguments of the git diff that writes a review's diff.patch in bin/whooper-review, from its -c on,
+# which keep it a plain patch whatever the user's git config says: no external diff tool, textconv
+# filter, or color, a/ and b/ before the paths, a submodule's commit lines rather than its log, git's
+# default hunks (3 unchanged lines around each change, and a new hunk wherever more than 6 unchanged
+# lines separate two changes), algorithm (myers), and rename detection (renames but not copies), no
+# order file, a blank line of context printed with its leading space, which only -c can set, and
+# object names of at least 12 digits, which bin/whooper-review says why it chose. rebuilt_diff passes
+# the same ones, so keep the two lists the same.
+PLAIN_DIFF = ("-c", "diff.suppressBlankEmpty=false", "diff", "--no-ext-diff", "--no-textconv", "--no-color",
+              "--src-prefix=a/", "--dst-prefix=b/", "--submodule=short", "--unified=3", "--inter-hunk-context=0",
+              "--diff-algorithm=myers", "-O/dev/null", "--find-renames", "--abbrev=12")
 
 
 def repo_clone(repo):
@@ -777,14 +781,14 @@ def read_clone(repo, *args):
 def rebuilt_diff(item):
     """The diff a review read, for a run from before whooper-review kept it as diff.patch: git diff
     between the merge base and the head that item, the run's run.json, records, in the repo's clone
-    (read_clone), with whooper-review's PLAIN_DIFF flags, or None without run.json or its merge base,
-    as for a review that waits, and when the clone lacks either commit or one of their files. The clone
-    has no checkout, so git reads .gitattributes from the head commit, which whooper-review's diff read
-    from the head worktree: a file marked -diff shows as binary."""
+    (read_clone), with whooper-review's PLAIN_DIFF arguments, or None without run.json or its merge
+    base, as for a review that waits, and when the clone lacks either commit or one of their files. The
+    clone has no checkout, so git reads .gitattributes from the head commit, which whooper-review's diff
+    read from the head worktree: a file marked -diff shows as binary."""
     if item is None or not item.get("merge_base"):
         return None
     base, head = item["merge_base"], item["head_sha"]
-    return read_clone(item["repo"], f"--attr-source={head}", "diff", *PLAIN_DIFF, base, head)
+    return read_clone(item["repo"], f"--attr-source={head}", *PLAIN_DIFF, base, head)
 
 
 # A hunk header of a patch git diff wrote: the hunk's first line in the old file and how many lines it
