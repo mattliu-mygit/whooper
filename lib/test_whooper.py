@@ -1908,9 +1908,7 @@ class RunDirTest(unittest.TestCase):
     and gopls keep their caches and temporary files there, but for the build cache the tests share."""
 
     def setUp(self):
-        folder = tempfile.TemporaryDirectory()
-        self.addCleanup(self.delete, folder)
-        self.tmp = Path(folder.name)
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
         home = self.tmp / "home"
         home.mkdir()
         # git config that changes what git grep prints, which name search must read all the same.
@@ -1922,19 +1920,6 @@ class RunDirTest(unittest.TestCase):
         self.env = {**os.environ, "HOME": str(home), "GIT_CONFIG_GLOBAL": str(home / ".gitconfig"),
                     "GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "Sam", "GIT_AUTHOR_EMAIL": "sam@example.com",
                     "GIT_COMMITTER_NAME": "Sam", "GIT_COMMITTER_EMAIL": "sam@example.com", "TMPDIR": str(self.tmp / "tmp")}
-
-    def delete(self, folder):
-        """Deletes folder, a TemporaryDirectory, trying again for up to a minute while it fails: the connections step kills
-        gopls as it ends, but not the go commands gopls started, which can still be writing in TMPDIR, the folder's tmp."""
-        deadline = monotonic() + 60
-        while True:
-            try:
-                folder.cleanup()
-                return
-            except OSError:
-                if monotonic() > deadline:
-                    raise
-                sleep(0.5)
 
     def run_dir(self, base, head):
         """A review run's directory for the PR that changes base's files, by path, to head's, as whooper-review
@@ -2324,6 +2309,63 @@ class ConnectionsTest(RunDirTest):
             while monotonic() < deadline:
                 os.kill(typescript, 0)
                 sleep(0.05)
+
+
+class LanguageServerTest(RunDirTest):
+    """LanguageServer, through which the connections step asks gopls and TypeScript 7's language server, here run in a
+    throwaway repo."""
+
+    def start_server(self):
+        """Starts gopls (Gopls) as a fake that starts a child, which ignores TERM and writes a line to a file every
+        tenth of a second, as a go command gopls starts writes its build folder, and then answers initialize and waits.
+        Returns the server, the child's process ID, and the file, once the child has written to it."""
+        tree, child, written = self.tmp / "tree", self.tmp / "child.pid", self.tmp / "written"
+        subprocess.run(["git", "init", "--quiet", str(tree)], env=self.env, check=True)
+        answer = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"capabilities": {}}})
+        fake(self.tmp / "fakes" / "gopls", "\n".join([
+            f"(trap '' TERM; while :; do echo x >> '{written}'; sleep 0.1; done) < /dev/null > /dev/null 2>&1 &",
+            f"echo $! > '{child}'",
+            f"printf 'Content-Length: {len(answer)}\\r\\n\\r\\n%s' '{answer}'",
+            "exec sleep 60"]))
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            server = whooper.Gopls(str(self.tmp / "fakes" / "gopls"), tree, "HEAD")
+        self.addCleanup(server.close)
+        pid = int(child.read_text())
+
+        def stop_child():
+            with suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+
+        self.addCleanup(stop_child)
+        deadline = monotonic() + 30
+        while not written.exists() and monotonic() < deadline:
+            sleep(0.05)
+        return server, pid, written
+
+    def check_stopped(self, child, written):
+        """Checks that child, the fake's child by process ID, ends, and that written, the file it writes, does not
+        change from now on."""
+        size = written.stat().st_size
+        # kill still finds the child once it ends, until launchd, its parent once the server is gone, reaps it.
+        deadline = monotonic() + 5
+        with self.assertRaises(ProcessLookupError):
+            while monotonic() < deadline:
+                os.kill(child, 0)
+                sleep(0.05)
+        self.assertEqual(written.stat().st_size, size)
+
+    def test_a_closed_language_server_leaves_nothing_it_started_running(self):
+        server, child, written = self.start_server()
+        server.close()
+        self.check_stopped(child, written)
+
+    def test_a_language_server_that_runs_out_of_time_leaves_nothing_it_started_running(self):
+        server, child, written = self.start_server()
+        # The watchdog thread runs watch with the server's seconds, as TypeScript 7's language server has them; with 0
+        # they run out at once.
+        server.watch(0)
+        self.check_stopped(child, written)
+
 
 # The limits test_gaps.json gives whenever it measures, in plain words.
 AND_LINES = "Go counts a line as run when any part of it ran: in `a && b`, the line counts as run even when b never ran."

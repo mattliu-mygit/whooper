@@ -1218,6 +1218,11 @@ class LanguageServerError(Exception):
     """A language server answered a request with an error, as gopls does for a position where it finds no declaration."""
 
 
+# LanguageServer.stop gives a language server, and each program it started, LANGUAGE_SERVER_STOP_SECONDS to end after
+# the TERM that stops them, then sends whatever is left a SIGKILL and waits as long again for it to end.
+LANGUAGE_SERVER_STOP_SECONDS = 1
+
+
 class LanguageServer:
     """A language server, command, run in the worktree tree with the environment env and spoken to through its standard
     input and output in the Language Server Protocol, so one load of the worktree's code answers every question: gopls
@@ -1227,13 +1232,15 @@ class LanguageServer:
     extensions that the review run changed in the worktree, and those it added, such as a probe's test, so neither the
     run's edits nor its probes reach the server's answers. A request the server answers with an error raises
     LanguageServerError, and the server exiting or writing something other than the protocol raises OSError or
-    ValueError. Given seconds, the server is killed once they pass, and what it was asked then raises TimeoutError."""
+    ValueError. The server runs in a process group of its own, with the programs it starts, such as the go commands
+    gopls runs, and close stops the whole group (stop), so none of them goes on writing in the worktree once it is
+    closed. Given seconds, stop runs once they pass too, and what the server was asked then raises TimeoutError."""
 
     def __init__(self, command, tree, commit, env=None, seconds=None, options=None):
         self.tree, self.commit, self.requests, self.opened, self.errors = tree, commit, 0, set(), []
         self.out_of_time, self.watchdog = False, None
         self.process = subprocess.Popen(command, cwd=tree, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                        stderr=subprocess.DEVNULL, env=env)
+                                        stderr=subprocess.DEVNULL, env=env, start_new_session=True)
         # A server that fails to start, or the time limit meanwhile, leaves no process behind.
         try:
             if seconds is not None:
@@ -1252,12 +1259,30 @@ class LanguageServer:
             raise
 
     def watch(self, seconds):
-        """Kills the server once seconds pass, unless it ended first."""
+        """Stops the server, with the programs it started, once seconds pass, unless it ended first."""
         try:
             self.process.wait(timeout=seconds)
         except subprocess.TimeoutExpired:
             self.out_of_time = True
-            self.process.kill()
+            self.stop()
+
+    def stop(self):
+        """Stops the server and the programs it started, which share the process group it leads: a TERM, then a SIGKILL
+        to whatever is left once LANGUAGE_SERVER_STOP_SECONDS pass, and waits as long again for that to end. A program
+        that makes a group of its own escapes this. gopls v0.24.0 runs each go command in gopls's group, but
+        golang.org/x/tools v0.52.0 gives each one a group of its own (golang/go#81408), so once gopls is built on it,
+        this has to find the server's descendants by parent, as lib/stop-group does."""
+        for signum in (signal.SIGTERM, signal.SIGKILL):
+            deadline = monotonic() + LANGUAGE_SERVER_STOP_SECONDS
+            try:
+                os.killpg(self.process.pid, signum)
+                while monotonic() < deadline:
+                    sleep(0.05)
+                    os.killpg(self.process.pid, 0)
+            # killpg fails with ESRCH once nothing of the group is left, and on macOS with EPERM while all that is left
+            # has ended but waits to be reaped, as the server does until close or gone waits for it.
+            except (ProcessLookupError, PermissionError):
+                return
 
     def gone(self):
         """The error for the server, which closed its end of the pipes: TimeoutError once its seconds ran out, and
@@ -1330,7 +1355,8 @@ class LanguageServer:
         return sorted(sites)
 
     def close(self):
-        self.process.kill()
+        """Stops the server, with the programs it started (stop), and closes its pipes."""
+        self.stop()
         self.process.wait()
         self.process.stdout.close()
         # A request the time limit cut off can leave bytes to flush, which the server, now gone, cannot read. close still
@@ -1383,7 +1409,7 @@ class Gopls(LanguageServer):
 
 class TypeScriptServer(LanguageServer):
     """TypeScript 7's language server, program, run as tsc --lsp --stdio, the flags tsc --lsp -h lists (LanguageServer),
-    which is killed once seconds pass. It finds the project of each file it opens itself: that of the nearest
+    which is stopped once seconds pass. It finds the project of each file it opens itself: that of the nearest
     tsconfig.json or jsconfig.json above the file, or of a project one of those references that holds the file, as a
     solution's does. A file the review run added opens empty. Its automatic type acquisition, with which it runs npm to
     download the type declarations of a project's packages into a cache of the user's, stays off."""
@@ -4301,7 +4327,8 @@ def main(command, *args):
         # whooper-review runs each in a process group of its own, connections as soon as the review run ends, and the
         # review then goes on as it would without the step's file, whatever this finds and even if it fails. Its
         # cleanup stops a step with SIGTERM, which raises SystemExit here, so the step kills the command it started on
-        # its way out (run_command), such as go or TypeScript, each in a process group of its own.
+        # its way out (run_command), such as go or TypeScript, and stops each language server it started
+        # (LanguageServer.close), each in a process group of its own.
         for stop in (signal.SIGTERM, signal.SIGHUP):
             signal.signal(stop, lambda signum, frame: sys.exit(128 + signum))
         {"connections": connections, "test-gaps": test_gaps, "examples": examples,
