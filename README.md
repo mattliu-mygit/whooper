@@ -89,7 +89,7 @@ reviews.
 To run the steps by hand:
 
 ```sh
-bin/whooper-fetch   # GitHub reads -> <state>/poll/github.json
+bin/whooper-fetch   # GitHub reads -> <state>/poll/github.json and recheck-prs.json
 bin/whooper-poll    # slackdump reads Slack, an agent picks the asks -> <state>/poll/<UTC start time>.json
 bin/whooper-select  # prints the newest poll's items and the recheck list's that no record marks as handled, one per line
 ```
@@ -572,7 +572,9 @@ posts only. Only PRs in the configured GitHub orgs count. Each item is one PR an
 When whooper-post or whooper-submit finds that a PR's head moved since its review, it posts
 nothing and puts the PR on the recheck list. The next round's whooper-select adds it to the work at
 the new head, with the kind and source it had, so the new commits get a review even when only a
-Slack ask brought the PR in, which a poll reads once. Like a re-check, it waits for the next day
+Slack ask brought the PR in, which a poll reads once. Unless the PR is merged or closed by then:
+whooper-fetch looks up each listed PR its searches did not find, and whooper-select drops a merged or
+closed one from the list, saying so on its error output, instead of reviewing it. Like a re-check, it waits for the next day
 once the PR has 3 records of its kind for other heads started today. `bin/whooper-retry` puts a PR
 on the list too, and no limit holds that review back ([Retry a review](#retry-a-review)). So does
 whooper-round, for a review that waits for the next round after another review in the round stopped
@@ -823,6 +825,8 @@ the recheck list while the commands above write to it.
 
 - `poll/github.json`: whooper-fetch's latest output, one entry per PR as `queries/pr.graphql`
   returns it.
+- `poll/recheck-prs.json`: each PR on the recheck list that whooper-fetch's latest searches did not
+  find, as `queries/pr.graphql` returns it, which says whether GitHub has merged or closed it.
 - `poll/<time>.json`: a poll's work items. `poll/<time>.prompt.md`, `.answer.json`, and
   `.transcript.jsonl` (Claude) or `.transcript.json` (Devin) are its run.
 - `poll/cursor`: the Unix time the next poll reads Slack from, which is the last successful poll's
@@ -833,21 +837,23 @@ the recheck list while the commands above write to it.
   without findings. whooper-classify writes done with the run's `approval`, whooper-post and
   whooper-submit write stale when the head moved, and whooper-retry writes retry, keeping the
   count, at the head the PR has now.
-  whooper-select drops a re-check, which whooper-review cannot review yet, an item in a repo the
+  whooper-select drops a re-check, which whooper-review cannot review yet, a recheck-list item of a
+  PR that `poll/recheck-prs.json` says is merged or closed, an item in a repo the
   config has no `[repos."<owner>/<repo>"]` table for, an item whose record is done or running or has
   failed 3 times, a recheck-list item of a PR that already has 3 records of its kind for other heads
   started today (local time), an item that asks again for a review you removed
   ([Remove a review](#remove-a-review)), and any item of a PR whose newest review you skipped
   ([Skip a review](#skip-a-review)). A recheck-list item dropped for the daily limit stays on the
-  list for the next day. Of these, only a re-check and the missing table drop an item whose record
-  says retry. A record that cannot be read counts as none.
+  list for the next day. Of these, only a re-check, a merged or closed PR, and the missing table drop
+  an item whose record says retry. A record that cannot be read counts as none.
 - `rechecks/<owner>-<repo>-<pr>.json`: the recheck list: a PR whose head whooper-post or
   whooper-submit found moved since its review, as the work item for the new head, or whose review
   you asked for again with whooper-retry, as the run's work item at the head the PR has now, or whose
   review waits for the next round, as its work item, with the kind, source, and Slack ask it had. A
   later mark of the PR replaces it. whooper-select deletes it once
-  the newest poll lists the PR, which then comes with the head the PR has now, once the record at
-  the listed head is done or has failed 3 times, or once it asks again for a review you removed.
+  the newest poll lists the PR, which then comes with the head the PR has now, once GitHub reports
+  the PR merged or closed, once the record at the listed head is done or has failed 3 times, or once
+  it asks again for a review you removed.
 - `locks/<owner>-<repo>-<pr>/`: the lock of the review that holds the PR, with its process ID in
   `pid` and its run ID in `run_id`. A lock whose process is gone is stale: the next review takes
   it, and whooper-ask, whooper-status, and whooper-show no longer count its review as running. The

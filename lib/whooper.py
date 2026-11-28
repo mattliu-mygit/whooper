@@ -19,6 +19,8 @@ from the user's config file (config_path), never from this code. The bin/ script
   whooper.py posts <slackdump channel.json> <oldest>                               -> the channel's posts JSON
   whooper.py asks <posts.json> <answer.json> <oldest>                              -> asks JSON
   whooper.py items <github.json> <asks.json> <slack-prs.json>                      -> {"items": [...]}
+  whooper.py recheck-urls <data dir> <github.json>                                 -> the recheck list's PRs that
+                                                                                      github.json lacks, by URL
   whooper.py select <data dir>                                                     -> one work item per line, and
                                                                                       prunes the recheck list
   whooper.py conversation <conversation.graphql result> [<as-of time>]             -> a run's github.json
@@ -3062,7 +3064,7 @@ def work_item(pr, kind, source, reason, slack=None):
     }
 
 
-def select_work(items, prs_dir, now, repos, rechecks=(), runs_dir=None):
+def select_work(items, prs_dir, now, repos, rechecks=(), runs_dir=None, closed=None):
     """Splits work items into work to start and (item, reason) for items already handled or
     unreviewable, and returns the recheck-list items that no longer wait, for the caller to delete.
 
@@ -3085,9 +3087,13 @@ def select_work(items, prs_dir, now, repos, rechecks=(), runs_dir=None):
     kind for other heads started on now's local day, and stays on the list for the next day. A
     recheck-list item no longer waits once items list its PR for a first review, since they carry the
     head the PR has now, once its record is done or has failed
-    MAX_FAILURES times, or once the removal of its PR's review drops it. Nothing here reads GitHub, so
-    a listed PR merged, closed, or reviewed on GitHub since the mark still gets its review, at the head
-    the mark saw; have whooper-poll fetch the listed PRs if such reviews come to waste runs.
+    MAX_FAILURES times, or once the removal of its PR's review drops it.
+
+    closed maps the URL of each recheck-list PR that GitHub reported merged or closed when whooper-fetch
+    last looked to that state, MERGED or CLOSED. Its item is dropped, even with a retry record, and leaves
+    the list, since a review of it would go nowhere. Nothing here reads GitHub itself, so a listed PR
+    reviewed on GitHub since the mark still gets its review, at the head the mark saw, and so does one
+    merged or closed after whooper-fetch looked.
     """
     # A re-check the poll lists is dropped below, so it does not finish the PR's first review on the list.
     listed = {(i["repo"], i["pr"]) for i in items if i["kind"] == "first_review"}
@@ -3103,6 +3109,9 @@ def select_work(items, prs_dir, now, repos, rechecks=(), runs_dir=None):
             reason = "whooper-review does not re-check a PR yet"
             if from_list:
                 finished.append(item)
+        elif from_list and (state := (closed or {}).get(f"https://github.com/{item['repo']}/pull/{item['pr']}")):
+            reason = f"{state.lower()} on GitHub"
+            finished.append(item)
         elif item["repo"] not in repos:
             reason = f"the config has no [repos.\"{item['repo']}\"] table"
         elif record and record["status"] == "running":
@@ -4036,6 +4045,14 @@ def main(command, *args):
         github, asks, slack_prs = args
         login = load_config()["user"]["github_login"]
         print(json.dumps({"items": poll_items(login, load(github), load(asks), load(slack_prs), datetime.now(timezone.utc))}, indent=2))
+    elif command == "recheck-urls":
+        data, github = Path(args[0]), args[1]
+        # whooper-fetch's searches list open PRs only, so a listed PR they found is open.
+        found = {pr["url"] for pr in load(github)}
+        listed = {f"https://github.com/{item['repo']}/pull/{item['pr']}"
+                  for item in map(load, (data / "rechecks").glob("*.json"))}
+        for url in sorted(listed - found):
+            print(url)
     elif command == "select":
         data = Path(args[0])
         # Poll outputs are named by their UTC start time, so the last name is the newest. The poll's
@@ -4043,6 +4060,12 @@ def main(command, *args):
         newest = max((data / "poll").glob("[0-9]*Z.json"), default=None)
         if newest is None:
             raise SystemExit(f"whooper-select: no poll output in {data / 'poll'}")
+        # whooper-fetch's look at the recheck list's PRs its searches did not find, which may be merged or closed.
+        try:
+            looked_up = load(data / "poll" / "recheck-prs.json")
+        except FileNotFoundError:
+            looked_up = []
+        closed = {pr["url"]: pr["state"] for pr in looked_up if pr["state"] != "OPEN"}
         recheck_list = data / "rechecks"
         recheck_list.mkdir(exist_ok=True)
         # list_again writes the list under this lock too, so a mark of a PR that whooper-submit or
@@ -4051,7 +4074,7 @@ def main(command, *args):
         with folder_lock(recheck_list):
             rechecks = [load(path) for path in sorted(recheck_list.glob("*.json"))]
             work, drops, finished = select_work(load(newest)["items"], data / "prs", datetime.now().astimezone(),
-                                                load_config().get("repos", {}), rechecks, data / "runs")
+                                                load_config().get("repos", {}), rechecks, data / "runs", closed)
             for item, reason in drops:
                 print(f"whooper-select: dropped {item['repo']}#{item['pr']} {item['kind']}: {reason}", file=sys.stderr)
             for item in finished:

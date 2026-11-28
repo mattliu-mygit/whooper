@@ -686,6 +686,19 @@ class SelectWorkTest(unittest.TestCase):
         self.assertEqual(select_work([recheck], self.prs, self.now, REPOS, [listed]),
                          ([listed], [(recheck, why)], []))
 
+    def test_a_recheck_list_item_whose_pr_github_reports_merged_or_closed_leaves_the_list(self):
+        # whooper-fetch looked up the list's PRs its searches did not find: GitHub reports PR 13 merged, PR 14
+        # closed, and PR 15 open.
+        merged, closed, still_open = ({**self.listed_again(), "pr": number} for number in (13, 14, 15))
+        states = {"https://github.com/example-org/example-repo/pull/13": "MERGED",
+                  "https://github.com/example-org/example-repo/pull/14": "CLOSED"}
+        self.assertEqual(select_work([], self.prs, self.now, REPOS, [merged, closed, still_open], closed=states),
+                         ([still_open], [(merged, "merged on GitHub"), (closed, "closed on GitHub")], [merged, closed]))
+        # Not even a retry reviews a merged PR.
+        self.record("head3.first_review.json", "retry", pr_dir="example-org-example-repo-13")
+        self.assertEqual(select_work([], self.prs, self.now, REPOS, [merged], closed=states),
+                         ([], [(merged, "merged on GitHub")], [merged]))
+
     def test_three_reviews_today_hold_a_fourth_recheck_list_item(self):
         for head in ["head0", "head1", "head2"]:
             self.record(f"{head}.first_review.json", "done", started_at="2031-08-01T16:00:00Z")
@@ -4430,6 +4443,40 @@ class RunTest(unittest.TestCase):
                          (1, "", f"whooper-review: process {holder} is already reviewing sample-org/plain-repo#12\n"))
         # The other review's lock stays, and this review made no run and counted no failure.
         self.assertEqual(((lock / "pid").read_text(), [p.name for p in self.state.iterdir()]), (f"{holder}\n", ["locks"]))
+
+    def test_the_fetch_looks_up_the_recheck_lists_prs_its_searches_miss_and_select_drops_merged_and_closed_ones(self):
+        # The searches find PR 12, whose review request stands. The recheck list holds PRs 12 to 15, and GitHub
+        # reports PR 13 merged, PR 14 closed, and PR 15, which a Slack ask brought in, open.
+        self.fake_review_requests(pr(number=12, requested=[LOGIN]))
+        for number, state in [(13, "MERGED"), (14, "CLOSED"), (15, "OPEN")]:
+            (self.fakes / f"example-org-example-repo-pull-{number}.json").write_text(
+                json.dumps(pr(number=number, state=state)))
+        rechecks = self.state / "rechecks"
+        rechecks.mkdir(parents=True)
+        listed = {number: work_item(number=number) for number in (12, 13, 14, 15)}
+        for number, item in listed.items():
+            (rechecks / f"example-org-example-repo-{number}.json").write_text(json.dumps(item))
+        fetch = self.command("whooper-fetch")
+        self.assertEqual(fetch.returncode, 0, fetch.stderr)
+        poll = self.state / "poll"
+        self.assertEqual([p["number"] for p in json.loads((poll / "github.json").read_text())], [12])
+        # The searches list open PRs only, so only the PRs they did not find are looked up.
+        self.assertEqual([(p["number"], p["state"]) for p in json.loads((poll / "recheck-prs.json").read_text())],
+                         [(13, "MERGED"), (14, "CLOSED"), (15, "OPEN")])
+        (poll / "20310727T020000Z.json").write_text(json.dumps({"items": []}))
+        select = self.command("whooper-select")
+        self.assertEqual([json.loads(line) for line in select.stdout.splitlines()], [listed[12], listed[15]],
+                         select.stderr)
+        self.assertEqual(select.stderr,
+                         "whooper-select: dropped example-org/example-repo#13 first_review: merged on GitHub\n"
+                         "whooper-select: dropped example-org/example-repo#14 first_review: closed on GitHub\n")
+        self.assertEqual(sorted(path.name for path in rechecks.iterdir()),
+                         ["example-org-example-repo-12.json", "example-org-example-repo-15.json"])
+        # With the list empty, the fetch looks up nothing.
+        for path in rechecks.iterdir():
+            path.unlink()
+        self.assertEqual(self.command("whooper-fetch").returncode, 0)
+        self.assertEqual(json.loads((poll / "recheck-prs.json").read_text()), [])
 
     def test_a_round_reviews_each_selected_item_and_reports_how_it_ended(self):
         self.fake_one_review_request()

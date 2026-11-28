@@ -3,12 +3,14 @@
 # list's in <state>/rechecks, PRs whose head whooper-post or whooper-submit found moved since their
 # review, whose review the user asked for again with bin/whooper-retry, or whose review waited in a
 # round after another stopped at a cause that stops every review. It drops re-checks, which
-# whooper-review cannot review yet, the items a record under <state>/prs marks as handled, and those
-# that ask again for a review the user removed with bin/whooper-remove while it is its PR's newest
-# run, printing each with its reason on stderr, but not an item whose record says retry unless it is
-# a re-check. It deletes the recheck list's entries that no longer wait: the poll lists the PR for a
-# first review, the review at the listed head is done or has failed 3 times, the entry asks again
-# for a review the user removed, or the entry is a re-check.
+# whooper-review cannot review yet, recheck-list items whose PR GitHub reported merged or closed when
+# bin/whooper-fetch last looked (<state>/poll/recheck-prs.json), the items a record under <state>/prs
+# marks as handled, and those that ask again for a review the user removed with bin/whooper-remove
+# while it is its PR's newest run, printing each with its reason on stderr, but not an item whose
+# record says retry unless it is a re-check or its PR is merged or closed. It deletes the recheck
+# list's entries that no longer wait: the poll lists the PR for a first review, the PR is merged or
+# closed, the review at the listed head is done or has failed 3 times, the entry asks again for a
+# review the user removed, or the entry is a re-check.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
