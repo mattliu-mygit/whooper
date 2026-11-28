@@ -804,3 +804,57 @@ ul {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* While a review shows, the tabs fold to this rail, as Prompting Time's All work folds while a plugin
+   shows: an arrow and its words turned 90 degrees. */
+.w-app[data-railed] {
+  grid-template-columns: 2rem minmax(0, 1fr);
+}
+
+.w-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s-space-8);
+  min-block-size: 0;
+  padding: var(--s-space-12) 0;
+  overflow: hidden;
+  border: 0;
+  border-inline-end: var(--s-border-thin) var(--s-border-style) var(--s-border);
+  background: none;
+  color: var(--s-text-muted);
+  font-size: var(--s-size-xs);
+  cursor: pointer;
+}
+
+.w-rail:hover {
+  color: var(--s-text);
+}
+
+.w-rail-label {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  white-space: nowrap;
+}
+
+.w-nav-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-space-8);
+}
+
+.w-nav-fold {
+  padding: 0 var(--s-space-4);
+  border: 0;
+  border-radius: var(--s-sidebar-item-radius);
+  background: none;
+  color: var(--s-text-muted);
+  font-size: var(--s-size-sm);
+  cursor: pointer;
+}
+
+.w-nav-fold:hover {
+  background: var(--s-surface-elevated);
+  color: var(--s-text);
+}

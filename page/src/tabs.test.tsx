@@ -2,6 +2,7 @@ import { fireEvent as dom, screen, waitFor, within } from "@testing-library/dom"
 import { flush } from "solid-js";
 import { describe, expect, it } from "vitest";
 import { matches } from "./Reviews";
+import { HOLD_MS } from "./store";
 import { renderWithFakeHost } from "./test/connect";
 
 // Solid applies updates in a microtask, so each event is followed by flush() to see its effect.
@@ -18,6 +19,7 @@ const TITLE = "refactor(cache): separate the cache configuration";
 const CACHE = /^(?!Actions for ).*refactor\(cache\)/;
 
 const tab = (name: string) => within(screen.getByRole("navigation", { name: "Whooper" })).getByRole("button", { name: new RegExp(`^${name}`) });
+const rail = () => screen.getByRole("button", { name: /^Whooper/, expanded: false });
 const list = (name = "Reviews") => screen.findByRole("list", { name });
 const rowTexts = (element: HTMLElement) => within(element).queryAllByRole("listitem").map((row) => row.textContent);
 const statusWords = (element: HTMLElement) =>
@@ -79,6 +81,7 @@ describe("the page's tabs", () => {
 
     host.open(`/reviews/${EARLIER}`);
     await screen.findByText(/Review 1 of 2, read-only/, undefined, { timeout: 15_000 });
+    fireEvent.click(rail());
     expect(tab("Past reviews")).toHaveAttribute("aria-current", "page");
     fireEvent.click(screen.getByRole("button", { name: "Back to the list" }));
     expect(await screen.findByRole("heading", { name: "Past reviews" })).toBeInTheDocument();
@@ -242,6 +245,50 @@ describe("the page's tabs", () => {
     press("k");
     expect(past.querySelector("[data-selected]")).toHaveTextContent("Earlier review");
   });
+
+  it("folds the tabs to a rail while a review shows, which unfolds them with the review open, « folds again, and Back unfolds", async () => {
+    renderWithFakeHost({ openOnReady: `/reviews/${RUN}` });
+    expect(await screen.findByRole("button", { name: "Back to the list" })).toBeInTheDocument();
+    await waitFor(() => expect(rail()).toHaveAccessibleName("Whooper · 5 waiting on you"));
+    expect(screen.queryByRole("navigation", { name: "Whooper" })).not.toBeInTheDocument();
+    fireEvent.click(rail());
+    expect(tab("Reviews")).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("button", { name: "Back to the list" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Fold the tabs" }));
+    expect(screen.queryByRole("navigation", { name: "Whooper" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Back to the list" }));
+    expect(await screen.findByRole("heading", { name: "Reviews" })).toBeInTheDocument();
+    expect(tab("Reviews")).toBeInTheDocument();
+    // The lists have nothing to fold to.
+    expect(screen.queryByRole("button", { name: "Fold the tabs" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Whooper/, expanded: false })).not.toBeInTheDocument();
+  });
+
+  it("names only Whooper on the rail when nothing waits on you, and opens each review folded", async () => {
+    const host = renderWithFakeHost({ openOnReady: `/reviews/${RUN}` });
+    await screen.findByRole("button", { name: "Back to the list" });
+    await waitFor(() => expect(rail()).toHaveAccessibleName("Whooper · 5 waiting on you"));
+    fireEvent.click(rail());
+    host.open(`/reviews/${EARLIER}`);
+    await screen.findByText(/Review 1 of 2, read-only/, undefined, { timeout: 15_000 });
+    expect(rail()).toBeInTheDocument();
+    // Skip each review that waits on you, from a list.
+    host.open("/");
+    for (const title of await waitFor(() => {
+      const waiting = [...document.querySelectorAll(".w-row")].filter((row) => /Ready to approve|Needs a look|Review failed/.test(row.textContent ?? ""));
+      expect(waiting).toHaveLength(5);
+      return waiting.map((row) => row.querySelector(".w-row-title")!.textContent!);
+    }))
+    {
+      await choose(title, "Skip");
+      // Each skip holds the row actions for HOLD_MS after its reply.
+      await screen.findByText(`Skipped “${title}”.`);
+      await new Promise((resolve) => setTimeout(resolve, HOLD_MS + 50));
+    }
+    await waitFor(() => expect(tab("Reviews")).toHaveTextContent(/^Reviews$/));
+    host.open(`/reviews/${RUN}`);
+    await waitFor(() => expect(rail()).toHaveAccessibleName("Whooper"));
+  }, 30_000);
 
   it("finds a review only when every word of the search is in its text", () => {
     expect(matches("", "anything")).toBe(true);

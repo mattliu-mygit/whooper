@@ -453,7 +453,11 @@ retries it. Past reviews, at `/past`, lists the reviews you removed, which its �
 earlier reviews of a pull request that a newer one replaced. Causes, at `/causes`, lists each cause
 that stops every review with the reviews it holds back. In Reviews and Past reviews, j and k select
 the next and previous row, around the ends, as they step through a walkthrough, and Enter opens it;
-Escape closes any open menu. Settings, at `/settings`, edits the settings `schemas/settings.json`
+Escape closes any open menu. While a review shows, the tabs fold to a narrow rail, as Prompting
+Time's All work folds while a plugin shows: » and "Whooper · 2 waiting on you", or only "Whooper"
+when nothing waits on you, turned 90°, so only the walkthrough's own navigator stays beside the
+review. A click on the rail unfolds the tabs with the review still open, « at their top folds them
+again, and Back to the list, like any list, shows them; each review opens with them folded. Settings, at `/settings`, edits the settings `schemas/settings.json`
 describes, read with the `get-settings` action and saved with `save-settings`, the same two
 Prompting Time's settings form runs, so both edit the same lines of `config.toml` and Prompting
 Time's check for each agent's CLI follows the saved `[jobs]`. Each field says why its value would be

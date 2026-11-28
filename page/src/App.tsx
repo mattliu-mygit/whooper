@@ -3,13 +3,14 @@ import { CausesTab } from "./Causes";
 import { FailedReview, RunningReview } from "./FailedReview";
 import { ReviewScreen } from "./Review";
 import { ReviewHeader } from "./ReviewHeader";
-import { createListFilters, PastTab, ReviewsTab } from "./Reviews";
+import { createListFilters, PastTab, ReviewsTab, waitingOnYou } from "./Reviews";
 import { createReviewMemory, type LastLook } from "./review/memory";
 import { OverviewReview, type ReviewMode } from "./review/OverviewReview";
 import { createReviewViews } from "./review/views";
 import { SettingsTab } from "./Settings";
 import { Sidebar, type Tab } from "./Sidebar";
 import type { PageStore } from "./store";
+import { TITLE } from "./text";
 
 /**
  * The route Prompting Time opened, and nothing until it opens one, beside the page's own sidebar of
@@ -19,6 +20,10 @@ import type { PageStore } from "./store";
  * tab whose list holds it marked. The lists keep their search and filter while a review shows. Each review stays
  * mounted while its run stays the same, so a new read of the same run updates it in place. A finished
  * review that wrote an overview opens on its walkthrough, and the header switches it to its diff.
+ * While a review shows, the tabs fold to a rail, an arrow and "Whooper · 2 waiting on you" turned
+ * 90 degrees as Prompting Time's All work rail, so only the walkthrough's own navigator stays beside
+ * the review. A click on the rail unfolds them with the review still open, and « at their top folds
+ * them again; each review opens folded, and a list's route, as Back to the list opens, shows the tabs.
  * What the page remembers about the reviews, and the views turned off, last as long as the page.
  */
 export function App(props: { store: PageStore }) {
@@ -34,6 +39,17 @@ export function App(props: { store: PageStore }) {
     return place?.kind === "cause" ? place.cause : null;
   };
   const filters = createListFilters();
+  // Whether the user unfolded the tabs over the open review; each review the page opens, the same one
+  // again after a list among them, opens folded.
+  const [unfolded, setUnfolded] = createSignal(false);
+  createEffect(review, () => {
+    setUnfolded(false);
+  });
+  const railed = () => review() !== null && !unfolded();
+  const railWords = () => {
+    const waiting = store.state.status ? waitingOnYou(store.state.status.items) : 0;
+    return waiting > 0 ? `${TITLE} · ${waiting} waiting on you` : TITLE;
+  };
   /** The list a review belongs to: Reviews while whooper-status lists it as an item, else Past reviews. */
   const listOf = (runId: string): Tab => {
     const status = store.state.status;
@@ -49,8 +65,18 @@ export function App(props: { store: PageStore }) {
   };
   return (
     <Show when={store.place()}>
-      <div class="w-app">
-        <Sidebar store={store} tab={tab()} />
+      <div class="w-app" data-railed={railed() ? "" : undefined}>
+        <Show
+          when={!railed()}
+          fallback={
+            <button type="button" class="w-rail" aria-expanded="false" title="Show the tabs" onClick={() => setUnfolded(true)}>
+              <span aria-hidden="true">»</span>
+              <span class="w-rail-label">{railWords()}</span>
+            </button>
+          }
+        >
+          <Sidebar store={store} tab={tab()} onFold={review() ? () => setUnfolded(false) : undefined} />
+        </Show>
         <main class="w-main">
           <Switch>
             <Match when={store.place()?.kind === "home"}>

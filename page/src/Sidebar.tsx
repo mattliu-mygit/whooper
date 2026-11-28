@@ -18,9 +18,9 @@ export function agentWords(store: PageStore): string {
  * The page's own sidebar, which stands in for Prompting Time's while it folds to a rail: Whooper's name
  * and status, then its tabs, Reviews with how many of its reviews wait on you, Past reviews, Causes
  * with how many stop every review, and Settings. Each opens its route; the open one is marked, also while one of its reviews or
- * causes shows.
+ * causes shows. While a review shows, « at its top folds it back to the rail.
  */
-export function Sidebar(props: { store: PageStore; tab: Tab }) {
+export function Sidebar(props: { store: PageStore; tab: Tab; onFold?: () => void }) {
   const store = props.store;
   const status = () => store.state.status;
   const tabs = (): { id: Tab; label: string; route: string; count?: number }[] => [
@@ -30,9 +30,18 @@ export function Sidebar(props: { store: PageStore; tab: Tab }) {
     { id: "settings", label: "Settings", route: "/settings" },
   ];
   return (
-    <nav class="w-nav" aria-label={TITLE}>
+    <nav id="w-tabs" class="w-nav" aria-label={TITLE}>
       <div class="w-nav-head">
-        <p class="w-nav-name">{TITLE}</p>
+        <div class="w-nav-title">
+          <p class="w-nav-name">{TITLE}</p>
+          <Show when={props.onFold}>
+            {(fold) => (
+              <button type="button" class="w-nav-fold" aria-label="Fold the tabs" aria-expanded="true" title="Fold the tabs" onClick={() => fold()()}>
+                «
+              </button>
+            )}
+          </Show>
+        </div>
         <Show when={status()}>
           {(current) => (
             <p class="w-nav-status">
