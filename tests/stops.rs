@@ -26,16 +26,47 @@ fn kill_groups(pids: &[i32]) {
     }
 }
 
+/// A command started by start, which is stopped when the test ends, even when an
+/// assertion fails first, so no failed test leaves a whooper run polling.
+struct Started(Child);
+
+impl std::ops::Deref for Started {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Started {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+
+impl Drop for Started {
+    fn drop(&mut self) {
+        // A TERM first, so the command stops the groups it started, then a SIGKILL to what is left.
+        if self.0.try_wait().unwrap().is_none() {
+            unsafe { libc::killpg(self.0.id() as i32, libc::SIGTERM) };
+            ends(&mut self.0, 8);
+        }
+        unsafe { libc::killpg(self.0.id() as i32, libc::SIGKILL) };
+        let _ = self.0.wait();
+    }
+}
+
 /// Starts whooper with args in a process group of its own, its output in the file log.
-fn start(w: &Whooper, args: &[&str], log: &Path, env: &[(&str, &str)]) -> Child {
+fn start(w: &Whooper, args: &[&str], log: &Path, env: &[(&str, &str)]) -> Started {
     let out = fs::File::create(log).unwrap();
-    w.command(args)
-        .envs(env.iter().copied())
-        .process_group(0)
-        .stdout(out.try_clone().unwrap())
-        .stderr(out)
-        .spawn()
-        .unwrap()
+    Started(
+        w.command(args)
+            .envs(env.iter().copied())
+            .process_group(0)
+            .stdout(out.try_clone().unwrap())
+            .stderr(out)
+            .spawn()
+            .unwrap(),
+    )
 }
 
 /// Waits up to seconds for child to end and returns its exit code, or None.
