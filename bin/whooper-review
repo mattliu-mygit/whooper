@@ -127,7 +127,7 @@ finished=false
 # What failure.txt says when the review stops without die's reason: a command failed under set -e,
 # unless the trap below records that a signal stopped the review.
 stop_reason="the review stopped at an unexpected error; see whooper-review's error output"
-work="" agent_group="" agent_file="" watchdog_pid="" step_file=""
+work="" agent_group="" agent_file="" watchdog_pid="" step_file="" setup_file="" teardown_file=""
 # Stops the run or a step, which lib/whooper.py session starts in a process group of its own, named by the file $1, where
 # session writes the group's ID once it has made the group, and everything it started (lib/stop-group): a TERM, then a
 # SIGKILL to whatever is left 4 seconds later. While the file is missing, as when this script stops the moment it starts
@@ -152,8 +152,15 @@ watchdog() {
   : > "$work/timed-out"
   stop_group "$agent_file"
 }
+# Once the review stops, a further INT, TERM, or HUP only stops the teardown script, if it runs, so it cannot cut the
+# cleanup short, as the TERM the round sends when it stops would when the cleanup of a review that ended had begun.
+# The INT, TERM, and HUP trap calls this first of all, so a second signal right after the first finds it set.
+stopping() {
+  trap 'stop_group "$teardown_file"' INT TERM HUP
+}
 cleanup() {
   local status=$?
+  stopping
   # bash also runs this trap in a process it forked for a background command, when that process cannot
   # expand the command's words, as under set -u, and $$ there is still this script's process ID, so that
   # process would pass the lock check below and clean up the review from under this one. Only this
@@ -174,21 +181,28 @@ cleanup() {
     rm -rf "$work"
     exit "$status"
   fi
-  # This comes before the rest, so a second Ctrl-C during a slow teardown, which would end the
-  # cleanup, cannot lose the reason.
+  # This comes before the rest, so the reason is saved even when the cleanup is cut short, as by the
+  # SIGKILL the round sends 4 seconds after its TERM (stop_group).
   if [[ "$finished" != true && -n "$failure" && ! -e "$failure" ]]; then
     save_failure "$stop_reason" || true
   fi
-  # The run, while it runs, and a step, while one runs, each with everything it started.
+  # The run, while it runs, a step, and the setup script, while one runs, each with everything it started.
   stop_group "$agent_file"
   stop_group "$step_file"
+  stop_group "$setup_file"
   if [[ -n "$watchdog_pid" ]]; then
     kill "$watchdog_pid" 2>/dev/null || true
   fi
   # What the teardown script prints goes to the error output, so this script's output stays the run
-  # directory alone.
+  # directory alone. It runs in a session of its own, as the setup script does, and this waits for it
+  # in the background, so a stop that comes meanwhile, which the INT, TERM, and HUP trap passes on to
+  # it (stopping), stops it and everything it started at once (stop_group), and the cleanup goes on.
   if [[ -n "$WHOOPER_REPO_TEARDOWN" && -n "${WHOOPER_RUN_ID:-}" ]]; then
-    "$WHOOPER_REPO_TEARDOWN" >&2 || echo "whooper-review: $WHOOPER_REPO_TEARDOWN failed" >&2
+    teardown_file="$work/teardown.group"
+    "$root/lib/python" "$root/lib/whooper.py" session "$teardown_file" "$WHOOPER_REPO_TEARDOWN" < /dev/null >&2 &
+    wait "$!" || echo "whooper-review: $WHOOPER_REPO_TEARDOWN failed" >&2
+    stop_group "$teardown_file"
+    teardown_file=""
   fi
   for tree in head base; do
     if [[ -d "$run/$tree" ]]; then
@@ -204,7 +218,7 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
-trap 'stop_reason="the review was interrupted" step=interrupted step_log=""; exit 130' INT TERM HUP
+trap 'stopping; stop_reason="the review was interrupted" step=interrupted step_log=""; exit 130' INT TERM HUP
 
 # The unfiltered GitHub data stays in work, outside the run directory the model reads. The traps come
 # before the folder, so no signal leaves it behind: bash runs the INT, TERM, and HUP trap only once
@@ -314,11 +328,21 @@ export WHOOPER_RUN_ID="$run_id" WHOOPER_RUN="$run" WHOOPER_HEAD="$run/head" WHOO
   WHOOPER_CHANGED="$work/changed.txt" WHOOPER_SETUP_ENV="$work/setup.env"
 setup="none"
 if [[ -n "$WHOOPER_REPO_SETUP" ]]; then
-  # The script's error output still goes to this script's, once the script ends. When the script fails,
-  # it names the cause, such as Docker not running, and its last line ends the reason.
+  # The script runs in a session of its own (lib/whooper.py session), as the run does, and this waits for
+  # it in the background, so an interrupt reaches the cleanup at once, and the cleanup stops the script
+  # and everything it started (stop_group). Once it ends, this forgets setup.group without stopping what
+  # the script left running, such as a database the run uses, which the teardown script removes. What it
+  # prints goes to setup.out, and its error output still goes to this script's, once the script ends.
+  # When the script fails, it names the cause, such as Docker not running, and its last line ends the
+  # reason.
   step=setup step_log="$work/setup.log"
+  setup_file="$work/setup.group"
+  "$root/lib/python" "$root/lib/whooper.py" session "$setup_file" "$WHOOPER_REPO_SETUP" \
+    < /dev/null > "$work/setup.out" 2> "$step_log" &
   setup_exit=0
-  setup="$("$WHOOPER_REPO_SETUP" 2> "$step_log")" || setup_exit=$?
+  wait "$!" || setup_exit=$?
+  setup_file=""
+  setup="$(cat "$work/setup.out")"
   cat "$step_log" >&2
   ((setup_exit == 0)) ||
     die "$WHOOPER_REPO_SETUP failed$(awk 'NF { line = $0 } END { if (line != "") print ": " line }' "$step_log")"

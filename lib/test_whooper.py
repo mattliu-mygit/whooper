@@ -5734,6 +5734,62 @@ class RunTest(unittest.TestCase):
                     last = json.loads((home / "whooper" / "last-round.json").read_text())
                     self.assertEqual(last["result"], "interrupted")
 
+    def test_a_stop_reaches_the_setup_or_teardown_script_and_kills_it_4_seconds_later_if_it_ignores_term(self):
+        # whooper-review ran the repo's setup and teardown scripts in the foreground, so a stop that missed the script
+        # as it was forked, standing in here for a TERM to whooper-review alone, waited for the script to end, and a
+        # stop that came while the cleanup ran the teardown script never reached it. Here the script ignores TERM and
+        # waits 10 minutes. Under bash 3.2 and 5 alike, whooper-review stops it, with a SIGKILL once it ignores the
+        # TERM for 4 seconds, and exits within 8 seconds: 130 when the stop came during the setup script, whose review
+        # it interrupted, and 1 when it came during the teardown script of a review that had already failed, which
+        # then removes its worktrees and lock as usual.
+        env, item, _ = self.pull_request()
+        tmp = Path(self.tmp.name)
+        self.fake_claude(review="exit 1")
+        for name, setup in [("setup", self.setup_script), ("teardown", self.teardown_script)]:
+            setup("\n".join([
+                f'if [ "$WHOOPER_TEST_HANG" = {name} ]; then',
+                f'  echo $$ > "$WHOOPER_TEST_PIDS/{name}"',
+                '  trap "" TERM',
+                "  exec sleep 600",
+                "fi",
+            ]))
+        lock = self.state / "locks" / "sample-org-plain-repo-12"
+        for case, (script, code) in enumerate([("setup", 130), ("teardown", 1)]):
+            for n, bash in enumerate(BASHES):
+                with self.subTest(script, bash=str(bash)):
+                    pids = tmp / f"pids-{case}-{n}"
+                    pids.mkdir()
+                    folder = bash_folder(bash, tmp / f"bash-{case}-{n}")
+                    # The output goes to a file, which a script the stop missed cannot hold open as it can a pipe.
+                    log = tmp / f"review-{case}-{n}.log"
+                    with log.open("w") as out:
+                        review = subprocess.Popen(
+                            [str(ROOT / "bin" / "whooper-review"), str(item), "--dry-run"], stdout=out,
+                            stderr=subprocess.STDOUT, start_new_session=True,
+                            env={**env, "WHOOPER_TEST_HANG": script, "WHOOPER_TEST_PIDS": str(pids),
+                                 "PATH": f"{folder}{os.pathsep}{env['PATH']}"})
+                    self.addCleanup(self.stop, review)
+                    self.wait_for(lambda: (pids / script).exists() or review.poll() is not None,
+                                  f"the {script} script to start")
+                    hung = int((pids / script).read_text())
+                    self.addCleanup(self.kill_groups, [hung])
+                    review.terminate()
+                    with suppress(subprocess.TimeoutExpired):
+                        review.wait(timeout=8)
+                    deadline = monotonic() + 2
+                    while running(hung) and monotonic() < deadline:
+                        sleep(0.1)
+                    [run] = (self.state / "runs").iterdir()
+                    ended = (review.returncode, running(hung), lock.exists(), (run / "head").exists(),
+                             (run / "base").exists())
+                    # A stop that misses the script leaves it and the review running, which the next case must not
+                    # find.
+                    self.kill_groups([hung, review.pid])
+                    review.wait()
+                    shutil.rmtree(run)
+                    shutil.rmtree(lock, ignore_errors=True)
+                    self.assertEqual(ended, (code, False, False, False, False), log.read_text())
+
     def test_a_stop_of_whooper_run_ends_its_round_review_and_run_before_prompting_times_sigkill_whatever_ignores_term(self):
         # Prompting Time stops whooper-run with a TERM to its process group and, 5 seconds later, a SIGKILL to it. The
         # round and the review run in process groups of their own, which neither signal reaches, so each parent's

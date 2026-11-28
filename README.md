@@ -830,7 +830,10 @@ Time sends whooper-run 5 seconds after its TERM; a review cut short so may leave
 lock behind, and the next review of the PR takes the lock over. Interrupt any other
 script with Ctrl-C, or stop a review with `kill $(cat ~/.local/state/whooper/locks/*/pid)`.
 An interrupted review runs the teardown script, removes its worktrees and lock, saves
-`the review was interrupted` as its `failure.txt`, and counts as a failure in its record. The
+`the review was interrupted` as its `failure.txt`, and counts as a failure in its record. The repo's
+setup and teardown scripts run in process groups of their own, as the run does, so a stop reaches
+them as it reaches the run: one that comes while the teardown script runs stops the script, and the
+review goes on removing its worktrees and lock. The
 Slack cursor moves only after a poll writes its output, so an interrupted poll is simply repeated.
 A whooper-submit interrupted while gh posts leaves the run's `submit.json` saying `posting`, and
 whooper-submit refuses that run until you check the PR on GitHub and delete the file.
