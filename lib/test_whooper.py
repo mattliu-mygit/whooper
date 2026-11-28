@@ -7852,6 +7852,40 @@ class SettingsTest(unittest.TestCase):
         self.settings("set", json.dumps({"schedule": {"interval_minutes": 30}, "jobs": {"summary": "claude"}}))
         self.assertEqual(json.loads(self.settings("get"))["jobs"], {"review": "devin", "poll": "devin", "summary": "claude"})
 
+    def test_set_refuses_a_save_that_leaves_a_time_limit_whooper_refuses_to_start_on(self):
+        # whooper.py env, which each script starts with, stops on a time limit edited by hand into config.toml, so a
+        # save of another setting that would keep it is refused with env's message.
+        # (case, the config's line, the line edited by hand, why env and the save refuse it)
+        review = "[review] timeout_minutes takes a whole number of minutes, at least 1"
+        for name, old, new, why in [
+            ("a review limit with part of a minute", "timeout_minutes = 45 ", "timeout_minutes = 1.5 ", review),
+            ("a review limit of 0 minutes", "timeout_minutes = 45 ", "timeout_minutes = 0 ", review),
+            ("a review limit in quotes", "timeout_minutes = 45 ", 'timeout_minutes = "45" ', review),
+            ("a poll limit under 5 minutes", "timeout_minutes = 10 ", "timeout_minutes = 3 ",
+             "[poll] timeout_minutes takes a whole number of minutes, at least 5"),
+            ("an ask limit of 0 minutes", "timeout_minutes = 10               # whooper-ask",
+             "timeout_minutes = 0               # whooper-ask", "[ask] timeout_minutes takes a number of minutes above 0"),
+        ]:
+            with self.subTest(name):
+                path = self.use_config(EXAMPLE.replace(old, new, 1))
+                with self.assertRaises(SystemExit) as save:
+                    self.settings("set", json.dumps({"schedule": {"interval_minutes": 30}}))
+                with self.assertRaises(SystemExit) as env, redirect_stdout(io.StringIO()):
+                    main("env")
+                self.assertEqual(str(save.exception), f"whooper: {why}; see {path}")
+                self.assertEqual(str(env.exception), str(save.exception))
+                self.assertEqual(path.read_text(), EXAMPLE.replace(old, new, 1))
+                self.assertEqual([p.name for p in path.parent.iterdir()], ["config.toml"])
+
+    def test_get_reads_a_review_limit_whooper_refuses_and_a_save_that_fixes_it_goes_through(self):
+        # A settings form reads the limit to show it, and saves the fix.
+        for bad, read in [("1.5", 1.5), ("0", 0), ('"45"', "45")]:
+            with self.subTest(bad):
+                path = self.use_config(EXAMPLE.replace("timeout_minutes = 45 ", f"timeout_minutes = {bad} ", 1))
+                self.assertEqual(json.loads(self.settings("get"))["review"]["timeout_minutes"], read)
+                self.settings("set", json.dumps({"review": {"timeout_minutes": 30}}))
+                self.assertEqual(path.read_text(), EXAMPLE.replace("timeout_minutes = 45 ", "timeout_minutes = 30 ", 1))
+
     def test_set_changes_only_the_given_line_and_keeps_every_comment(self):
         for values, old, new in [
             ({"schedule": {"interval_minutes": 30}}, "interval_minutes = 15\n", "interval_minutes = 30\n"),

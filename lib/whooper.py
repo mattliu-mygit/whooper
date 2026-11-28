@@ -2778,6 +2778,31 @@ def check_jobs(config):
             raise SystemExit(f"whooper: [jobs] {job} names {agent!r}, which has no agents/{agent}/{job}")
 
 
+def check_config(config):
+    """Fails unless config's [jobs] passes check_jobs and each of [poll], [review], and [ask] timeout_minutes is a
+    time limit its command, whooper-poll, whooper-review, or whooper-ask, can use. Returns the three limits, with
+    POLL_TIMEOUT_MINUTES and ASK_TIMEOUT_MINUTES for what the config leaves out. whooper.py env, which the scripts
+    start with, runs it on the config, and whooper-settings set on the config as it would be saved, so a save that
+    would leave a job or a limit the scripts stop on is refused with the message they would stop with."""
+    # Each job runs on the agent [jobs] names, through its launcher agents/<agent>/<job>.
+    check_jobs(config)
+    poll_timeout = config.get("poll", {}).get("timeout_minutes", POLL_TIMEOUT_MINUTES)
+    # A poll takes 2 to 3 minutes, so a shorter limit would stop every poll.
+    if type(poll_timeout) is not int or poll_timeout < 5:
+        raise SystemExit(f"whooper: [poll] timeout_minutes takes a whole number of minutes, at least 5; see {config_path()}")
+    # whooper-review's watchdog multiplies the limit by 60 in bash, which knows whole numbers only, so 1.5
+    # would stop the watchdog and leave the review with no time limit. bool is an int in Python, so true
+    # would otherwise pass as 1.
+    review_timeout = config.get("review", {}).get("timeout_minutes")
+    if type(review_timeout) is not int or review_timeout < 1:
+        raise SystemExit(f"whooper: [review] timeout_minutes takes a whole number of minutes, at least 1; see {config_path()}")
+    # whooper-ask's watchdog multiplies the limit in Python, so a fraction of a minute works too.
+    ask_timeout = config.get("ask", {}).get("timeout_minutes", ASK_TIMEOUT_MINUTES)
+    if type(ask_timeout) not in (int, float) or ask_timeout <= 0:
+        raise SystemExit(f"whooper: [ask] timeout_minutes takes a number of minutes above 0; see {config_path()}")
+    return poll_timeout, review_timeout, ask_timeout
+
+
 def joined(words, conjunction):
     """words for a sentence, joined with commas and conjunction, such as "summary", "poll or summary", or
     "review, poll, and summary"."""
@@ -2866,7 +2891,7 @@ def write_settings(values):
         text = tomlkit.dumps(document)
         merged = tomllib.loads(text)
         read_schedule(merged)
-        check_jobs(merged)
+        check_config(merged)
         write_file(path, text)
 
 
@@ -4012,22 +4037,7 @@ def main(command, *args):
 
     if command == "env":
         config = load_config()
-        # Each job runs on the agent [jobs] names, through its launcher agents/<agent>/<job>.
-        check_jobs(config)
-        poll_timeout = config.get("poll", {}).get("timeout_minutes", POLL_TIMEOUT_MINUTES)
-        # A poll takes 2 to 3 minutes, so a shorter limit would stop every poll.
-        if type(poll_timeout) is not int or poll_timeout < 5:
-            raise SystemExit(f"whooper: [poll] timeout_minutes takes a whole number of minutes, at least 5; see {config_path()}")
-        # whooper-review's watchdog multiplies the limit by 60 in bash, which knows whole numbers only, so 1.5
-        # would stop the watchdog and leave the review with no time limit. bool is an int in Python, so true
-        # would otherwise pass as 1.
-        review_timeout = config.get("review", {}).get("timeout_minutes")
-        if type(review_timeout) is not int or review_timeout < 1:
-            raise SystemExit(f"whooper: [review] timeout_minutes takes a whole number of minutes, at least 1; see {config_path()}")
-        # whooper-ask's watchdog multiplies the limit in Python, so a fraction of a minute works too.
-        ask_timeout = config.get("ask", {}).get("timeout_minutes", ASK_TIMEOUT_MINUTES)
-        if type(ask_timeout) not in (int, float) or ask_timeout <= 0:
-            raise SystemExit(f"whooper: [ask] timeout_minutes takes a number of minutes above 0; see {config_path()}")
+        poll_timeout, review_timeout, ask_timeout = check_config(config)
         values = {
             "WHOOPER_CONFIG_DIR": config["dir"],
             "WHOOPER_STATE": xdg_dir("XDG_STATE_HOME", ".local/state"),
