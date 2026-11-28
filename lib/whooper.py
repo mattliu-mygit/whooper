@@ -3090,6 +3090,10 @@ def poll_items(login, github_prs, asks, slack_prs, now):
     github_prs come from whooper-fetch's searches (open, not the user's). slack_prs are the PRs
     the asks link, in the same queries/pr.graphql shape. now dates the CLAIM_HOURS window.
     """
+    # TODO: whooper-review reviews first reviews only, so select_work drops every recheck item made here,
+    # each with a line on its error output, and a Slack ask about a PR the user already reviewed goes no
+    # further than that line. Keep making them so they return as they are once whooper-review can re-check
+    # a PR; stop making them sooner if users report such Slack asks going unanswered.
     found = []
     for pr in github_prs:
         reviews = user_reviews(pr, login)
@@ -3290,7 +3294,7 @@ def select_work(items, prs_dir, now, repos, rechecks=(), runs_dir=None, closed=N
                 with suppress(TypeError, ValueError):
                     started.append(datetime.fromisoformat(begun).astimezone(now.tzinfo).date())
             if started.count(now.date()) >= MAX_RECHECKS_PER_DAY:
-                reason = f"{MAX_RECHECKS_PER_DAY} re-checks already today"
+                reason = f"{MAX_RECHECKS_PER_DAY} reviews of other heads already today"
         if reason:
             drops.append((item, reason))
         else:

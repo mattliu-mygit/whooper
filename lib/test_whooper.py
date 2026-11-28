@@ -758,7 +758,7 @@ class SelectWorkTest(unittest.TestCase):
             self.record(f"{head}.first_review.json", "stale", started_at="2031-08-01T16:00:00Z")
         listed = self.listed_again()
         self.assertEqual(select_work([], self.prs, self.now, REPOS, [listed]),
-                         ([], [(listed, "3 re-checks already today")], []))
+                         ([], [(listed, "3 reviews of other heads already today")], []))
         # The poll's own first reviews have no daily limit.
         self.assertTrue(self.selected(work_item(kind="first_review")))
         tomorrow = self.now + timedelta(days=1)

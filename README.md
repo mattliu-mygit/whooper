@@ -586,9 +586,9 @@ nothing and puts the PR on the recheck list. The next round's whooper-select add
 the new head, with the kind and source it had, so the new commits get a review even when only a
 Slack ask brought the PR in, which a poll reads once. Unless the PR is merged or closed by then:
 whooper-fetch looks up each listed PR its searches did not find, and whooper-select drops a merged or
-closed one from the list, saying so on its error output, instead of reviewing it. Like a re-check, it waits for the next day
-once the PR has 3 records of its kind for other heads started today. `bin/whooper-retry` puts a PR
-on the list too, and no limit holds that review back ([Retry a review](#retry-a-review)). So does
+closed one from the list, saying so on its error output, instead of reviewing it. A listed PR waits
+for the next day once it has 3 records of its kind for other heads started today.
+`bin/whooper-retry` puts a PR on the list too, and no limit holds that review back ([Retry a review](#retry-a-review)). So does
 whooper-round, for a review that waits for the next round after another review in the round stopped
 at a cause that stops every review, unless the list holds the PR already. Once you remove a PR's
 newest review, whooper-select takes the PR off the list and leaves it out of the work until a new
@@ -869,10 +869,10 @@ the recheck list while the commands above write to it.
   whooper-submit found moved since its review, as the work item for the new head, or whose review
   you asked for again with whooper-retry, as the run's work item at the head the PR has now, or whose
   review waits for the next round, as its work item, with the kind, source, and Slack ask it had. A
-  later mark of the PR replaces it. whooper-select deletes it once
-  the newest poll lists the PR, which then comes with the head the PR has now, once GitHub reports
-  the PR merged or closed, once the record at the listed head is done or has failed 3 times, or once
-  it asks again for a review you removed.
+  later mark of the PR replaces it. whooper-select deletes it once the newest poll lists the PR for a
+  first review, which then comes with the head the PR has now, once GitHub reports the PR merged or
+  closed, once the record at the listed head is done or has failed 3 times, or once it asks again for
+  a review you removed.
 - `locks/<owner>-<repo>-<pr>/`: the lock of the review that holds the PR, with its process ID in
   `pid` and its run ID in `run_id`. A lock whose process is gone is stale: the next review takes
   it, and whooper-ask, whooper-status, and whooper-show no longer count its review as running. The
