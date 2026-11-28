@@ -4051,6 +4051,9 @@ class RunTest(unittest.TestCase):
         """Starts bin/<name> with args in the environment env, keeping its error output for the test."""
         process = subprocess.Popen([str(ROOT / "bin" / name), *args], env=env, stdout=subprocess.DEVNULL,
                                    stderr=subprocess.PIPE, text=True, start_new_session=True)
+        # Cleanups run last first, so the command stops before the pipe of its error output closes. A test that reads
+        # the pipe with communicate has closed it already; one that never reads it would otherwise leave it open.
+        self.addCleanup(process.stderr.close)
         self.addCleanup(self.stop, process)
         return process
 
