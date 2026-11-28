@@ -48,8 +48,11 @@ stop_group() {
     wait "$(cat "$1")" 2>/dev/null || true
   fi
 }
-trap 'stop_group "$round_file"; [[ "$(cat "$lock/pid" 2>/dev/null)" != "$$" ]] || rm -rf "$lock"; [[ -z "$nap" ]] || kill "$nap" 2>/dev/null || true' EXIT
-trap 'exit 130' INT TERM HUP
+# Once it stops, it ignores INT, TERM, and HUP, so a second Ctrl-C cannot end the EXIT trap before it
+# removes the lock, and stop_group ends within about 6 seconds anyway. The INT, TERM, and HUP trap
+# ignores them first of all, so a second signal right after the first finds them ignored.
+trap 'trap "" INT TERM HUP; stop_group "$round_file"; [[ "$(cat "$lock/pid" 2>/dev/null)" != "$$" ]] || rm -rf "$lock"; [[ -z "$nap" ]] || kill "$nap" 2>/dev/null || true' EXIT
+trap 'trap "" INT TERM HUP; exit 130' INT TERM HUP
 take() { (trap '' INT TERM HUP; mkdir "$lock" 2>/dev/null && save "$lock/pid" echo "$$"); }
 # take makes the lock a moment before it writes the pid there, and two copies can find the same
 # stale lock. So each copy holds flock on <state>/locks from before take until it holds the lock or

@@ -5790,6 +5790,93 @@ class RunTest(unittest.TestCase):
                     shutil.rmtree(lock, ignore_errors=True)
                     self.assertEqual(ended, (code, False, False, False, False), log.read_text())
 
+    def test_a_stop_as_a_command_records_its_watchdog_leaves_no_watchdog_running_under_each_bash(self):
+        # bash 3.2 can run the INT, TERM, and HUP trap between watchdog ... & and the line after it, which records
+        # watchdog_pid, so the cleanup found no watchdog to stop, and the watchdog slept to the time limit, holding the
+        # command's output open. BASH_ENV, which bash runs before a script, sets a DEBUG trap that sends the script a
+        # TERM just before that line, which bash 3.2 and 5 alike then trap before they run the line. whooper-review,
+        # whooper-poll, and whooper-ask each exit 130, and nothing is left in the command's process group, the
+        # watchdog's included.
+        env, item, _ = self.pull_request()
+        self.fake_review_requests()
+        self.claude_script("exec sleep 30")
+        run = self.state / "runs" / "20310727T010246Z-12"
+        run.mkdir(parents=True)
+        (run / "failure.txt").write_text("the review stopped at an unexpected error\n")
+        tmp = Path(self.tmp.name)
+        bash_env = tmp / "debug.bash"
+        bash_env.write_text("""trap '[[ "$BASH_COMMAND" != "watchdog_pid=\\$!" ]] || kill -TERM $$' DEBUG\n""")
+        for case, (name, args) in enumerate([("whooper-review", [str(item), "--dry-run"]), ("whooper-poll", []),
+                                             ("whooper-ask", [run.name, "Why did it stop?"])]):
+            for n, bash in enumerate(BASHES):
+                with self.subTest(name, bash=str(bash)):
+                    folder = bash_folder(bash, tmp / f"bash-{case}-{n}")
+                    # The output goes to a file, which a watchdog left running cannot hold open as it can a pipe.
+                    log = tmp / f"{name}-{n}.log"
+                    with log.open("w") as out:
+                        command = subprocess.Popen(
+                            [str(ROOT / "bin" / name), *args], stdout=out, stderr=subprocess.STDOUT,
+                            start_new_session=True, env={**env, "BASH_ENV": str(bash_env),
+                                                         "PATH": f"{folder}{os.pathsep}{env['PATH']}"})
+                    self.addCleanup(self.stop, command)
+                    command.wait(timeout=60)
+
+                    def left():
+                        return subprocess.run(["pgrep", "-g", str(command.pid)], capture_output=True,
+                                              text=True).stdout.split()
+
+                    deadline = monotonic() + 3
+                    while left() and monotonic() < deadline:
+                        sleep(0.1)
+                    self.assertEqual((command.returncode, left()), (130, []), log.read_text())
+
+    def test_a_second_signal_while_whooper_run_or_a_round_stops_its_child_leaves_no_lock_behind(self):
+        # whooper-run's EXIT trap stops its round, then removes run.lock, and whooper-round's stops its review, then
+        # writes last-round.json and removes round.lock. A second INT, TERM, or HUP, as a second Ctrl-C, ran the trap
+        # that exits, which ended the EXIT trap before the lock went. Here the review run ignores TERM, so each stop
+        # of its child takes 4 seconds, and the test sends the second TERM to the command's group once it waits in
+        # lib/stop-group. Under bash 3.2 and 5 alike, the command exits 130 once its child has ended, and its lock is
+        # gone; the round also records itself as interrupted.
+        env, item, _ = self.pull_request()
+        head = json.loads(item.read_text())["head_sha"]
+        tmp = Path(self.tmp.name)
+        self.fake_review_requests({**pr(number=12, head=head, requested=[LOGIN]),
+                                   "repository": {"nameWithOwner": "sample-org/plain-repo"}, "baseRefName": "main",
+                                   "url": "https://github.com/sample-org/plain-repo/pull/12"})
+        poll = (self.fakes / "claude").read_text().split("\n", 1)[1]
+        self.claude_script("\n".join([
+            'case "$PWD" in */head) echo $$ > "$WHOOPER_TEST_PIDS/run"; trap "" TERM; exec sleep 600 ;; esac',
+            poll,
+        ]))
+        for case, (name, lock) in enumerate([("whooper-run", "run.lock"), ("whooper-round", "round.lock")]):
+            for n, bash in enumerate(BASHES):
+                with self.subTest(name, bash=str(bash)):
+                    home, pids = tmp / f"state-{case}-{n}", tmp / f"pids-{case}-{n}"
+                    pids.mkdir()
+                    folder = bash_folder(bash, tmp / f"bash-{case}-{n}")
+                    log = tmp / f"{name}-{n}.log"
+                    with log.open("w") as out:
+                        command = subprocess.Popen(
+                            [str(ROOT / "bin" / name)], stdout=out, stderr=subprocess.STDOUT, start_new_session=True,
+                            env={**env, "XDG_STATE_HOME": str(home), "WHOOPER_TEST_PIDS": str(pids),
+                                 "PATH": f"{folder}{os.pathsep}{env['PATH']}"})
+                    self.addCleanup(self.stop, command)
+                    self.wait_for(lambda: (pids / "run").exists() or command.poll() is not None,
+                                  "the review run to start")
+                    self.addCleanup(self.kill_groups, [int((pids / "run").read_text())])
+                    os.killpg(command.pid, signal.SIGTERM)
+                    self.wait_for(lambda: command.poll() is not None or subprocess.run(
+                        ["pgrep", "-P", str(command.pid), "-f", "lib/stop-group"], capture_output=True).returncode == 0,
+                                  f"{name} to stop its child")
+                    with suppress(ProcessLookupError):
+                        os.killpg(command.pid, signal.SIGTERM)
+                    with suppress(subprocess.TimeoutExpired):
+                        command.wait(timeout=10)
+                    state = home / "whooper"
+                    self.assertEqual((command.returncode, (state / lock).exists()), (130, False), log.read_text())
+                    if name == "whooper-round":
+                        self.assertEqual(json.loads((state / "last-round.json").read_text())["result"], "interrupted")
+
     def test_a_stop_of_whooper_run_ends_its_round_review_and_run_before_prompting_times_sigkill_whatever_ignores_term(self):
         # Prompting Time stops whooper-run with a TERM to its process group and, 5 seconds later, a SIGKILL to it. The
         # round and the review run in process groups of their own, which neither signal reaches, so each parent's

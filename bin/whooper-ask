@@ -125,9 +125,9 @@ cleanup() {
   fi
   # As in whooper-review, this also stops anything the run left running.
   stop_group "$agent_file"
-  if [[ -n "$watchdog_pid" ]]; then
-    kill "$watchdog_pid" 2>/dev/null || true
-  fi
+  # As in whooper-review, this stops each process this script started that is left by now, the watchdog
+  # among them, since bash 3.2 can run the trap before watchdog_pid holds its process ID.
+  pkill -P "$$" 2>/dev/null || true
   rm -rf "$work"
   exit "$status"
 }

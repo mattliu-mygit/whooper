@@ -827,7 +827,8 @@ it started with a TERM, and sends SIGKILL to whatever of it is left 4 seconds la
 that ignores TERM or a cleanup that hangs, with everything that started, so a stop of whooper-run
 ends its round, the review, and the review's run within about 4 seconds, before the SIGKILL Prompting
 Time sends whooper-run 5 seconds after its TERM; a review cut short so may leave its worktrees and
-lock behind, and the next review of the PR takes the lock over. Interrupt any other
+lock behind, and the next review of the PR takes the lock over. Once whooper-run or a round stops,
+it ignores a second Ctrl-C, which could otherwise leave its lock behind. Interrupt any other
 script with Ctrl-C, or stop a review with `kill $(cat ~/.local/state/whooper/locks/*/pid)`.
 An interrupted review runs the teardown script, removes its worktrees and lock, saves
 `the review was interrupted` as its `failure.txt`, and counts as a failure in its record. The repo's

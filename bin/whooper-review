@@ -190,9 +190,10 @@ cleanup() {
   stop_group "$agent_file"
   stop_group "$step_file"
   stop_group "$setup_file"
-  if [[ -n "$watchdog_pid" ]]; then
-    kill "$watchdog_pid" 2>/dev/null || true
-  fi
+  # bash 3.2 can run the INT, TERM, and HUP trap between watchdog ... & and the line after it, which
+  # records watchdog_pid, so this stops each process this script started that is left by now, the
+  # watchdog among them, rather than the one watchdog_pid names.
+  pkill -P "$$" 2>/dev/null || true
   # What the teardown script prints goes to the error output, so this script's output stays the run
   # directory alone. It runs in a session of its own, as the setup script does, and this waits for it
   # in the background, so a stop that comes meanwhile, which the INT, TERM, and HUP trap passes on to

@@ -59,9 +59,11 @@ stop_group() {
 # round runs, or keeps one it is starting from starting (stop_group). The history gets the round
 # with the reason it ended so, or null, and 0 selected for a round that ended before it selected.
 # Only the round whose process ID the lock holds does this: one refused the lock below, or stopped
-# before it took it, leaves the lock and both files alone.
+# before it took it, leaves the lock and both files alone. As in whooper-run, once the round stops it
+# ignores INT, TERM, and HUP, so a second Ctrl-C cannot end finish before it removes the lock.
 result=interrupted reason="" work="" child_file=""
 finish() {
+  trap '' INT TERM HUP
   stop_group "$child_file"
   rm -rf "$work"
   [[ "$(cat "$lock/pid" 2>/dev/null)" == "$$" ]] || return
@@ -74,7 +76,7 @@ finish() {
   rm -rf "$lock"
 }
 trap finish EXIT
-trap 'exit 130' INT TERM HUP
+trap 'trap "" INT TERM HUP; exit 130' INT TERM HUP
 # As in whooper-review, the work folder comes after the traps, from a mktemp that ignores INT, TERM,
 # and HUP, so no signal leaves it behind.
 work="$(trap '' INT TERM HUP; mktemp -d)"
