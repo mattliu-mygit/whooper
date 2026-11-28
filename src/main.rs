@@ -1,0 +1,257 @@
+//! Whooper: finds the pull requests that are the user's review work, reviews each with an agent, and
+//! answers Prompting Time's plugin actions. One program; each command is a subcommand, such as
+//! `whooper status`. While Whooper moves from its scripts to this program, bin/whooper-<command> links
+//! to it and runs that command, so a lock names the same command either way.
+
+// While the commands move over one at a time, some helpers serve only commands not switched yet.
+// Remove this once the last bin/whooper-<command> script is gone.
+#![allow(dead_code)]
+
+mod ask;
+mod config;
+mod diff;
+mod fsx;
+mod gh;
+mod lock;
+mod schema;
+mod status;
+mod submit;
+mod work;
+
+use std::ffi::OsString;
+use std::path::Path;
+use std::process::ExitCode;
+
+use clap::{Parser, Subcommand};
+
+use fsx::Result;
+
+#[derive(Parser)]
+#[command(
+    name = "whooper",
+    about = "Reviews the pull requests that are your review work"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Prints Whooper's status as JSON.
+    Status,
+    /// Prints one review run as JSON.
+    Show { run_id: String },
+    /// Prints a review's drafts, or changes them: include, leave-out, text, approve, comment, message.
+    Draft {
+        #[arg(allow_hyphen_values = true, num_args = 0..)]
+        args: Vec<String>,
+    },
+    /// Posts a review's drafts to GitHub as the user.
+    Submit {
+        run_id: String,
+        #[arg(long)]
+        print: bool,
+        #[arg(long)]
+        allow_mentions: bool,
+        #[arg(long)]
+        approve_anyway: bool,
+        #[arg(long)]
+        expect: Option<String>,
+    },
+    /// Queues another review of a run's PR for the next round.
+    Retry {
+        #[arg(long = "item")]
+        item: Option<String>,
+        run_id: Option<String>,
+    },
+    /// Marks a review skipped, or with --undo unmarks it.
+    Skip {
+        #[arg(long = "item")]
+        item: Option<String>,
+        run_id: Option<String>,
+        #[arg(long)]
+        undo: bool,
+    },
+    /// Marks a review removed from the lists, or with --undo unmarks it.
+    Remove {
+        #[arg(long = "item")]
+        item: Option<String>,
+        run_id: Option<String>,
+        #[arg(long)]
+        undo: bool,
+    },
+    /// Pauses whooper-run's scheduled rounds.
+    Pause,
+    /// Resumes whooper-run's scheduled rounds.
+    Resume,
+    /// Prints or saves the settings a settings form edits: get, or set <json>.
+    Settings {
+        #[arg(num_args = 0..)]
+        args: Vec<String>,
+    },
+}
+
+/// The arguments, with bin/whooper-<command>'s command put first when the program runs by that name.
+fn arguments() -> Vec<OsString> {
+    let mut args: Vec<OsString> = std::env::args_os().collect();
+    let name = args
+        .first()
+        .map(|a| {
+            Path::new(a)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .unwrap_or_default();
+    if let Some(command) = name.strip_prefix("whooper-") {
+        args[0] = "whooper".into();
+        args.insert(1, command.into());
+    }
+    args
+}
+
+fn run(cli: Cli) -> Result<()> {
+    let one = |item: Option<String>, run_id: Option<String>, usage: &str| -> Result<String> {
+        match (item, run_id) {
+            (Some(id), None) | (None, Some(id)) => Ok(id),
+            _ => Err(fsx::Exit::new(1, usage.to_string())),
+        }
+    };
+    match cli.command {
+        Command::Settings { args } => {
+            let config = config::load()?;
+            match args.as_slice() {
+                [get] if get == "get" => {
+                    println!("{}", fsx::pretty(&config::read_settings(&config.values)?))
+                }
+                [set, values] if set == "set" => {
+                    let values: serde_json::Value = serde_json::from_str(values).map_err(|e| {
+                        fsx::Exit::new(1, format!("whooper-settings: the values are not JSON: {e}"))
+                    })?;
+                    config::write_settings(&values)?;
+                }
+                _ => fail!("usage: whooper-settings get | set <json>"),
+            }
+            return Ok(());
+        }
+        command => {
+            config::load_checked()?;
+            let state = config::state_dir();
+            match command {
+                Command::Status => println!("{}", fsx::pretty(&status::read_status(&state)?)),
+                Command::Show { run_id } => {
+                    println!("{}", fsx::pretty(&status::show_review(&state, &run_id)?))
+                }
+                Command::Draft { args } => submit::draft(&state, &args)?,
+                Command::Submit {
+                    run_id,
+                    print,
+                    allow_mentions,
+                    approve_anyway,
+                    expect,
+                } => submit::submit(
+                    &state,
+                    &run_id,
+                    &submit::SubmitFlags {
+                        print,
+                        allow_mentions,
+                        approve_anyway,
+                        expect,
+                    },
+                )?,
+                Command::Retry { item, run_id } => println!(
+                    "{}",
+                    work::retry(
+                        &state,
+                        &one(item, run_id, "usage: whooper-retry [--item] <run-id>")?
+                    )?
+                ),
+                Command::Skip { item, run_id, undo } => {
+                    println!(
+                        "{}",
+                        work::skip(
+                            &state,
+                            &one(
+                                item,
+                                run_id,
+                                "usage: whooper-skip [--item] <run-id> [--undo]"
+                            )?,
+                            undo
+                        )?
+                    )
+                }
+                Command::Remove { item, run_id, undo } => {
+                    println!(
+                        "{}",
+                        work::remove(
+                            &state,
+                            &one(
+                                item,
+                                run_id,
+                                "usage: whooper-remove [--item] <run-id> [--undo]"
+                            )?,
+                            undo
+                        )?
+                    )
+                }
+                Command::Pause => {
+                    std::fs::create_dir_all(&state)?;
+                    std::fs::write(state.join("paused"), "")?;
+                }
+                Command::Resume => {
+                    let _ = std::fs::remove_file(state.join("paused"));
+                }
+                Command::Settings { .. } => unreachable!(),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The usage line each command prints for arguments it does not take.
+fn usage(command: &str) -> Option<&'static str> {
+    Some(match command {
+        "status" => "usage: whooper-status",
+        "show" => "usage: whooper-show <run-id>",
+        "draft" => submit::DRAFT_USAGE,
+        "submit" => {
+            "whooper-submit: usage: whooper-submit <run-id> [--print] [--allow-mentions] [--approve-anyway] [--expect <fingerprint>]"
+        }
+        "retry" => "usage: whooper-retry [--item] <run-id>",
+        "skip" => "usage: whooper-skip [--item] <run-id> [--undo]",
+        "remove" => "usage: whooper-remove [--item] <run-id> [--undo]",
+        "settings" => "usage: whooper-settings get | set <json>",
+        _ => return None,
+    })
+}
+
+fn main() -> ExitCode {
+    let args = arguments();
+    let cli = match Cli::try_parse_from(&args) {
+        Ok(cli) => cli,
+        Err(e) if e.use_stderr() => {
+            match args.get(1).and_then(|c| usage(&c.to_string_lossy())) {
+                Some(line) => eprintln!("{line}"),
+                None => {
+                    let _ = e.print();
+                }
+            }
+            return ExitCode::from(1);
+        }
+        Err(e) => {
+            let _ = e.print();
+            return ExitCode::SUCCESS;
+        }
+    };
+    match run(cli) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(exit) => {
+            if !exit.message.is_empty() {
+                eprintln!("{}", exit.message);
+            }
+            ExitCode::from(exit.code as u8)
+        }
+    }
+}

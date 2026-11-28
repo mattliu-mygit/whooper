@@ -6,7 +6,8 @@
 #
 # It writes release/whooper-<version>.tar.gz, where <version> is prompting-time-plugin.json's, and
 # release/whooper-<version>.tar.gz.sha256 beside it, as shasum -a 256 prints it. The archive holds
-# one folder, whooper-<version>/: the files HEAD tracks, as git archive writes them, and page/dist,
+# one folder, whooper-<version>/: the files HEAD tracks, as git archive writes them, bin/whooper, built
+# for both Mac processors, and page/dist,
 # which npm ci and npm run build make from page/. page/ must have no changes git sees, so the built
 # page is HEAD's. With a tag, as .github/workflows/release.yml passes it, the tag must be v<version>.
 set -euo pipefail
@@ -24,16 +25,23 @@ if [[ -n "$(git status --porcelain -- page)" ]]; then
   exit 1
 fi
 (cd page && npm ci --no-audit --no-fund && npm run build)
+# One binary for both Mac processors: Apple silicon and Intel builds joined with lipo.
+for target in aarch64-apple-darwin x86_64-apple-darwin; do
+  cargo build --release --locked --target "$target"
+done
 [[ -f "$entry" ]] || { echo "build-release: the build left no $entry, the page prompting-time-plugin.json names" >&2; exit 1; }
 
 name="whooper-$version"
-# As in bin/whooper-summary, the traps come before the stage folder, so no signal leaves it behind.
+# The traps come before the stage folder, so no signal leaves it behind.
 stage=""
 trap 'rm -rf "$stage"' EXIT
 trap 'exit 130' INT TERM HUP
 stage="$(trap '' INT TERM HUP; mktemp -d)"
 git archive --format=tar --prefix="$name/" HEAD | tar -x -C "$stage"
 cp -R page/dist "$stage/$name/page/dist"
+lipo -create -output "$stage/$name/bin/whooper" target/aarch64-apple-darwin/release/whooper \
+  target/x86_64-apple-darwin/release/whooper
+lipo -info "$stage/$name/bin/whooper"
 mkdir -p release
 # COPYFILE_DISABLE keeps macOS's tar from adding ._ files for extended attributes.
 COPYFILE_DISABLE=1 tar -czf "release/$name.tar.gz" -C "$stage" "$name"

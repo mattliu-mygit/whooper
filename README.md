@@ -10,7 +10,7 @@ GitHub on its own: `bin/whooper-submit` posts one review built from the findings
 
 Whooper needs `gh` logged in, [slackdump](https://github.com/rusq/slackdump) logged in to the
 Slack workspace (`slackdump workspace new <name>`, through a browser), the CLI of each agent the
-config's `[jobs]` names logged in (`devin auth login`; `claude`), `jq`, `git`, `docker`, and [uv](https://docs.astral.sh/uv/). The scripts run Python
+config's `[jobs]` names logged in (`devin auth login`; `claude`), `jq`, `git`, `docker`, and [uv](https://docs.astral.sh/uv/). Whooper's commands are moving from bash and Python into one Rust program, `bin/whooper`, which a release archive ships built; in a checkout, build it with `cargo build --release && install target/release/whooper bin/whooper` (Rust 1.85 or later). Each moved command's `bin/whooper-<command>` links to it. The scripts run Python
 through `lib/python`, which has uv supply Python 3.11 or later and the packages `lib/whooper.py`
 names, at the versions `lib/whooper.py.lock` pins; the first run downloads what is missing.
 [gopls](https://go.dev/gopls/) is optional: with it, a review links changed Go code to its callers with

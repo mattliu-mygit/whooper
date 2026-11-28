@@ -1,9 +1,1 @@
-#!/usr/bin/env bash
-# Ends a pause bin/whooper-pause began: deletes <state>/paused, where <state> is
-# $XDG_STATE_HOME/whooper (default ~/.local/state/whooper), so whooper-run runs its next scheduled
-# round.
-set -euo pipefail
-
-root="$(cd "$(dirname "$0")/.." && pwd)"
-eval "$("$root/lib/python" "$root/lib/whooper.py" env)"
-rm -f "$WHOOPER_STATE/paused"
+whooper

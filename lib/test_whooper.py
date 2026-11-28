@@ -4051,7 +4051,7 @@ class RunTest(unittest.TestCase):
         prompt.write_text("Why?\n")
         launcher = [str(prompt), str(Path(self.tmp.name) / "answer"), str(run / "record")]
         for path, args in [("bin/whooper-review", [str(item), "--dry-run"]), ("bin/whooper-poll", []),
-                           ("bin/whooper-ask", [run.name, "Why?"]), ("bin/whooper-submit", [run.name]),
+                           ("bin/whooper-ask", [run.name, "Why?"]),
                            ("agents/claude/ask", launcher), ("agents/devin/ask", launcher),
                            ("agents/devin/poll", launcher)]:
             with self.subTest(path):

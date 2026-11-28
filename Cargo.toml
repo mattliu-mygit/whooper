@@ -1,0 +1,28 @@
+[package]
+name = "whooper"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Whooper's command-line program: polls for review work, runs reviews, and serves Prompting Time's plugin actions"
+
+[[bin]]
+name = "whooper"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+jiff = "0.2"
+jsonschema = { version = "0.63", default-features = false }
+libc = "0.2"
+regex = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+signal-hook = "0.4"
+tempfile = "3"
+toml_edit = "0.25"
+
+[dev-dependencies]
+assert_cmd = "2"
+
+[profile.release]
+strip = true
