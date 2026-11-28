@@ -141,6 +141,12 @@ describe("the chart of rounds per day on the Causes tab", () => {
     expect(screen.queryByRole("group", { name: "Days, oldest first" })).not.toBeInTheDocument();
   });
 
+  it("leaves the chart out for a status whose rounds_by_day lists no days", async () => {
+    await openCauses({ status: { rounds_by_day: [] } });
+    expect(screen.queryByRole("heading", { name: /^Rounds per day/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Days, oldest first" })).not.toBeInTheDocument();
+  });
+
   it("pairs each color with its word in the legend and paints the bars the same: poll failed red, interrupted orange, done gray, skipped an outline", async () => {
     const removeCss = usePageCss();
     try {
