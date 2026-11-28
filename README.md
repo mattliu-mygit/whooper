@@ -844,7 +844,8 @@ the recheck list while the commands above write to it.
 - `poll/github.json`: whooper-fetch's latest output, one entry per PR as `queries/pr.graphql`
   returns it.
 - `poll/recheck-prs.json`: each PR on the recheck list that whooper-fetch's latest searches did not
-  find, as `queries/pr.graphql` returns it, which says whether GitHub has merged or closed it.
+  find, as `queries/pr.graphql` returns it, which says whether GitHub has merged or closed it. A PR
+  whose lookup failed is left out, with a line on whooper-fetch's error output, and stays listed.
 - `poll/<time>.json`: a poll's work items. `poll/<time>.prompt.md`, `.answer.json`, and
   `.transcript.jsonl` (Claude) or `.transcript.json` (Devin) are its run.
 - `poll/cursor`: the Unix time the next poll reads Slack from, which is the last successful poll's

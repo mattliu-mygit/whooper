@@ -27,7 +27,16 @@ for org in $WHOOPER_ORGS; do
     capped "the search for PRs by others that $WHOOPER_GITHUB_LOGIN reviewed in $org"
 done | sort -u | "$root/bin/whooper-prs" > "$out.tmp"
 # The searches list open PRs only, so a listed PR they found is open, and only the others need a look.
-"$root/lib/python" "$root/lib/whooper.py" recheck-urls "$WHOOPER_STATE" "$out.tmp" | "$root/bin/whooper-prs" \
-  > "$looked_up.tmp"
+# Unlike a failed search, a failed lookup fails nothing: the PR is left out of recheck-prs.json, so
+# whooper-select keeps it listed, and the next round looks again. A lookup that fails every round, as
+# for a PR in an org the token may no longer read, would otherwise fail every round's fetch, and with
+# it the whooper-select that would take the PR off the list.
+"$root/lib/python" "$root/lib/whooper.py" recheck-urls "$WHOOPER_STATE" "$out.tmp" | while IFS= read -r url; do
+  if found="$(printf '%s\n' "$url" | "$root/bin/whooper-prs")"; then
+    printf '%s\n' "$found"
+  else
+    echo "whooper-fetch: could not look up $url on the recheck list, so it stays listed" >&2
+  fi
+done | jq -s 'add // []' > "$looked_up.tmp"
 mv "$out.tmp" "$out"
 mv "$looked_up.tmp" "$looked_up"

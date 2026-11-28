@@ -4529,6 +4529,32 @@ class RunTest(unittest.TestCase):
         self.assertEqual(self.command("whooper-fetch").returncode, 0)
         self.assertEqual(json.loads((poll / "recheck-prs.json").read_text()), [])
 
+    def test_a_recheck_list_pr_the_fetch_cannot_look_up_stays_listed_and_fails_no_round(self):
+        # The searches find PR 12. The recheck list holds PRs 13 and 16: GitHub reports PR 13 merged, and the
+        # lookup of PR 16 fails, as for a PR in an org the token may no longer read.
+        self.fake_review_requests(pr(number=12, requested=[LOGIN]))
+        (self.fakes / "example-org-example-repo-pull-13.json").write_text(json.dumps(pr(number=13, state="MERGED")))
+        rechecks = self.state / "rechecks"
+        rechecks.mkdir(parents=True)
+        listed = {number: work_item(number=number) for number in (13, 16)}
+        for number, item in listed.items():
+            (rechecks / f"example-org-example-repo-{number}.json").write_text(json.dumps(item))
+        fetch = self.command("whooper-fetch")
+        # gh's own error comes first.
+        self.assertEqual(fetch.returncode, 0, fetch.stderr)
+        self.assertTrue(fetch.stderr.endswith(
+            "whooper-fetch: could not look up https://github.com/example-org/example-repo/pull/16 on the recheck"
+            " list, so it stays listed\n"), fetch.stderr)
+        poll = self.state / "poll"
+        self.assertEqual([p["number"] for p in json.loads((poll / "github.json").read_text())], [12])
+        self.assertEqual([(p["number"], p["state"]) for p in json.loads((poll / "recheck-prs.json").read_text())],
+                         [(13, "MERGED")])
+        # select drops the merged PR and keeps PR 16, whose state nobody knows, for a review.
+        (poll / "20310727T020000Z.json").write_text(json.dumps({"items": []}))
+        select = self.command("whooper-select")
+        self.assertEqual([json.loads(line) for line in select.stdout.splitlines()], [listed[16]], select.stderr)
+        self.assertEqual(sorted(path.name for path in rechecks.iterdir()), ["example-org-example-repo-16.json"])
+
     def test_the_fetch_reads_every_pr_its_searches_find_up_to_the_1000_github_returns(self):
         # Open PRs that request Sam's review in example-org. gh returns at most --limit of a search's results, which
         # it pages through, and the fake logs each PR the fetch then reads.
