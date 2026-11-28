@@ -33,23 +33,25 @@ export function parentLink(): HostLink {
   };
 }
 
-/** What a route shows: the list of reviews, the past reviews, the causes that stop every review, one
- * review, or one cause. */
+/** What a route shows: the list of reviews, the past reviews, the causes that stop every review, the
+ * settings, one review, or one cause. */
 export type Place =
   | { kind: "home" }
   | { kind: "past" }
   | { kind: "causes" }
+  | { kind: "settings" }
   | { kind: "review"; runId: string }
   | { kind: "cause"; cause: string }
   | null;
 
-/** The place a route names: / for the reviews, which Prompting Time opens from Whooper's name, /past and
- * /causes for the page's other tabs, and the routes of whooper-status's items and blockers; null for any
- * other route. */
+/** The place a route names: / for the reviews, which Prompting Time opens from Whooper's name, /past,
+ * /causes, and /settings for the page's other tabs, and the routes of whooper-status's items and
+ * blockers; null for any other route. */
 export function placeOf(route: string | null): Place {
   if (route === "/") return { kind: "home" };
   if (route === "/past") return { kind: "past" };
   if (route === "/causes") return { kind: "causes" };
+  if (route === "/settings") return { kind: "settings" };
   const match = route ? /^\/(reviews|causes)\/([^/]+)$/.exec(route) : null;
   if (!match) return null;
   const id = decodeURIComponent(match[2]);
@@ -386,6 +388,10 @@ export function createPageStore(link: HostLink) {
     skip: (undo = false, id = runId()) => act("skip", [id, ...(undo ? ["--undo"] : [])]),
     remove: (undo = false, id = runId()) => act("remove", [id, ...(undo ? ["--undo"] : [])]),
     retry: (id = runId()) => act("retry", [id]),
+    /** The settings whooper-settings get prints, with Whooper's defaults for what config.toml leaves out. */
+    readSettings: async () => (await call("get-settings")) as Record<string, unknown>,
+    /** Saves changed settings with whooper-settings set, which checks them and rejects with its reason. */
+    saveSettings: (changes: Record<string, unknown>) => call("save-settings", [JSON.stringify(changes)]),
     pause: () => act("pause", []),
     resume: () => act("resume", []),
     /** Runs a round now, which reviews the PRs on the recheck list, such as those that wait. */

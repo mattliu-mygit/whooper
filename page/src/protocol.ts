@@ -44,6 +44,8 @@
 //                              bin/whooper-skip, bin/whooper-remove, bin/whooper-retry
 //   round                      bin/whooper-round: reviews the waiting PRs again now
 //   pause, resume              bin/whooper-pause, bin/whooper-resume
+//   get-settings               bin/whooper-settings get: the settings, for the Settings tab
+//   save-settings <json>       bin/whooper-settings set: saves the changed settings, or refuses why
 
 export const PROTOCOL_VERSION = 2;
 

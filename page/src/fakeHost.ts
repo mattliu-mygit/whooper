@@ -1,3 +1,4 @@
+import settingsSchema from "../../schemas/settings.json";
 import * as fixtures from "./fixtures";
 import { CallError, PROTOCOL_VERSION, readPageMessage, type Drafts, type FindingsResult, type HostMessage, type HostUpdate, type PageMessage, type Shown } from "./protocol";
 
@@ -5,7 +6,8 @@ import { CallError, PROTOCOL_VERSION, readPageMessage, type Drafts, type Finding
 // page's calls of the manifest's actions on the invented reviews in fixtures.ts the way Whooper's
 // commands would: drafts change by whooper-draft's rules and refusals, a submit builds
 // whooper-submit's request and asks confirmSubmit first, or is refused as whooper-submit refuses an
-// unsafe approval or an @-mention, an ask answers at once, and skip, remove, retry, pause, and
+// unsafe approval or an @-mention, an ask answers at once, settings save by whooper-settings set's
+// checks and refusals, and skip, remove, retry, pause, and
 // resume change what status and show-review print, after which it says which files changed. It
 // refuses an action the manifest does not declare, as Prompting Time does. It reaches no Whooper,
 // GitHub, or model.
@@ -57,6 +59,70 @@ function firstDrafts(result: FindingsResult): Drafts {
   return { event: "APPROVE", message: "", findings: Object.fromEntries(result.findings.map((f) => [f.id, { included: true }])) };
 }
 
+interface SchemaNode {
+  type?: string;
+  properties?: Record<string, SchemaNode>;
+  enum?: unknown[];
+  items?: SchemaNode;
+  minimum?: number;
+}
+
+/** check_schema in lib/whooper.py, for the keywords schemas/settings.json uses: the first place value
+ * breaks node, in its words. */
+function schemaProblem(value: unknown, node: SchemaNode, where: string): string | null {
+  const types: Record<string, (v: unknown) => boolean> = {
+    object: (v) => typeof v === "object" && v !== null && !Array.isArray(v),
+    array: Array.isArray,
+    string: (v) => typeof v === "string",
+    integer: Number.isInteger,
+    number: (v) => typeof v === "number",
+  };
+  if (node.type && !types[node.type](value)) return `${where} is not of type ${node.type}`;
+  if (node.enum && !node.enum.includes(value)) return `${where} is ${JSON.stringify(value)}, not one of ${JSON.stringify(node.enum)}`;
+  if (node.minimum !== undefined && typeof value === "number" && value < node.minimum) return `${where} is below ${node.minimum}`;
+  if (node.properties && types.object(value)) {
+    const extra = Object.keys(value as object).filter((key) => !(key in node.properties!));
+    if (extra.length > 0) return `${where} has unexpected ${extra.sort().join(", ")}`;
+    for (const [key, sub] of Object.entries(node.properties)) {
+      const found = key in (value as object) ? schemaProblem((value as Record<string, unknown>)[key], sub, `${where}.${key}`) : null;
+      if (found) return found;
+    }
+  }
+  if (node.items && Array.isArray(value))
+    for (const [i, item] of value.entries()) {
+      const found = schemaProblem(item, node.items, `${where}[${i}]`);
+      if (found) return found;
+    }
+  return null;
+}
+
+/** write_settings in lib/whooper.py: the settings with the given JSON's merged in, or its refusal:
+ * values that break the schema, or a schedule whooper-run could not follow. */
+function saveSettings(current: Record<string, unknown>, json: string): Record<string, unknown> {
+  let values: unknown;
+  try {
+    values = JSON.parse(json);
+  } catch (e) {
+    throw new Error(`whooper-settings: the values are not JSON: ${(e as Error).message}`);
+  }
+  const problem = schemaProblem(values, settingsSchema as SchemaNode, "settings");
+  if (problem) throw new Error(`whooper-settings: ${problem}`);
+  const merge = (table: Record<string, unknown>, changes: Record<string, unknown>) => {
+    for (const [key, value] of Object.entries(changes))
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) merge((table[key] ??= {}) as Record<string, unknown>, value as Record<string, unknown>);
+      else table[key] = value;
+  };
+  const merged = structuredClone(current);
+  merge(merged, values as Record<string, unknown>);
+  const schedule = merged.schedule as { start: string; end: string; days: string[] };
+  const minutes = (time: string) => (/^\d{1,2}:\d{1,2}$/.test(time) ? Number(time.split(":")[0]) * 60 + Number(time.split(":")[1]) : NaN);
+  if (Number.isNaN(minutes(schedule.start)) || Number.isNaN(minutes(schedule.end)))
+    throw new Error('whooper: [schedule] start and end take a 24-hour time such as "18:00"; see config.toml');
+  if (schedule.days.length === 0 || minutes(schedule.start) >= minutes(schedule.end))
+    throw new Error("whooper: [schedule] needs at least one day and an end after its start; see config.toml");
+  return merged;
+}
+
 export function createFakeHost(send: (message: HostMessage) => void, options: FakeHostOptions = {}) {
   // A test's findings stand for the run's own, which drafts and submits read too.
   const records = new Map(
@@ -70,6 +136,7 @@ export function createFakeHost(send: (message: HostMessage) => void, options: Fa
   const skipped = new Set<string>();
   const removed = new Set<string>();
   let paused = false;
+  let settings = fixtures.settings();
   /** The exit code of each submit whooper-submit --print refused, in order. */
   const refusals: number[] = [];
   /** Every message the page sent that fits the protocol, in order. */
@@ -272,6 +339,11 @@ export function createFakeHost(send: (message: HostMessage) => void, options: Fa
         changed([`rechecks/${r.repo.replace("/", "-")}-${r.pr}.json`]);
         return `queued another review of ${r.repo}#${r.pr} at ${r.head_sha} for the next round; bin/whooper-round runs that round now\n`;
       }
+      case "get-settings":
+        return structuredClone(settings);
+      case "save-settings":
+        settings = saveSettings(settings, runId);
+        return "";
       case "round":
         changed(null);
         return "";

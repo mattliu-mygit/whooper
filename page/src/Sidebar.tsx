@@ -1,10 +1,11 @@
 import { For, Show } from "solid-js";
 import { StatusDot } from "@prompting-time/ui";
 import type { PageStore } from "./store";
+import { waitingOnYou } from "./Reviews";
 import { TITLE } from "./text";
 
 /** The page's tabs, each at its route. */
-export type Tab = "reviews" | "past" | "causes";
+export type Tab = "reviews" | "past" | "causes" | "settings";
 
 /** Whooper's row as whooper-status words it, which names a pause that a cause outranks there too. */
 export function agentWords(store: PageStore): string {
@@ -15,17 +16,18 @@ export function agentWords(store: PageStore): string {
 
 /**
  * The page's own sidebar, which stands in for Prompting Time's while it folds to a rail: Whooper's name
- * and status, then its tabs, Reviews with how many it lists, Past reviews, and Causes with how many
- * stop every review. Each opens its route; the open one is marked, also while one of its reviews or
+ * and status, then its tabs, Reviews with how many of its reviews wait on you, Past reviews, Causes
+ * with how many stop every review, and Settings. Each opens its route; the open one is marked, also while one of its reviews or
  * causes shows.
  */
 export function Sidebar(props: { store: PageStore; tab: Tab }) {
   const store = props.store;
   const status = () => store.state.status;
   const tabs = (): { id: Tab; label: string; route: string; count?: number }[] => [
-    { id: "reviews", label: "Reviews", route: "/", count: status()?.items.length },
+    { id: "reviews", label: "Reviews", route: "/", count: status() ? waitingOnYou(status()!.items) : undefined },
     { id: "past", label: "Past reviews", route: "/past" },
     { id: "causes", label: "Causes", route: "/causes", count: status()?.blockers.length },
+    { id: "settings", label: "Settings", route: "/settings" },
   ];
   return (
     <nav class="w-nav" aria-label={TITLE}>

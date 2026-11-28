@@ -7,13 +7,14 @@ import { createListFilters, PastTab, ReviewsTab } from "./Reviews";
 import { createReviewMemory, type LastLook } from "./review/memory";
 import { OverviewReview, type ReviewMode } from "./review/OverviewReview";
 import { createReviewViews } from "./review/views";
+import { SettingsTab } from "./Settings";
 import { Sidebar, type Tab } from "./Sidebar";
 import type { PageStore } from "./store";
 
 /**
  * The route Prompting Time opened, and nothing until it opens one, beside the page's own sidebar of
  * tabs: the Reviews tab at /, which Prompting Time opens from Whooper's name, Past reviews at /past,
- * and Causes at /causes and at a cause's route. A review shows Back to the list, its header, then its
+ * Causes at /causes and at a cause's route, and Settings at /settings. A review shows Back to the list, its header, then its
  * diff when it finished with findings, or the screen for a review that runs, waits, or failed, with the
  * tab whose list holds it marked. The lists keep their search and filter while a review shows. Each review stays
  * mounted while its run stays the same, so a new read of the same run updates it in place. A finished
@@ -42,6 +43,7 @@ export function App(props: { store: PageStore }) {
     const place = store.place();
     if (place?.kind === "past") return "past";
     if (place?.kind === "causes" || place?.kind === "cause") return "causes";
+    if (place?.kind === "settings") return "settings";
     if (place?.kind === "review") return listOf(place.runId);
     return "reviews";
   };
@@ -59,6 +61,9 @@ export function App(props: { store: PageStore }) {
             </Match>
             <Match when={store.place()?.kind === "causes"}>
               <CausesTab store={store} cause={null} />
+            </Match>
+            <Match when={store.place()?.kind === "settings"}>
+              <SettingsTab store={store} />
             </Match>
             <Match when={review()} keyed>
               {(runId: string) => {

@@ -1,4 +1,4 @@
-import { createSignal, For, Show } from "solid-js";
+import { createSignal, For, onSettled, Show, untrack } from "solid-js";
 import { EllipsisIcon, Menu, SearchIcon, StatusDot, type MenuItem } from "@prompting-time/ui";
 import manifest from "../../prompting-time-plugin.json";
 import type { Dot, StatusItem, StatusReview } from "./protocol";
@@ -10,12 +10,20 @@ import { shortDate } from "./text";
  * first, then by their order. */
 const GROUPS = [...manifest.status.groups].sort((a, b) => Number(b.needs_you) - Number(a.needs_you) || a.order - b.order);
 
-/** What the Reviews and Past reviews tabs keep while a review is open, so Back finds the list as it was. */
+/** How many of the items are in a group the manifest marks needs_you: the reviews waiting on the user. */
+export function waitingOnYou(items: readonly StatusItem[]): number {
+  return items.filter((item) => GROUPS.find((g) => g.id === item.group)?.needs_you).length;
+}
+
+/** What the Reviews and Past reviews tabs keep while a review is open, so Back finds the list as it
+ * was: the search, the group, and the row j and k selected. */
 export function createListFilters() {
   const [query, setQuery] = createSignal("");
   const [group, setGroup] = createSignal<string | null>(null);
+  const [selected, setSelected] = createSignal<string | null>(null);
   const [pastQuery, setPastQuery] = createSignal("");
-  return { query, setQuery, group, setGroup, pastQuery, setPastQuery };
+  const [pastSelected, setPastSelected] = createSignal<string | null>(null);
+  return { query, setQuery, group, setGroup, selected, setSelected, pastQuery, setPastQuery, pastSelected, setPastSelected };
 }
 export type ListFilters = ReturnType<typeof createListFilters>;
 
@@ -83,10 +91,14 @@ export function ReviewsTab(props: { store: PageStore; filters: ListFilters }) {
   const countIn = (group: string) => found().filter((item) => item.group === group).length;
   const rows = () =>
     GROUPS.flatMap((group) => (f.group() === null || f.group() === group.id ? found().filter((item) => item.group === group.id) : [])).map(rowOf);
-  const needsYou = () => items().filter((item) => GROUPS.find((g) => g.id === item.group)?.needs_you).length;
+  const words = () => {
+    const waiting = waitingOnYou(items());
+    const listed = items().length;
+    return `${waiting === 0 ? "Nothing waiting on you" : `${waiting} waiting on you`} · ${listed} listed`;
+  };
   return (
     <>
-      <TabHeader store={store} title="Reviews" words={needsYou() === 0 ? "Nothing waiting on you" : `${needsYou()} waiting on you`} />
+      <TabHeader store={store} title="Reviews" words={words()} />
       <div class="w-tab-body">
         <Loaded store={store}>
           <div class="w-toolbar">
@@ -113,6 +125,8 @@ export function ReviewsTab(props: { store: PageStore; filters: ListFilters }) {
             store={store}
             label="Reviews"
             rows={rows()}
+            selected={f.selected()}
+            onSelected={f.setSelected}
             empty={items().length === 0 ? "No reviews in the last 30 days." : "No reviews match."}
           />
           <Show when={store.state.status?.truncated}>
@@ -170,7 +184,13 @@ export function PastTab(props: { store: PageStore; filters: ListFilters }) {
           <div class="w-toolbar">
             <SearchBox label="Search past reviews" value={f.pastQuery()} onInput={f.setPastQuery} />
           </div>
-          <RowList store={store} label="Past reviews" rows={found()} empty={rows().length === 0 ? "No past reviews." : "No past reviews match."} />
+          <RowList
+            store={store}
+            label="Past reviews"
+            rows={found()}
+            selected={f.pastSelected()}
+            onSelected={f.setPastSelected}
+            empty={rows().length === 0 ? "No past reviews." : "No past reviews match."} />
         </Loaded>
       </div>
     </>
@@ -213,9 +233,47 @@ function SearchBox(props: { label: string; value: string; onInput: (value: strin
   );
 }
 
-/** The rows, and what the last row action did, with Undo for a skip or a removal. */
-function RowList(props: { store: PageStore; label: string; rows: Row[]; empty: string }) {
+const typing = (event: KeyboardEvent) =>
+  event.target instanceof HTMLElement && (event.target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName));
+
+/**
+ * The rows, and what the last row action did, with Undo for a skip or a removal. j and k select the
+ * next and previous row, as they step through the walkthrough's places, from the first or the last
+ * and around, and move the focus to it; Enter opens it, also once the focus left the rows for the
+ * page itself, as after Back to the list. Not while typing, with a modifier, or while a menu or dialog
+ * is open, where Escape closes it.
+ */
+function RowList(props: { store: PageStore; label: string; rows: Row[]; selected: string | null; onSelected(id: string): void; empty: string }) {
   const store = props.store;
+  let list: HTMLUListElement | undefined;
+  const buttonOf = (id: string) => list?.querySelector<HTMLButtonElement>(`[data-row="${CSS.escape(id)}"] .w-row-open`) ?? null;
+
+  onSettled(() => {
+    const keys = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || typing(event) || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (event.key !== "j" && event.key !== "k" && event.key !== "Enter") return;
+      if ([...document.querySelectorAll('[role="dialog"], [role="alertdialog"], [role="menu"]:not([hidden])')].some((element) => element.checkVisibility?.() ?? true)) return;
+      const rows = untrack(() => props.rows);
+      const now = rows.findIndex((row) => row.id === untrack(() => props.selected));
+      if (event.key === "Enter") {
+        // A focused button, a selected row's among them, takes Enter itself.
+        if (now < 0 || (document.activeElement && document.activeElement !== document.body)) return;
+        event.preventDefault();
+        store.open(rows[now].route);
+        return;
+      }
+      if (rows.length === 0) return;
+      event.preventDefault();
+      const by = event.key === "j" ? 1 : -1;
+      const next = rows[now < 0 ? (by > 0 ? 0 : rows.length - 1) : (now + by + rows.length) % rows.length];
+      props.onSelected(next.id);
+      const button = buttonOf(next.id);
+      button?.focus();
+      button?.scrollIntoView?.({ block: "nearest" });
+    };
+    document.addEventListener("keydown", keys);
+    return () => document.removeEventListener("keydown", keys);
+  });
   const [notice, setNotice] = createSignal<{ text: string; undo?: () => Promise<string> } | null>(null);
   const [error, setError] = createSignal<string | null>(null);
 
@@ -276,12 +334,12 @@ function RowList(props: { store: PageStore; label: string; rows: Row[]; empty: s
         )}
       </Show>
       <Show when={props.rows.length > 0} fallback={<p class="w-empty">{props.empty}</p>}>
-        <ul class="w-rows" aria-label={props.label}>
+        <ul class="w-rows" aria-label={props.label} ref={(element: HTMLUListElement) => { list = element; }}>
           {/* Keyed by run, so a new read of the status keeps an open ⋯ menu open. */}
           <For each={props.rows} keyed={(row) => row.id}>
             {(row) => (
-              <li class="w-row">
-                <button type="button" class="w-row-open" onClick={() => store.open(row().route)}>
+              <li class="w-row" data-row={row().id} data-selected={props.selected === row().id ? "" : undefined}>
+                <button type="button" class="w-row-open" onFocus={() => props.onSelected(row().id)} onClick={() => store.open(row().route)}>
                   <span class="w-row-status">
                     <StatusDot status={row().dot} />
                     {row().word}

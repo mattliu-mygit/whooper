@@ -128,8 +128,11 @@ Whooper's defaults for what the config leaves out. They are the ones a settings 
 the values against the schema, and the config as it would be saved with the checks Whooper runs
 when it starts, and only then rewrites the lines of those keys, keeping the file's comments. On a
 failure it prints why and leaves the file as it was. It reads and rewrites the file under a lock on
-its folder, so of two saves at once neither drops the other's change. A change applies from the next
-round.
+its folder, so of two saves at once neither drops the other's change. Nothing needs a restart:
+whooper-run reads `[schedule]` each time it sets the next round, so a round already set keeps its
+time, and whooper-poll, whooper-review, and whooper-ask read the config as each starts, so a run
+already going keeps the old settings. Prompting Time's settings form and the Settings tab of
+[Whooper's page](#whoopers-page) both edit these settings with this command.
 
 ## See reviews
 
@@ -440,16 +443,25 @@ checkout.
 
 `page/` is the page Prompting Time shows for Whooper and for one of its reviews or blockers. While
 it shows, Prompting Time folds its own sidebar to a rail, so the page draws its own: Whooper's name
-and agent row, such as `Paused` or `Running · next poll 3:45 PM`, then three tabs, each at its route.
+and agent row, such as `Paused` or `Running · next poll 3:45 PM`, then four tabs, each at its route.
 Reviews, at `/`, which Prompting Time opens when you click Whooper's name, lists the newest review of
 each pull request in the groups status format 2 puts them in, those that wait on you first, with a
-search by title, repo, PR number, or author, and a chip per group with its count. Each row opens its
+search by title, repo, PR number, or author, and a chip per group with its count; its tab counts the
+reviews waiting on you, and its header says that and how many it lists. Each row opens its
 review, and its ⋯ menu opens it, skips it or undoes the skip, removes it from the list, with Undo, or
 retries it. Past reviews, at `/past`, lists the reviews you removed, which its ⋯ menu restores, and
 earlier reviews of a pull request that a newer one replaced. Causes, at `/causes`, lists each cause
-that stops every review with the reviews it holds back. Each tab's header has Pause or Resume and
-Poll now; Start and Stop stay in Prompting Time, which runs `bin/whooper-run`, and so does the
-settings form. A review Prompting Time opens marks the tab whose list holds it. A review shows Back
+that stops every review with the reviews it holds back. In Reviews and Past reviews, j and k select
+the next and previous row, around the ends, as they step through a walkthrough, and Enter opens it;
+Escape closes any open menu. Settings, at `/settings`, edits the settings `schemas/settings.json`
+describes, read with the `get-settings` action and saved with `save-settings`, the same two
+Prompting Time's settings form runs, so both edit the same lines of `config.toml` and Prompting
+Time's check for each agent's CLI follows the saved `[jobs]`. Each field says why its value would be
+refused as you type: what the schema says, start and end as 24-hour times with the end after the
+start, at least one day, and a value for a setting the config has, since whooper-settings can't take
+one out. Save sends only the changed settings, shows whooper-settings' reason when it refuses them,
+and then says when the change applies ([Change settings](#change-settings)). Each tab's header has
+Pause or Resume and Poll now; Start and Stop stay in Prompting Time, which runs `bin/whooper-run`. A review Prompting Time opens marks the tab whose list holds it. A review shows Back
 to the list, which keeps the list's search and filter, then its header, with its versions, Skip, which also stops a review
 that runs, and Undo, Remove and Restore, Rerun review, and a banner for new commits since the
 review; then the review's diff with Whooper's findings as draft comments under their lines, Include
@@ -488,8 +500,9 @@ It is a Solid 2.0 app built on Prompting Time's shared UI library,
 `@prompting-time/ui`. Prompting Time shows it in an iframe sandboxed to scripts only, so the page reaches nothing but its host, through page protocol 2
 in `page/src/protocol.ts`: it says `ready`, Prompting Time sends `open` with the route the user
 opened, `/`, or the route of an item or blocker, `/reviews/<run-id>` or `/causes/<cause-id>` ([See
-reviews](#see-reviews)); `/past` and `/causes` the page opens itself. The page reads and changes everything with `call`s of the manifest's
-actions, such as `status`, `show-review`, `draft`, `ask`, `skip`, `retry`, and `submit`, which
+reviews](#see-reviews)); `/past`, `/causes`, and `/settings` the page opens itself. The page reads and changes everything with `call`s of the manifest's
+actions, such as `status`, `show-review`, `draft`, `ask`, `skip`, `retry`, `get-settings`,
+`save-settings`, and `submit`, which
 Prompting Time confirms before `whooper-submit` posts. When files in the state folder change,
 Prompting Time sends `changed` with their paths, and the page reads the status again, and the open
 review when one of its run's files changed: only its drafts when `drafts.json` alone did, which
@@ -504,10 +517,10 @@ npm run dev     # http://localhost:5175/dev/ shows the page in a sandboxed ifram
 npm run build   # page/dist, which the repo does not track
 ```
 
-The fake host runs the page's calls on invented reviews in `page/src/fixtures.ts` the way Whooper's
-commands would, and reaches no Whooper, GitHub, or model; `/dev/` opens the Reviews tab,
-`/dev/?review=<run id>` a review, and `/dev/?route=<route>` any route, such as `/past` or
-`/causes/docker_unavailable`.
+The fake host runs the page's calls on invented reviews and settings in `page/src/fixtures.ts` the
+way Whooper's commands would, keeping saved settings in memory, and reaches no Whooper, GitHub, or
+model; `/dev/` opens the Reviews tab, `/dev/?review=<run id>` a review, and `/dev/?route=<route>`
+any route, such as `/past`, `/settings`, or `/causes/docker_unavailable`.
 The page installs `@prompting-time/ui` from its built tarball, `prompting-time-ui-0.1.0.tgz`, which
 Prompting Time's `scripts/pack-ui.sh` writes. Until Prompting Time attaches that tarball to a GitHub
 release, the page installs it from a Prompting Time checkout beside this one,

@@ -9,6 +9,8 @@ const fireEvent = {
   click: (element: Element) => (dom.click(element), flush()),
   input: (element: Element, init: object) => (dom.input(element, init), flush()),
 };
+/** A key pressed where the focus is, or on the page when nothing has it. */
+const press = (key: string) => (dom.keyDown(document.activeElement ?? document.body, { key }), flush());
 
 const RUN = "20310727T010246Z-101";
 const EARLIER = "20310726T120000Z-107";
@@ -37,11 +39,12 @@ describe("the page's tabs", () => {
     const reviews = await list();
     const nav = screen.getByRole("navigation", { name: "Whooper" });
     expect(within(nav).getByText("Can't review · Docker isn't running")).toBeInTheDocument();
-    expect(tab("Reviews")).toHaveTextContent("Reviews7");
+    // The tab counts the reviews waiting on you; the header also says how many the list holds.
+    expect(tab("Reviews")).toHaveTextContent("Reviews5");
     expect(tab("Reviews")).toHaveAttribute("aria-current", "page");
     expect(tab("Causes")).toHaveTextContent("Causes1");
     expect(tab("Past reviews")).not.toHaveAttribute("aria-current");
-    expect(screen.getByText("5 waiting on you")).toBeInTheDocument();
+    expect(screen.getByText("5 waiting on you · 7 listed")).toBeInTheDocument();
     expect(statusWords(reviews)).toEqual([
       "Ready to approve",
       "Ready to approve",
@@ -136,7 +139,7 @@ describe("the page's tabs", () => {
     await choose(TITLE, "Remove from the list");
     expect(await screen.findByRole("status")).toHaveTextContent("Removed “refactor(cache): separate the cache configuration” from the list.");
     await waitFor(() => expect(screen.queryByRole("button", { name: CACHE })).not.toBeInTheDocument());
-    expect(tab("Reviews")).toHaveTextContent("Reviews6");
+    expect(tab("Reviews")).toHaveTextContent("Reviews4");
     fireEvent.click(tab("Past reviews"));
     const past = await list("Past reviews");
     expect(within(past).getByRole("button", { name: CACHE })).toHaveTextContent("Removed");
@@ -185,6 +188,59 @@ describe("the page's tabs", () => {
     expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
     expect(await screen.findByRole("button", { name: "Poll now" })).toBeEnabled();
     expect(host.calls("round")).toEqual([[]]);
+  });
+
+  it("selects rows with j and k, around the ends, and opens the selected one with Enter, also after Back to the list", async () => {
+    const host = renderWithFakeHost({ openOnReady: "/" });
+    const reviews = await list();
+    const selected = () => reviews.querySelector("[data-selected]")?.querySelector(".w-row-title")?.textContent;
+    const titles = [...reviews.querySelectorAll(".w-row-title")].map((title) => title.textContent);
+    press("j");
+    expect(selected()).toBe(titles[0]);
+    expect(document.activeElement).toHaveClass("w-row-open");
+    press("j");
+    expect(selected()).toBe(titles[1]);
+    press("k");
+    press("k");
+    expect(selected()).toBe(titles.at(-1));
+    // Not while typing in the search.
+    search().focus();
+    press("j");
+    expect(selected()).toBe(titles.at(-1));
+
+    fireEvent.input(search(), { target: { value: "cache" } });
+    (document.activeElement as HTMLElement).blur();
+    press("j");
+    expect(selected()).toMatch(/refactor\(cache\)/);
+    // The focused row's button takes Enter as a click.
+    dom.click(document.activeElement!);
+    flush();
+    fireEvent.click(await screen.findByRole("button", { name: "Back to the list" }));
+    await list();
+    expect(selected()).toMatch(/refactor\(cache\)/);
+    expect(document.activeElement).toBe(document.body);
+    press("Enter");
+    expect(await screen.findByRole("button", { name: "Back to the list" })).toBeInTheDocument();
+    expect(host.calls("show-review")).toEqual([[RUN], [RUN]]);
+  });
+
+  it("moves through Past reviews with j and k, and leaves the list alone while a row's menu is open, which Escape closes from anywhere", async () => {
+    renderWithFakeHost({ openOnReady: "/" });
+    await list();
+    fireEvent.click(screen.getByRole("button", { name: `Actions for ${TITLE}` }));
+    const menu = await screen.findByRole("menu");
+    await waitFor(() => expect(menu).toBeVisible());
+    press("j");
+    expect(document.querySelector("[data-selected]")).toBeNull();
+    // Also when the focus left the menu.
+    (document.activeElement as HTMLElement).blur();
+    press("Escape");
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+
+    fireEvent.click(tab("Past reviews"));
+    const past = await list("Past reviews");
+    press("k");
+    expect(past.querySelector("[data-selected]")).toHaveTextContent("Earlier review");
   });
 
   it("finds a review only when every word of the search is in its text", () => {

@@ -628,3 +628,19 @@ export function status(): WhooperStatus {
     truncated: false,
   };
 }
+
+/** What bin/whooper-settings get prints for a config that sets its agents and models and leaves the
+ * rest to Whooper's defaults. */
+export function settings(): Record<string, unknown> {
+  return {
+    schedule: { interval_minutes: 15, start: "10:00", end: "18:00", days: ["mon", "tue", "wed", "thu", "fri"] },
+    poll: { timeout_minutes: 10 },
+    jobs: { review: "claude", poll: "claude", summary: "claude" },
+    agents: {
+      claude: { review_model: "opus", poll_model: "sonnet" },
+      devin: { review_model: "claude-opus-4-high", poll_model: "claude-sonnet-4" },
+    },
+    review: { timeout_minutes: 60, skills: ["code-review"] },
+    ask: { timeout_minutes: 10 },
+  };
+}

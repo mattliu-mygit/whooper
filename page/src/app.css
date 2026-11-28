@@ -724,3 +724,83 @@ ul {
   padding: var(--s-space-8);
   font-size: var(--s-size-sm);
 }
+
+/* The row j and k selected, which keeps its mark while the focus is elsewhere. */
+.w-row[data-selected] {
+  background: var(--s-surface);
+  box-shadow: inset 2px 0 0 var(--s-border-interactive);
+}
+
+/* Settings: one fieldset per table of config.toml, then the bar that saves them. */
+.w-settings-group,
+.w-settings-choices {
+  display: grid;
+  gap: var(--s-space-16);
+  min-inline-size: 0;
+  margin: 0;
+  padding: var(--s-space-12) var(--s-space-16) var(--s-space-16);
+  border: var(--s-border-thin) var(--s-border-style) var(--s-border);
+  border-radius: var(--s-radius-sm);
+}
+
+.w-settings-group .w-settings-group {
+  padding-inline: var(--s-space-12);
+}
+
+.w-settings-group legend {
+  padding-inline: var(--s-space-4);
+  color: var(--s-text-secondary);
+  font-size: var(--s-size-xs);
+  letter-spacing: var(--s-tracking-wider);
+  text-transform: uppercase;
+}
+
+.w-settings-choices {
+  gap: var(--s-space-8);
+  padding: 0;
+  border: 0;
+}
+
+.w-settings-choices legend {
+  padding: 0 0 var(--s-input-label-spacing);
+  font-size: var(--s-input-label-size);
+  font-weight: var(--s-input-label-weight);
+}
+
+.w-settings-choice-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-space-8) var(--s-space-16);
+}
+
+.w-settings-list {
+  display: grid;
+  gap: var(--s-input-label-spacing);
+}
+
+.w-settings-label {
+  font-size: var(--s-input-label-size);
+  font-weight: var(--s-input-label-weight);
+}
+
+.w-save-bar {
+  position: sticky;
+  inset-block-end: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--s-space-8);
+  padding: var(--s-space-12);
+  border: var(--s-border-thin) var(--s-border-style) var(--s-border);
+  border-radius: var(--s-radius-sm);
+  background: var(--s-surface);
+}
+
+.w-save-text {
+  flex: 1;
+  min-inline-size: 0;
+}
+
+.w-refusal {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
