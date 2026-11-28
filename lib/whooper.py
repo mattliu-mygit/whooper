@@ -2778,22 +2778,31 @@ def check_jobs(config):
             raise SystemExit(f"whooper: [jobs] {job} names {agent!r}, which has no agents/{agent}/{job}")
 
 
+def whole_number(value):
+    """value as an int when it is a float with no fraction, such as 45.0, and as it is otherwise, such as 1.5, "45", or
+    true. TOML reads timeout_minutes = 45.0, typed by hand, as a float, which a settings form shows as 45, so typing 45
+    there sends nothing; the limits that take a whole number read such a float as that number instead of refusing it."""
+    return int(value) if type(value) is float and value.is_integer() else value
+
+
 def check_config(config):
     """Fails unless config's [jobs] passes check_jobs and each of [poll], [review], and [ask] timeout_minutes is a
     time limit its command, whooper-poll, whooper-review, or whooper-ask, can use. Returns the three limits, with
-    POLL_TIMEOUT_MINUTES and ASK_TIMEOUT_MINUTES for what the config leaves out. whooper.py env, which the scripts
-    start with, runs it on the config, and whooper-settings set on the config as it would be saved, so a save that
-    would leave a job or a limit the scripts stop on is refused with the message they would stop with."""
+    POLL_TIMEOUT_MINUTES and ASK_TIMEOUT_MINUTES for what the config leaves out, and a [poll] or [review] limit
+    typed as a float with no fraction, such as 45.0, as that whole number (whole_number), which env prints as 45 for
+    the scripts' bash to multiply. whooper.py env, which the scripts start with, runs it on the config, and
+    whooper-settings set on the config as it would be saved, so a save that would leave a job or a limit the scripts
+    stop on is refused with the message they would stop with."""
     # Each job runs on the agent [jobs] names, through its launcher agents/<agent>/<job>.
     check_jobs(config)
-    poll_timeout = config.get("poll", {}).get("timeout_minutes", POLL_TIMEOUT_MINUTES)
+    poll_timeout = whole_number(config.get("poll", {}).get("timeout_minutes", POLL_TIMEOUT_MINUTES))
     # A poll takes 2 to 3 minutes, so a shorter limit would stop every poll.
     if type(poll_timeout) is not int or poll_timeout < 5:
         raise SystemExit(f"whooper: [poll] timeout_minutes takes a whole number of minutes, at least 5; see {config_path()}")
     # whooper-review's watchdog multiplies the limit by 60 in bash, which knows whole numbers only, so 1.5
     # would stop the watchdog and leave the review with no time limit. bool is an int in Python, so true
     # would otherwise pass as 1.
-    review_timeout = config.get("review", {}).get("timeout_minutes")
+    review_timeout = whole_number(config.get("review", {}).get("timeout_minutes"))
     if type(review_timeout) is not int or review_timeout < 1:
         raise SystemExit(f"whooper: [review] timeout_minutes takes a whole number of minutes, at least 1; see {config_path()}")
     # whooper-ask's watchdog multiplies the limit in Python, so a fraction of a minute works too.
@@ -2844,10 +2853,14 @@ SETTINGS_SCHEMA = ROOT / "schemas" / "settings.json"
 
 def read_settings(config):
     """The config's values for the settings in SETTINGS_SCHEMA, with Whooper's defaults for what the
-    config leaves out, such as SCHEDULE_DEFAULTS. A setting with neither is left out."""
+    config leaves out, such as SCHEDULE_DEFAULTS. A setting with neither is left out. [poll] and
+    [review] timeout_minutes read as check_config reads them, so 45.0 reads as 45."""
     values = {**config, "schedule": {**SCHEDULE_DEFAULTS, **config.get("schedule", {})},
               "poll": {"timeout_minutes": POLL_TIMEOUT_MINUTES, **config.get("poll", {})},
               "ask": {"timeout_minutes": ASK_TIMEOUT_MINUTES, **config.get("ask", {})}}
+    for table in ("poll", "review"):
+        if "timeout_minutes" in values.get(table, {}):
+            values[table] = {**values[table], "timeout_minutes": whole_number(values[table]["timeout_minutes"])}
 
     def pick(value, schema):
         # Only what the schema names, at every level.
@@ -2877,8 +2890,9 @@ def write_settings(values):
                     table[key] = tomlkit.table()
                 merge(table[key], value)
             # Setting a key rewrites its line, which drops comments inside a list, so a value that did
-            # not change keeps its line as it is. Python's == calls 45.0 equal to 45 and true equal to 1,
-            # which the checks tell apart, so a value of another type changed too.
+            # not change keeps its line as it is. Python's == calls 15.0 equal to 15 and true equal to 1,
+            # which the checks may tell apart, as read_schedule does for interval_minutes, so a value of
+            # another type changed too.
             elif type(current.get(key)) is not type(value) or current.get(key) != value:
                 table[key] = value
 

@@ -5536,6 +5536,35 @@ class RunTest(unittest.TestCase):
                 self.assertEqual((result.returncode, failure),
                                  (1, "the review stopped at an unexpected error; see whooper-review's error output\n"))
 
+    def test_a_review_limit_typed_as_a_float_gives_the_watchdog_that_many_minutes_under_each_bash(self):
+        # whooper-review's watchdog sleeps the limit times 60, which bash multiplies, and bash 3.2 and 5 both stop the
+        # review at a syntax error on 45.0. With [review] timeout_minutes = 45.0, edited by hand, the watchdog sleeps
+        # 2700 seconds under each bash, as with 45. The test reads them from the watchdog's arguments, which end with
+        # <seconds> <work folder>/timed-out <the run's process group>, while the review run waits.
+        config = Path(self.env["WHOOPER_CONFIG"])
+        config.write_text(config.read_text().replace("timeout_minutes = 45\n", "timeout_minutes = 45.0\n"))
+        env, item, _ = self.pull_request()
+        self.fake_claude(review="exec sleep 30")
+
+        def watchdog_seconds(review):
+            found = subprocess.run(["pgrep", "-g", str(review.pid), "-f", "/timed-out"], capture_output=True,
+                                   text=True).stdout.split()
+            commands = [subprocess.run(["ps", "-o", "command=", "-p", pid], capture_output=True, text=True).stdout
+                        for pid in found]
+            return next((m[1] for c in commands if (m := re.search(r"(\S+) \S+/timed-out \d+$", c.strip()))), None)
+
+        for n, bash in enumerate(BASHES):
+            with self.subTest(bash=str(bash)):
+                folder = bash_folder(bash, Path(self.tmp.name) / f"bash-{n}")
+                review = self.start_command("whooper-review", str(item), "--dry-run",
+                                            env={**env, "PATH": f"{folder}{os.pathsep}{env['PATH']}"})
+                self.wait_for(lambda: review.poll() is not None or watchdog_seconds(review),
+                              "whooper-review to stop or start its watchdog")
+                seconds = watchdog_seconds(review)
+                self.stop(review)
+                shutil.rmtree(self.state / "runs", ignore_errors=True)
+                self.assertEqual(seconds, "2700", review.communicate()[1])
+
     def test_a_poll_or_an_ask_stopped_by_an_unset_variable_fails_under_each_bash(self):
         # BASH_ENV, which bash reads before a script, gives the script a command that reads a variable nothing sets,
         # standing in for any line that does: cat, which whooper-poll first runs itself as it writes the poll's
@@ -5971,16 +6000,22 @@ class ConfigTest(unittest.TestCase):
                      "export WHOOPER_DEVIN_REVIEW_MODEL=devin-review-model\n"]:
             self.assertIn(line, env)
 
-    def test_a_poll_limit_under_five_minutes_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            config = Path(tmp) / "config.toml"
-            config.write_text(CONFIG + "\n[poll]\ntimeout_minutes = 3\n")
-            os.environ["WHOOPER_CONFIG"], test_config = str(config), os.environ["WHOOPER_CONFIG"]
-            try:
-                with self.assertRaises(SystemExit):
-                    self.command("env")
-            finally:
-                os.environ["WHOOPER_CONFIG"] = test_config
+    def test_a_poll_limit_that_is_not_a_whole_number_of_at_least_five_minutes_fails(self):
+        # whooper-poll's watchdog multiplies the limit by 60 in bash, as whooper-review's does, and a poll takes 2 to 3
+        # minutes. A float with no fraction, such as 7.0, is that whole number, and env prints it as one.
+        # (value in the config, what env prints for it, or None where env fails)
+        for value, printed in [("7.0", "7"), ("3", None), ("4.0", None), ("7.5", None), ('"7"', None), ("true", None)]:
+            with self.subTest(value), tempfile.TemporaryDirectory() as tmp:
+                config = Path(tmp) / "config.toml"
+                config.write_text(CONFIG + f"\n[poll]\ntimeout_minutes = {value}\n")
+                with mock.patch.dict(os.environ, WHOOPER_CONFIG=str(config)):
+                    if printed is None:
+                        with self.assertRaises(SystemExit) as stop:
+                            self.command("env")
+                        self.assertEqual(str(stop.exception), "whooper: [poll] timeout_minutes takes a whole number of"
+                                                              f" minutes, at least 5; see {config}")
+                    else:
+                        self.assertIn(f"WHOOPER_POLL_TIMEOUT_MINUTES={printed}\n", self.command("env"))
 
     def test_polls_stop_after_ten_minutes_unless_the_config_says_otherwise(self):
         self.assertIn("WHOOPER_POLL_TIMEOUT_MINUTES=10\n", self.command("env"))
@@ -6010,21 +6045,23 @@ class ConfigTest(unittest.TestCase):
 
     def test_a_review_limit_that_is_not_a_whole_number_of_minutes_fails(self):
         # whooper-review's watchdog multiplies the limit by 60 in bash, which knows whole numbers only, so 1.5 would
-        # leave the review with no time limit.
-        for value, works in [("45", True), ("1", True), ("1.5", False), ("0", False), ("-5", False), ('"45"', False),
-                             ("true", False), (None, False)]:
+        # leave the review with no time limit. A float with no fraction, such as 45.0, which a settings form shows as
+        # 45, is that whole number, and env prints it as one, so bash never reads 45.0.
+        # (value in the config, what env prints for it, or None where env fails)
+        for value, printed in [("45", "45"), ("1", "1"), ("45.0", "45"), ("1.5", None), ("0", None), ("0.0", None),
+                               ("-5", None), ('"45"', None), ("true", None), (None, None)]:
             with self.subTest(value), tempfile.TemporaryDirectory() as tmp:
                 config = Path(tmp) / "config.toml"
                 config.write_text(CONFIG.replace("timeout_minutes = 45\n",
                                                  "" if value is None else f"timeout_minutes = {value}\n"))
                 with mock.patch.dict(os.environ, WHOOPER_CONFIG=str(config)):
-                    if works:
-                        self.assertIn(f"WHOOPER_REVIEW_TIMEOUT_MINUTES={value}\n", self.command("env"))
-                    else:
+                    if printed is None:
                         with self.assertRaises(SystemExit) as stop:
                             self.command("env")
                         self.assertEqual(str(stop.exception), "whooper: [review] timeout_minutes takes a whole number of"
                                                               f" minutes, at least 1; see {config}")
+                    else:
+                        self.assertIn(f"WHOOPER_REVIEW_TIMEOUT_MINUTES={printed}\n", self.command("env"))
 
     def test_a_job_on_an_agent_without_a_launcher_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -7861,6 +7898,7 @@ class SettingsTest(unittest.TestCase):
             ("a review limit with part of a minute", "timeout_minutes = 45 ", "timeout_minutes = 1.5 ", review),
             ("a review limit of 0 minutes", "timeout_minutes = 45 ", "timeout_minutes = 0 ", review),
             ("a review limit in quotes", "timeout_minutes = 45 ", 'timeout_minutes = "45" ', review),
+            ("a review limit of true", "timeout_minutes = 45 ", "timeout_minutes = true ", review),
             ("a poll limit under 5 minutes", "timeout_minutes = 10 ", "timeout_minutes = 3 ",
              "[poll] timeout_minutes takes a whole number of minutes, at least 5"),
             ("an ask limit of 0 minutes", "timeout_minutes = 10               # whooper-ask",
@@ -7886,18 +7924,34 @@ class SettingsTest(unittest.TestCase):
                 self.settings("set", json.dumps({"review": {"timeout_minutes": 30}}))
                 self.assertEqual(path.read_text(), EXAMPLE.replace("timeout_minutes = 45 ", "timeout_minutes = 30 ", 1))
 
+    def test_a_whole_number_limit_typed_as_a_float_reads_as_that_number_and_a_save_of_another_setting_keeps_it(self):
+        # TOML reads timeout_minutes = 45.0, edited by hand, as a float, which a settings form shows as 45, so typing 45
+        # there sends nothing. The checks take it as 45, so get prints 45, and a save of another setting goes through
+        # and keeps the line as it is.
+        edited = (EXAMPLE.replace("timeout_minutes = 45 ", "timeout_minutes = 45.0 ", 1)
+                  .replace("timeout_minutes = 10 ", "timeout_minutes = 10.0 ", 1))
+        path = self.use_config(edited)
+        got = json.loads(self.settings("get"))
+        limits = [got["poll"]["timeout_minutes"], got["review"]["timeout_minutes"]]
+        self.assertEqual([(limit, type(limit)) for limit in limits], [(10, int), (45, int)])
+        self.settings("set", json.dumps({"schedule": {"interval_minutes": 30}}))
+        self.assertEqual(path.read_text(), edited.replace("interval_minutes = 15\n", "interval_minutes = 30\n", 1))
+
     def test_set_rewrites_a_line_whose_value_equals_the_saved_one_in_python_but_has_another_type(self):
-        # Python's == calls 45.0 equal to 45 and true equal to 1, and the config check refuses the float and the bool, so
-        # a save of 45 or 1 over a line edited by hand to either rewrites the line instead of keeping it and refusing.
-        # (the line edited by hand, the values set is given, the line it saves)
-        for old, values, new in [
-            ("timeout_minutes = 45.0 ", {"review": {"timeout_minutes": 45}}, "timeout_minutes = 45 "),
-            ("timeout_minutes = true ", {"review": {"timeout_minutes": 1}}, "timeout_minutes = 1 "),
+        # Python's == calls 15.0 equal to 15 and true equal to 1, and read_schedule refuses interval_minutes = 15.0 and
+        # the config check a limit of true, so a save of 15 or 1 over a line edited by hand to either rewrites the line
+        # instead of keeping it and refusing.
+        # (the line, the line edited by hand, the values set is given, the line it saves)
+        for line, edited, values, saved in [
+            ("interval_minutes = 15\n", "interval_minutes = 15.0\n", {"schedule": {"interval_minutes": 15}},
+             "interval_minutes = 15\n"),
+            ("timeout_minutes = 45 ", "timeout_minutes = true ", {"review": {"timeout_minutes": 1}},
+             "timeout_minutes = 1 "),
         ]:
-            with self.subTest(old):
-                path = self.use_config(EXAMPLE.replace("timeout_minutes = 45 ", old, 1))
+            with self.subTest(edited):
+                path = self.use_config(EXAMPLE.replace(line, edited, 1))
                 self.settings("set", json.dumps(values))
-                self.assertEqual(path.read_text(), EXAMPLE.replace("timeout_minutes = 45 ", new, 1))
+                self.assertEqual(path.read_text(), EXAMPLE.replace(line, saved, 1))
 
     def test_set_changes_only_the_given_line_and_keeps_every_comment(self):
         for values, old, new in [
