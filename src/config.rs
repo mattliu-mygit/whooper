@@ -606,3 +606,180 @@ impl Whooper {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use jiff::civil::{date, time};
+
+    use super::*;
+
+    fn values(v: Value) -> Object {
+        v.as_object().unwrap().clone()
+    }
+
+    fn weekdays() -> Schedule {
+        read_schedule(&Object::new()).unwrap()
+    }
+
+    const NAMES: [&str; 8] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun", "next mon"];
+
+    /// A local time in the week of Monday 2031-07-28, such as at("wed", "12:00"); "next mon" is
+    /// 2031-08-04.
+    fn at(day: &str, clock: &str) -> DateTime {
+        let (h, m) = clock.split_once(':').unwrap();
+        let offset = NAMES.iter().position(|d| *d == day).unwrap() as i64;
+        date(2031, 7, 28)
+            .checked_add(jiff::Span::new().days(offset))
+            .unwrap()
+            .to_datetime(time(h.parse().unwrap(), m.parse().unwrap(), 0, 0))
+    }
+
+    #[test]
+    fn the_schedule_defaults_to_every_15_minutes_from_10_to_18_on_weekdays() {
+        let s = weekdays();
+        assert_eq!(s.interval_minutes, 15);
+        assert_eq!((s.start, s.end), (time(10, 0, 0, 0), time(18, 0, 0, 0)));
+        assert_eq!(s.days, ["mon", "tue", "wed", "thu", "fri"]);
+    }
+
+    #[test]
+    fn inside_the_hours_a_round_starts_at_once() {
+        for when in [at("mon", "10:00"), at("wed", "12:34"), at("fri", "17:59")] {
+            assert_eq!(next_round(&weekdays(), when), when);
+        }
+    }
+
+    #[test]
+    fn outside_the_hours_a_round_waits_for_the_next_start() {
+        for (when, want) in [
+            (at("wed", "09:05"), at("wed", "10:00")),
+            (at("wed", "18:00"), at("thu", "10:00")),
+            (at("wed", "23:30"), at("thu", "10:00")),
+            (at("fri", "18:00"), at("next mon", "10:00")),
+            (at("sat", "12:00"), at("next mon", "10:00")),
+            (at("sun", "09:00"), at("next mon", "10:00")),
+        ] {
+            assert_eq!(next_round(&weekdays(), when), want, "{when}");
+        }
+    }
+
+    #[test]
+    fn hours_and_days_come_from_the_config() {
+        let schedule = read_schedule(&values(
+            json!({"schedule": {"start": "08:30", "end": "12:00", "days": ["tue", "sat"]}}),
+        ))
+        .unwrap();
+        for (when, want) in [
+            (at("mon", "11:00"), at("tue", "08:30")),
+            (at("tue", "11:59"), at("tue", "11:59")),
+            (at("tue", "12:00"), at("sat", "08:30")),
+        ] {
+            assert_eq!(next_round(&schedule, when), want, "{when}");
+        }
+    }
+
+    #[test]
+    fn the_next_round_starts_interval_minutes_after_the_last_one_ended() {
+        // whooper run waits interval_minutes after a round ends, then for the schedule's hours.
+        let interval = jiff::Span::new().minutes(weekdays().interval_minutes);
+        for (ended, want) in [
+            (at("wed", "10:06"), at("wed", "10:21")),
+            // A round may start until 18:00 and finish after it.
+            (at("wed", "17:44"), at("wed", "17:59")),
+            (at("wed", "17:50"), at("thu", "10:00")),
+            (at("fri", "17:46"), at("next mon", "10:00")),
+        ] {
+            assert_eq!(next_round(&weekdays(), ended + interval), want, "{ended}");
+        }
+    }
+
+    #[test]
+    fn a_schedule_whooper_run_cannot_follow_fails() {
+        for (name, schedule) in [
+            ("an unknown day", json!({"days": ["mon", "tues"]})),
+            ("no days", json!({"days": []})),
+            ("a time that is not 24-hour", json!({"start": "9:30am"})),
+            (
+                "an end before the start",
+                json!({"start": "18:00", "end": "10:00"}),
+            ),
+            ("an end at the start", json!({"end": "10:00"})),
+            // Each poll runs a model, so no wait between rounds would spend money nonstop.
+            ("no wait between rounds", json!({"interval_minutes": 0})),
+            ("a negative interval", json!({"interval_minutes": -30})),
+            ("an interval in quotes", json!({"interval_minutes": "15"})),
+            ("part of a minute", json!({"interval_minutes": 1.5})),
+            ("an interval of true", json!({"interval_minutes": true})),
+        ] {
+            assert!(
+                read_schedule(&values(json!({ "schedule": schedule }))).is_err(),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_job_offers_the_agents_whooper_can_run_it_on() {
+        let jobs = &settings_schema().unwrap()["properties"]["jobs"]["properties"];
+        for job in JOBS {
+            assert_eq!(jobs[job]["enum"], json!(AGENTS), "{job}");
+        }
+        assert_eq!(jobs.as_object().unwrap().len(), JOBS.len());
+    }
+
+    #[test]
+    fn the_time_limits_take_what_their_commands_can_keep() {
+        let base = || {
+            values(
+                json!({"jobs": {"review": "claude", "poll": "claude"}, "review": {"timeout_minutes": 45}}),
+            )
+        };
+        let limits = check(&base()).unwrap();
+        assert_eq!((limits.poll, limits.review, limits.ask), (10, 45, 10.0));
+        let with = |table: &str, value: Value| {
+            let mut v = base();
+            v.entry(table)
+                .or_insert(json!({}))
+                .as_object_mut()
+                .unwrap()
+                .insert("timeout_minutes".into(), value);
+            check(&v)
+        };
+        // A poll takes 2 to 3 minutes; a float, even 7.0, is refused, as the settings form sends whole
+        // numbers.
+        assert_eq!(with("poll", json!(7)).unwrap().poll, 7);
+        for bad in [
+            json!(7.0),
+            json!(3),
+            json!(4.0),
+            json!(7.5),
+            json!("7"),
+            json!(true),
+        ] {
+            assert!(with("poll", bad.clone()).is_err(), "poll {bad}");
+        }
+        for (good, minutes) in [(json!(7), 7.0), (json!(2.5), 2.5)] {
+            assert_eq!(with("ask", good).unwrap().ask, minutes);
+        }
+        for bad in [json!(0), json!("7"), json!(true)] {
+            assert!(with("ask", bad.clone()).is_err(), "ask {bad}");
+        }
+        for (good, minutes) in [(json!(45), 45), (json!(1), 1)] {
+            assert_eq!(with("review", good).unwrap().review, minutes);
+        }
+        for bad in [
+            json!(45.0),
+            json!(1.5),
+            json!(0),
+            json!(0.0),
+            json!(-5),
+            json!("45"),
+            json!(true),
+        ] {
+            assert!(with("review", bad.clone()).is_err(), "review {bad}");
+        }
+        let mut no_review_limit = base();
+        no_review_limit.remove("review");
+        assert!(check(&no_review_limit).is_err());
+    }
+}

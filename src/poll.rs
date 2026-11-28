@@ -1578,4 +1578,18 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn pr_links_count_in_every_configured_org_only() {
+        let link = PrLink::new(&["example-org".into(), "sample-org".into()]);
+        for (url, matches) in [
+            ("https://github.com/example-org/app/pull/3", true),
+            ("http://github.com/sample-org/app/pull/3", true),
+            ("https://github.com/other-org/app/pull/3", false),
+            // The org name must match whole, not as a prefix.
+            ("https://github.com/example-org-fork/app/pull/3", false),
+        ] {
+            assert_eq!(!link.find(url).is_empty(), matches, "{url}");
+        }
+    }
 }

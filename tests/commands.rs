@@ -281,3 +281,81 @@ fn the_manifest_names_only_bin_whooper_and_files_in_the_checkout() {
         .collect();
     assert_eq!(commands, ["gh", "slackdump", "claude", "devin"]);
 }
+
+#[test]
+fn the_manifest_declares_the_groups_and_row_actions_whooper_status_uses() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest = read_json(&root.join("prompting-time-plugin.json"));
+    let status = &manifest["status"];
+    let mut groups: Vec<&Value> = status["groups"].as_array().unwrap().iter().collect();
+    groups.sort_by_key(|g| g["order"].as_i64());
+    let got: Vec<(&str, bool)> = groups
+        .iter()
+        .map(|g| (g["id"].as_str().unwrap(), g["needs_you"].as_bool().unwrap()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("ready", true),
+            ("look", true),
+            ("failed", true),
+            ("reviewing", false),
+            ("waiting", false),
+            ("done", false)
+        ]
+    );
+    let actions = manifest["actions"].as_array().unwrap();
+    let names: Vec<&str> = actions
+        .iter()
+        .map(|a| a["name"].as_str().unwrap())
+        .collect();
+    let unique: std::collections::BTreeSet<&&str> = names.iter().collect();
+    assert_eq!(unique.len(), names.len());
+    // Prompting Time runs a row action without its confirmation flow only when it needs none.
+    for name in status["item_actions"].as_array().unwrap() {
+        let action = actions.iter().find(|a| &a["name"] == name).unwrap();
+        assert_eq!(action["confirm"], false, "{name}");
+    }
+    // Each blocker's action is one the manifest declares.
+    assert!(names.contains(&"round"));
+    // Each action's command is one bin/whooper takes.
+    let w = Whooper::new();
+    for action in actions {
+        let command: Vec<&str> = action["command"].as_array().unwrap()[1..]
+            .iter()
+            .map(|a| a.as_str().unwrap())
+            .take(1)
+            .collect();
+        let mut help = command.clone();
+        help.push("--help");
+        w.ok(&help);
+    }
+}
+
+#[test]
+fn each_agents_cli_is_needed_only_when_a_job_runs_on_it_and_the_page_speaks_the_manifests_protocol()
+{
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest = read_json(&root.join("prompting-time-plugin.json"));
+    let conditional: Vec<Value> = manifest["prerequisites"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|p| p.get("only_when").is_some())
+        .map(|p| json!([p["command"], p["only_when"]]))
+        .collect();
+    assert_eq!(
+        conditional,
+        ["claude", "devin"]
+            .map(|a| json!([a, {"setting": "jobs", "value": a}]))
+            .to_vec()
+    );
+    let settings = read_json(&root.join("schemas/settings.json"));
+    assert!(settings["properties"].get("jobs").is_some());
+    assert!(root.join("page/index.html").exists());
+    let protocol = fs::read_to_string(root.join("page/src/protocol.ts")).unwrap();
+    assert!(protocol.contains(&format!(
+        "export const PROTOCOL_VERSION = {};",
+        manifest["page"]["protocol"]
+    )));
+}

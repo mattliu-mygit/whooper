@@ -375,4 +375,84 @@ mod tests {
         assert!(fill("{{b}}", &values).is_err());
         assert_eq!(bot_list(&serde_json::json!([]), "login"), "none");
     }
+
+    /// The test config's Whooper, with its notes file in a throwaway folder.
+    fn whooper(dir: &Path) -> Whooper {
+        let text = r#"
+[user]
+name = "Sam"
+github_login = "sam-example"
+[github]
+orgs = ["example-org"]
+review_bots = [{ login = "ci-review-bot", label = "the CI review bot" }]
+[review]
+timeout_minutes = 45
+skills = ["review-skill", "language-skill"]
+[repos."example-org/example-repo"]
+notes = "notes.md"
+[repos."sample-org/plain-repo"]
+"#;
+        fs::write(
+            dir.join("notes.md"),
+            "Run `make test` from the service's directory.\n",
+        )
+        .unwrap();
+        let document: toml_edit::DocumentMut = text.parse().unwrap();
+        Whooper {
+            values: config::to_json(document.as_item())
+                .as_object()
+                .unwrap()
+                .clone(),
+            dir: dir.to_path_buf(),
+            limits: config::Limits {
+                poll: 10,
+                review: 45,
+                ask: 10.0,
+            },
+            state: dir.join("state"),
+            login: "sam-example".into(),
+            orgs: vec!["example-org".into()],
+        }
+    }
+
+    #[test]
+    fn prompts_are_filled_from_the_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = whooper(dir.path());
+        let text = review(&w, "example-org/example-repo", "claude").unwrap();
+        let schemas = config::root().join("schemas");
+        for want in [
+            "sam-example (Sam)".to_string(),
+            "`review-skill`, `language-skill`".into(),
+            "the CI review bot (ci-review-bot)".into(),
+            "Run `make test` from the service's directory.".into(),
+            "as Sam would post it".into(),
+            format!("`{}`", schemas.join("examples-request.json").display()),
+            "`TestWhooperExamples`".into(),
+        ] {
+            assert!(text.contains(&want), "{want}");
+        }
+        assert!(
+            review(&w, "sample-org/plain-repo", "claude")
+                .unwrap()
+                .contains("Notes for this repository:\n\nNone.")
+        );
+        assert!(!poll(&w).unwrap().contains("{{"));
+    }
+
+    #[test]
+    fn the_review_prompt_names_each_agents_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = whooper(dir.path());
+        for agent in config::AGENTS {
+            let text = review(&w, "example-org/example-repo", agent).unwrap();
+            assert!(!text.contains("{{"), "{agent}");
+            assert!(
+                text.contains(&format!("{} call", wording(agent)["shell"])),
+                "{agent}"
+            );
+        }
+        assert_eq!(wording("devin")["shell"], "exec");
+        assert_eq!(wording("claude")["shell"], "Bash");
+    }
 }

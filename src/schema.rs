@@ -311,4 +311,71 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn the_plugin_manifest_fits_its_schema_and_the_schema_catches_each_break() {
+        let manifest: Value = serde_json::from_str(
+            &std::fs::read_to_string(crate::config::root().join("prompting-time-plugin.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        let schema = schema("prompting-time-plugin.json");
+        check(&manifest, &schema, "manifest").unwrap();
+        let unflagged: Vec<Value> = manifest["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| {
+                let mut a = a.clone();
+                a.as_object_mut().unwrap().remove("confirm");
+                a
+            })
+            .collect();
+        let mut format_1 = manifest["status"].clone();
+        format_1["format"] = json!(1);
+        let mut upper_group = manifest["status"].clone();
+        upper_group["groups"] =
+            json!([{"id": "Ready", "title": "Ready", "needs_you": true, "order": 1}]);
+        for (name, key, value) in [
+            (
+                "a name a pt-plugin:// address cannot hold",
+                "name",
+                json!("Whooper Reviews"),
+            ),
+            (
+                "a version that is not <major>.<minor>.<patch>",
+                "version",
+                json!("v0.1"),
+            ),
+            ("an empty start command", "start", json!([])),
+            (
+                "actions without their confirm flag",
+                "actions",
+                json!(unflagged),
+            ),
+            (
+                "a page protocol the format does not know",
+                "page",
+                json!({"entry": "page/dist/index.html", "protocol": 3}),
+            ),
+            (
+                "a status format Prompting Time does not read",
+                "status",
+                format_1,
+            ),
+            (
+                "a status group whose id is not lowercase",
+                "status",
+                upper_group,
+            ),
+            ("an unexpected key", "socket", json!("whooper.sock")),
+        ] {
+            let mut broken = manifest.clone();
+            broken[key] = value;
+            assert!(check(&broken, &schema, "manifest").is_err(), "{name}");
+        }
+        let mut no_page = manifest.clone();
+        no_page.as_object_mut().unwrap().remove("page");
+        assert!(check(&no_page, &schema, "manifest").is_err());
+    }
 }

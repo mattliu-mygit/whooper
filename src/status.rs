@@ -1062,4 +1062,66 @@ mod tests {
             ])
         );
     }
+
+    fn skipped(started: i64) -> Value {
+        json!({"started_at": started, "ended_at": null, "result": "skipped", "selected": 0,
+               "reason": "Whooper is paused"})
+    }
+
+    fn history(state: &Path) -> Vec<Value> {
+        fs::read_to_string(state.join("rounds.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn the_round_history_keeps_the_rounds_of_the_last_15_days_oldest_first() {
+        let state = tempfile::tempdir().unwrap();
+        let now = Timestamp::now().as_second();
+        let old = now - 20 * 86400;
+        for n in 0..5 {
+            add_round(state.path(), &skipped(old + 60 * n)).unwrap();
+        }
+        // Written through a rename, which leaves no temporary file behind.
+        let names: Vec<String> = fsx::entries(state.path())
+            .iter()
+            .map(|p| fsx::name_of(p))
+            .collect();
+        assert_eq!(names, ["rounds.jsonl"]);
+        for n in 0..3 {
+            add_round(state.path(), &skipped(now + 60 * n)).unwrap();
+        }
+        let starts: Vec<Value> = history(state.path())
+            .iter()
+            .map(|r| r["started_at"].clone())
+            .collect();
+        assert_eq!(
+            starts,
+            (0..3).map(|n| json!(now + 60 * n)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn rounds_that_end_at_once_all_stay_in_the_history() {
+        // whooper run adds a round it skips while a round run by hand ends.
+        let state = tempfile::tempdir().unwrap();
+        let now = Timestamp::now().as_second();
+        let writers: Vec<_> = (0..8)
+            .map(|n| {
+                let state = state.path().to_path_buf();
+                std::thread::spawn(move || add_round(&state, &skipped(now + n)).unwrap())
+            })
+            .collect();
+        for w in writers {
+            w.join().unwrap();
+        }
+        let mut starts: Vec<i64> = history(state.path())
+            .iter()
+            .map(|r| r["started_at"].as_i64().unwrap())
+            .collect();
+        starts.sort();
+        assert_eq!(starts, (0..8).map(|n| now + n).collect::<Vec<_>>());
+    }
 }
