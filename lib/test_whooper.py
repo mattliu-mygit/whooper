@@ -4663,6 +4663,36 @@ class RunTest(unittest.TestCase):
         self.assertEqual(((tmp / "run.diff").read_text(), (run / "diff.patch").read_text(), (tmp / "kept.txt").read_text()),
                          (plain, plain, "yes\n"))
 
+    def test_the_run_reads_the_whole_change_from_a_subfolder_whatever_diff_relative_says(self):
+        env, item, merge_base = self.pull_request(app=self.APP_IN_TWO_HUNKS, more=self.MORE_FILES)
+        plain = self.plain_patch(env, merge_base)
+        # diff.relative=true shows a git diff run in a subfolder only that folder's changes, with paths relative to it.
+        self.write_git_config(env, [{"diff.relative": "true"}])
+        tmp = Path(self.tmp.name)
+        # The run reads the change with git diff in docs/, as after a probe's cd there, and stops.
+        self.script(self.fakes / "claude", f"cd docs && git diff {merge_base} HEAD > '{tmp / 'run.diff'}'")
+        self.command("whooper-review", str(item), "--dry-run", env=env)
+        self.assertEqual((tmp / "run.diff").read_text(), plain)
+
+    def test_the_kept_diff_the_runs_own_git_diff_and_the_rebuild_leave_out_gits_diff_variables(self):
+        # git takes an external diff tool from GIT_EXTERNAL_DIFF, and how many unchanged lines go around each change
+        # from GIT_DIFF_OPTS, whatever its config says, and GIT_DIFF_OPTS outranks even --unified.
+        env, item, merge_base = self.pull_request(app=self.APP_IN_TWO_HUNKS)
+        plain = self.plain_patch(env, merge_base)
+        tmp = Path(self.tmp.name)
+        self.script(tmp / "external", 'echo "external diff of $1"')
+        variables = {"GIT_EXTERNAL_DIFF": str(tmp / "external"), "GIT_DIFF_OPTS": "--unified=10"}
+        # The run reads the change with a plain git diff and stops.
+        self.script(self.fakes / "claude", f"git diff {merge_base} HEAD > '{tmp / 'run.diff'}'")
+        self.command("whooper-review", str(item), "--dry-run", env={**env, **variables})
+        [run] = (self.state / "runs").iterdir()
+        self.assertEqual(((tmp / "run.diff").read_text(), (run / "diff.patch").read_text()), (plain, plain))
+        # whooper-show rebuilds the diff of a review from before reviews kept it the same way.
+        (run / "diff.patch").unlink()
+        shown = self.command("whooper-show", run.name, "--json", env={**env, **variables})
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertEqual(json.loads(shown.stdout)["diff"], plain)
+
     def test_show_rebuilds_the_diff_of_a_review_from_before_reviews_kept_it(self):
         env, item, merge_base = self.pull_request(app=self.APP_IN_TWO_HUNKS, more=self.MORE_FILES)
         self.command("whooper-review", str(item), "--dry-run", env=env)
@@ -5165,6 +5195,23 @@ class RunTest(unittest.TestCase):
         plain = (tmp / "plain.diff").read_text()
         self.assertIn("\n+func Half(n int) int {\n", plain)
         self.assertNotEqual((tmp / "config.diff").read_text(), plain)
+        self.assertEqual((tmp / "gremlins.diff").read_text(), plain)
+
+    def test_gremlins_reads_the_lines_the_diff_adds_whatever_gits_diff_variables_say(self):
+        # git takes an external diff tool from GIT_EXTERNAL_DIFF, and how many unchanged lines go around each change
+        # from GIT_DIFF_OPTS, whatever its config says. The fake gremlins also has git print the same diff without
+        # them, with no config but the mutation step's own.
+        tmp = Path(self.tmp.name)
+        self.script(tmp / "external", 'echo "external diff of $1"')
+        step = "-c diff.relative=true -c diff.context=0 -c color.diff=false"
+        self.script(self.fakes / "gremlins", "\n".join([
+            f'git diff --merge-base "$3" > "{tmp}/gremlins.diff"',
+            f'env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS GIT_CONFIG_COUNT=0 git -c core.abbrev=12 {step} diff --merge-base "$3"'
+            f' > "{tmp}/plain.diff"']))
+        result, _ = self.prices_review("true", env={"GIT_EXTERNAL_DIFF": str(tmp / "external"), "GIT_DIFF_OPTS": "--unified=3"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        plain = (tmp / "plain.diff").read_text()
+        self.assertIn("\n+func Half(n int) int {\n", plain)
         self.assertEqual((tmp / "gremlins.diff").read_text(), plain)
 
     def test_show_gives_the_commits_since_the_review_and_the_files_that_change_with_the_prs_from_the_clone(self):

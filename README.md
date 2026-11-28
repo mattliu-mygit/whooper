@@ -611,7 +611,11 @@ least 12 digits. git's default for those, `core.abbrev=auto`, lengthens names as
 grows, while 12 digits stay put. The run's own git diff, and the one gremlins runs in the mutation
 step below, take the same settings from config entries their environment gives git
 (`GIT_CONFIG_COUNT`), after any your environment already holds, with `color.diff=never` for no
-color, so the run sees the hunks `diff.patch` shows, and GitHub takes comments in. The list of
+color and `diff.relative=false`, which keeps a git diff the run starts in a subfolder, as after a
+probe's `cd`, to the whole change, so the run sees the hunks `diff.patch` shows, and GitHub takes
+comments in. git takes an external diff tool from `GIT_EXTERNAL_DIFF`, and the unchanged lines
+around each change from `GIT_DIFF_OPTS`, whatever its config says, the second even over `--unified`,
+so whooper-review runs everything without them, as whooper-show's rebuild does. The list of
 changed files the repo's setup script gets (`WHOOPER_CHANGED`) takes the same rename detection,
 order, quoting, and submodules. Some of your git config still reaches those diffs, since no setting
 can pin it. git fails to start an empty `diff.external` rather than turning it off, so the run's own

@@ -817,9 +817,11 @@ def read_clone(repo, *args):
     """What git <args> prints in repo's clone (repo_clone), or None when git fails, as when the clone
     lacks an object args need or does not exist. --no-lazy-fetch keeps git from fetching an object the
     partial clone lacks, so this only reads the clone. As in diff.patch, a file in an encoding other
-    than UTF-8 leaves bytes that read as U+FFFD."""
+    than UTF-8 leaves bytes that read as U+FFFD, and git runs without GIT_EXTERNAL_DIFF and
+    GIT_DIFF_OPTS, which it takes whatever its config says (bin/whooper-review)."""
+    env = {name: value for name, value in os.environ.items() if name not in ("GIT_EXTERNAL_DIFF", "GIT_DIFF_OPTS")}
     git = subprocess.run(["git", "--git-dir", str(repo_clone(repo) / ".git"), "--no-lazy-fetch", *args],
-                         capture_output=True)
+                         capture_output=True, env=env)
     return git.stdout.decode(errors="replace") if git.returncode == 0 else None
 
 

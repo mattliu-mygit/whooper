@@ -57,6 +57,11 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 eval "$("$root/lib/python" "$root/lib/whooper.py" env)"
 data="$WHOOPER_STATE"
 usage="usage: whooper-review <work-item.json> --dry-run [--as-of <time>]"
+# git takes an external diff tool from GIT_EXTERNAL_DIFF, and how many unchanged lines go around each
+# change from GIT_DIFF_OPTS, whatever its config says, and GIT_DIFF_OPTS outranks even --unified, so
+# neither diff.patch's arguments nor the run's config entries below could pin them. This script and
+# everything it starts, diff.patch's git diff, every step, and the run, go without them.
+unset GIT_EXTERNAL_DIFF GIT_DIFF_OPTS
 
 # Once this review has its run directory, die also saves the reason there, so an ask about the
 # failed review can read it, and the cause beside it in failure.json: what stopped the review, and
@@ -305,18 +310,19 @@ step=review step_log=""
 # The run reads the change with its own git diff (prompts/review.md), so its environment gives git, as
 # config entries, which outrank the user's config files, the settings diff.patch's arguments pin, with
 # color.diff=never for --no-color, and diff.noprefix=false, diff.srcPrefix=a/, and diff.dstPrefix=b/ for
-# a/ and b/. --no-ext-diff and --no-textconv have no such entry: git fails to start an empty
-# diff.external rather than turn it off, and a textconv filter goes with the diff attribute that names
-# it, so core.attributesFile=/dev/null leaves the run only those the repo's .gitattributes names
-# (README.md). The entries come after any the environment already holds, so of two entries of the same
-# name the run's wins. The run then sees the hunks, and so the lines inside them, that diff.patch shows,
-# and that GitHub takes comments on.
+# a/ and b/, and diff.relative=false, so a git diff the run starts in a subfolder of the head, as after
+# a probe's cd, still shows the whole change. --no-ext-diff and --no-textconv have no such entry: git
+# fails to start an empty diff.external rather than turn it off, and a textconv filter goes with the
+# diff attribute that names it, so core.attributesFile=/dev/null leaves the run only those the repo's
+# .gitattributes names (README.md). The entries come after any the environment already holds, so of two
+# entries of the same name the run's wins. The run then sees the hunks, and so the lines inside them,
+# that diff.patch shows, and that GitHub takes comments on.
 config_count="${GIT_CONFIG_COUNT:-0}"
 run_config=()
 for setting in diff.context=3 diff.interHunkContext=0 diff.algorithm=myers diff.indentHeuristic=true \
   diff.suppressBlankEmpty=false diff.renames=true diff.renameLimit=1000 diff.orderFile=/dev/null core.quotePath=true \
   core.bigFileThreshold=512m core.attributesFile=/dev/null diff.ignoreSubmodules=none diff.submodule=short \
-  diff.noprefix=false diff.srcPrefix=a/ diff.dstPrefix=b/ color.diff=never core.abbrev=12; do
+  diff.noprefix=false diff.srcPrefix=a/ diff.dstPrefix=b/ color.diff=never core.abbrev=12 diff.relative=false; do
   run_config+=("GIT_CONFIG_KEY_$config_count=${setting%%=*}" "GIT_CONFIG_VALUE_$config_count=${setting#*=}")
   config_count=$((config_count + 1))
 done
