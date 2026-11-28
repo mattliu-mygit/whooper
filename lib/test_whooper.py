@@ -1824,6 +1824,14 @@ def without_gopls(env, gobin):
     return {**env, "PATH": path, "GOBIN": str(gobin)}
 
 
+def go_telemetry_off(home):
+    """Turns Go's telemetry off in home, as go telemetry off does, so go and gopls count nothing there and start no
+    telemetry process, which outlives them and can still be writing in home as the test deletes it."""
+    mode = home / "Library" / "Application Support" / "go" / "telemetry" / "mode"
+    mode.parent.mkdir(parents=True, exist_ok=True)
+    mode.write_text("off")
+
+
 def without_go(env):
     """env with no go command on PATH."""
     return {**env, "PATH": os.pathsep.join(folder for folder in env["PATH"].split(os.pathsep)
@@ -1857,17 +1865,33 @@ class RunDirTest(unittest.TestCase):
     and gopls keep their caches and temporary files there, but for the build cache the tests share."""
 
     def setUp(self):
-        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(self.delete, folder)
+        self.tmp = Path(folder.name)
         home = self.tmp / "home"
         home.mkdir()
         # git config that changes what git grep prints, which name search must read all the same.
         (home / ".gitconfig").write_text("[grep]\n\tcolumn = true\n\tpatternType = perl\n[color]\n\tui = always\n")
+        go_telemetry_off(home)
         # Temporary files go in the throwaway folder too, as whooper-review puts a step's in the run directory, so
         # those of a go the step kills at its time limit go with the folder.
         (self.tmp / "tmp").mkdir()
         self.env = {**os.environ, "HOME": str(home), "GIT_CONFIG_GLOBAL": str(home / ".gitconfig"),
                     "GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "Sam", "GIT_AUTHOR_EMAIL": "sam@example.com",
                     "GIT_COMMITTER_NAME": "Sam", "GIT_COMMITTER_EMAIL": "sam@example.com", "TMPDIR": str(self.tmp / "tmp")}
+
+    def delete(self, folder):
+        """Deletes folder, a TemporaryDirectory, trying again for up to a minute while it fails: the connections step kills
+        gopls as it ends, but not the go commands gopls started, which can still be writing in TMPDIR, the folder's tmp."""
+        deadline = monotonic() + 60
+        while True:
+            try:
+                folder.cleanup()
+                return
+            except OSError:
+                if monotonic() > deadline:
+                    raise
+                sleep(0.5)
 
     def run_dir(self, base, head):
         """A review run's directory for the PR that changes base's files, by path, to head's, as whooper-review
@@ -3989,9 +4013,9 @@ class RunTest(unittest.TestCase):
         self.state = tmp / "whooper"
         self.lock = self.state / "run.lock"
 
-    def script(self, path, body):
+    def script(self, path, body, shell="/bin/sh"):
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f"#!/bin/sh\n{body}\n")
+        path.write_text(f"#!{shell}\n{body}\n")
         path.chmod(0o755)
 
     def claude_script(self, body):
@@ -4010,16 +4034,16 @@ class RunTest(unittest.TestCase):
             os.killpg(process.pid, signal.SIGTERM)
         process.wait(timeout=30)
 
-    def command(self, name, *args, env=None):
-        """Runs bin/<name> with args to its end."""
-        return self.run_script(ROOT / "bin" / name, *args, env=env)
+    def command(self, name, *args, env=None, timeout=60):
+        """Runs bin/<name> with args to its end, or fails once timeout seconds pass."""
+        return self.run_script(ROOT / "bin" / name, *args, env=env, timeout=timeout)
 
-    def run_script(self, path, *args, env=None):
-        """Runs the script at path with args to its end."""
+    def run_script(self, path, *args, env=None, timeout=60):
+        """Runs the script at path with args to its end, or fails once timeout seconds pass."""
         process = subprocess.Popen([str(path), *args], env={**self.env, **(env or {})},
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
         self.addCleanup(self.stop, process)
-        out, err = process.communicate(timeout=60)
+        out, err = process.communicate(timeout=timeout)
         return subprocess.CompletedProcess(process.args, process.returncode, out, err)
 
     def status(self):
@@ -4163,6 +4187,7 @@ class RunTest(unittest.TestCase):
         neither the user's git config nor the system's reaches a test."""
         home = Path(self.tmp.name) / "home"
         (home / ".claude" / "skills").mkdir(parents=True, exist_ok=True)
+        go_telemetry_off(home)
         return {**self.env, "HOME": str(home), "GIT_CONFIG_GLOBAL": str(home / ".gitconfig"), "GIT_CONFIG_NOSYSTEM": "1",
                 "GIT_AUTHOR_NAME": "Sam", "GIT_AUTHOR_EMAIL": "sam@example.com",
                 "GIT_COMMITTER_NAME": "Sam", "GIT_COMMITTER_EMAIL": "sam@example.com"}
@@ -4584,6 +4609,9 @@ class RunTest(unittest.TestCase):
         # Open PRs that request Sam's review in example-org. gh returns at most --limit of a search's results, which
         # it pages through, and the fake logs each PR the fetch then reads.
         requested, read = self.fakes / "requested", self.fakes / "read"
+        # The fetches start this fake once for each of 1,150 PRs, so it runs in bash itself rather than sh, which on macOS
+        # starts bash through a program of its own: starting a program is slow on a Mac whose security software checks
+        # each one.
         self.script(self.fakes / "gh", "\n".join([
             'case "$*" in',
             '  "search prs user-review-requested:sam-example --owner example-org "*)',
@@ -4594,7 +4622,7 @@ class RunTest(unittest.TestCase):
             '  "api graphql "*) for arg; do case "$arg" in url=*) echo "${arg#url=}" >> "${0%/*}/read" ;; esac; done ;;',
             "  *) exit 1 ;;",
             "esac",
-        ]))
+        ]), shell="/bin/bash")
         urls = [f"https://github.com/example-org/example-repo/pull/{number}" for number in range(1, 1201)]
         requested.write_text("".join(f"{url}\n" for url in urls[:150]))
         fetch = self.command("whooper-fetch")
@@ -4603,7 +4631,8 @@ class RunTest(unittest.TestCase):
         # 1,000 is the most GitHub returns for one search, so a search that reaches it says it may have left PRs out.
         requested.write_text("".join(f"{url}\n" for url in urls))
         read.unlink()
-        fetch = self.command("whooper-fetch")
+        # Under lib/run-tests, which runs other tests that start programs too, these 1,000 can take over a minute.
+        fetch = self.command("whooper-fetch", timeout=300)
         self.assertEqual((fetch.returncode, fetch.stderr), (
             0, "whooper-fetch: the search for PRs that request sam-example's review in example-org found 1,000 PRs, the"
                " most GitHub returns for one search, so it may have left some out\n"))
@@ -6363,8 +6392,10 @@ class RunTest(unittest.TestCase):
         # Paused while it waits, whooper-run skips the next round, due a minute after the first ended.
         self.assertEqual(self.command("whooper-pause").returncode, 0)
         self.wait_for(lambda: "skipped this round" in log.read_text(), "whooper-run to skip a round")
-        skipped = datetime.now(timezone.utc)
         self.wait_for(lambda: self.status()["next_round"], "the next round")
+        # whooper-run logs the skip before it reads the clock for the skip's start, and sets the next round after it has
+        # added the skip to the history.
+        skipped = datetime.now(timezone.utc)
         status = self.status()
         self.assertGreater(datetime.fromisoformat(status["next_round"]), skipped)
         # The skipped round ran nothing, so the last round is still the first, and the history lists both.
