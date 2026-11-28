@@ -3,6 +3,7 @@ import { flush } from "solid-js";
 import { describe, expect, it } from "vitest";
 import * as fixtures from "./fixtures";
 import { appliesWhen } from "./Settings";
+import { boundsProblem } from "./settingsForm";
 import { renderWithFakeHost } from "./test/connect";
 
 // Solid applies updates in a microtask, so each event is followed by flush() to see its effect.
@@ -67,6 +68,33 @@ describe("the Settings tab", () => {
     expect(screen.queryByText("Choose at least one day.")).not.toBeInTheDocument();
     expect(save()).toBeEnabled();
     expect(host.calls("save-settings")).toEqual([]);
+  });
+
+  it("refuses an answer limit of 0 or less inline, in whooper-settings set's words, and saves one above 0", async () => {
+    // schemas/settings.json gives [ask] timeout_minutes exclusiveMinimum 0, which whooper-settings set
+    // refuses 0 by with "settings.ask.timeout_minutes is not above 0".
+    const host = await openSettings();
+    for (const value of ["0", "-1"]) {
+      fireEvent.input(field("Stop an answer after"), value);
+      expect(screen.getByText("Enter a number above 0.")).toBeInTheDocument();
+      expect(field("Stop an answer after")).toHaveAttribute("aria-invalid", "true");
+      expect(save()).toBeDisabled();
+    }
+    fireEvent.input(field("Stop an answer after"), "0.5");
+    expect(screen.queryByText("Enter a number above 0.")).not.toBeInTheDocument();
+    expect(host.calls("save-settings")).toEqual([]);
+    fireEvent.click(save());
+    await screen.findByText(/^Saved\./);
+    expect(host.calls("save-settings")).toEqual([[JSON.stringify({ ask: { timeout_minutes: 0.5 } })]]);
+  });
+
+  it("words each bound a number setting may have as whooper-settings set refuses it", () => {
+    expect(boundsProblem(0, { minimum: 1 })).toBe("Enter 1 or more.");
+    expect(boundsProblem(0, { exclusiveMinimum: 0 })).toBe("Enter a number above 0.");
+    // The schema sets no maximum yet.
+    expect(boundsProblem(61, { maximum: 60 })).toBe("Enter 60 or less.");
+    expect(boundsProblem(60, { exclusiveMaximum: 60 })).toBe("Enter a number below 60.");
+    expect(boundsProblem(1, { minimum: 1, exclusiveMinimum: 0, maximum: 1, exclusiveMaximum: 2 })).toBeNull();
   });
 
   it("saves only the changed settings with save-settings, reads them again, and says when they apply", async () => {

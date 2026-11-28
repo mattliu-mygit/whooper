@@ -18,6 +18,32 @@ const LEAVES = leafFields(FIELDS);
 /** An emptied input: a number, text, or choice holding only spaces, which saves nothing. */
 const isEmpty = (field: LeafField, value: FormValue) => field.kind !== "list" && typeof value === "string" && value.trim() === "";
 
+/** The bounds JSON Schema gives a number, which the schema may set on any number setting. */
+export interface Bounds {
+  minimum?: number;
+  exclusiveMinimum?: number;
+  maximum?: number;
+  exclusiveMaximum?: number;
+}
+type SchemaNode = Bounds & { properties?: Record<string, SchemaNode> };
+
+/** The schema's bounds for the setting at path. settingFields keeps only minimum, so they come from the schema itself. */
+const boundsAt = (path: readonly string[]): Bounds => path.reduce<SchemaNode>((node, key) => node.properties?.[key] ?? {}, schema as SchemaNode);
+
+/**
+ * Why number breaks bounds, or null, in the words of the refusal whooper-settings set prints
+ * (check_schema in lib/whooper.py): where it says "is below 1", this asks for 1 or more, and where it
+ * says "is not above 0", for a number above 0. check_schema has no maximum or exclusiveMaximum yet;
+ * for those of 60, this asks for 60 or less, or for a number below 60.
+ */
+export function boundsProblem(number: number, bounds: Bounds): string | null {
+  if (bounds.minimum !== undefined && number < bounds.minimum) return `Enter ${bounds.minimum} or more.`;
+  if (bounds.exclusiveMinimum !== undefined && number <= bounds.exclusiveMinimum) return `Enter a number above ${bounds.exclusiveMinimum}.`;
+  if (bounds.maximum !== undefined && number > bounds.maximum) return `Enter ${bounds.maximum} or less.`;
+  if (bounds.exclusiveMaximum !== undefined && number >= bounds.exclusiveMaximum) return `Enter a number below ${bounds.exclusiveMaximum}.`;
+  return null;
+}
+
 /** A 24-hour time as whooper-run reads [schedule] start and end (strptime's %H:%M), in minutes. */
 function minutesOf(text: string): number | null {
   const match = /^(\d{1,2}):(\d{1,2})$/.exec(text.trim());
@@ -27,10 +53,10 @@ function minutesOf(text: string): number | null {
 
 /**
  * Why each field's value would be refused, by field key, before anything is sent: what the schema
- * says, and what whooper-settings set checks beyond it before it saves (read_schedule in
- * lib/whooper.py): start and end as 24-hour times with the end after the start, and at least one day.
- * whooper-settings set can't take a setting out of config.toml, so an emptied field that config.toml
- * gives a value is refused too.
+ * says, a number's bounds included, and what whooper-settings set checks beyond it before it saves
+ * (read_schedule in lib/whooper.py): start and end as 24-hour times with the end after the start,
+ * and at least one day. whooper-settings set can't take a setting out of config.toml, so an emptied
+ * field that config.toml gives a value is refused too.
  */
 export function problems(saved: Settings, value: (field: LeafField) => FormValue): Record<string, string> {
   const found: Record<string, string> = {};
@@ -42,9 +68,10 @@ export function problems(saved: Settings, value: (field: LeafField) => FormValue
     }
     if (field.kind === "integer" || field.kind === "number") {
       const number = settingValue(field, text) as number;
+      const outside = boundsProblem(number, boundsAt(field.path));
       if (!Number.isFinite(number)) found[fieldKey(field)] = "Enter a number.";
       else if (field.kind === "integer" && !Number.isInteger(number)) found[fieldKey(field)] = "Enter a whole number.";
-      else if (field.minimum !== null && number < field.minimum) found[fieldKey(field)] = `Enter ${field.minimum} or more.`;
+      else if (outside) found[fieldKey(field)] = outside;
     }
   }
   const schedule = (key: string) => LEAVES.find((field) => field.path.join(".") === `schedule.${key}`)!;
