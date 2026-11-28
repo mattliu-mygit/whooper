@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { matches } from "./Reviews";
 import { HOLD_MS } from "./store";
 import { renderWithFakeHost } from "./test/connect";
+import { usePageCss } from "./test/layout";
 
 // Solid applies updates in a microtask, so each event is followed by flush() to see its effect.
 const fireEvent = {
@@ -11,7 +12,7 @@ const fireEvent = {
   input: (element: Element, init: object) => (dom.input(element, init), flush()),
 };
 /** A key pressed where the focus is, or on the page when nothing has it. */
-const press = (key: string) => (dom.keyDown(document.activeElement ?? document.body, { key }), flush());
+const press = (key: string, init: object = {}) => (dom.keyDown(document.activeElement ?? document.body, { key, ...init }), flush());
 
 const RUN = "20310727T010246Z-101";
 const EARLIER = "20310726T120000Z-107";
@@ -294,5 +295,146 @@ describe("the page's tabs", () => {
     expect(matches("", "anything")).toBe(true);
     expect(matches("Widgets  #101", "refactor example-org/widgets #101 @alex")).toBe(true);
     expect(matches("widgets #102", "refactor example-org/widgets #101 @alex")).toBe(false);
+  });
+});
+
+describe("selecting rows to act on several reviews at once", () => {
+  const shown = (box: HTMLElement) => getComputedStyle(box).visibility !== "hidden";
+  const boxes = (element: HTMLElement) => [...element.querySelectorAll<HTMLInputElement>(".w-row-check")];
+  const bar = () => screen.queryByRole("region", { name: "Selected reviews" });
+  const barButtons = () => within(bar()!).getAllByRole("button").map((button) => button.textContent);
+  /** The run IDs of the rows whose checkbox is checked. */
+  const checkedRuns = (element: HTMLElement) => boxes(element).filter((box) => box.checked).map((box) => box.closest("[data-row]")!.getAttribute("data-row"));
+  const runs = (element: HTMLElement) => [...element.querySelectorAll("[data-row]")].map((row) => row.getAttribute("data-row")!);
+  const titleOf = (run: string) => document.querySelector(`[data-row="${run}"] .w-row-title`)!.textContent!;
+  const shiftClick = (element: Element) => (dom.click(element, { shiftKey: true }), flush());
+  const barButton = (name: string) => enabledIn(() => within(bar()!).getByRole("button", { name }));
+  const enabledIn = (find: () => HTMLElement) =>
+    waitFor(
+      () => {
+        expect(find()).toBeEnabled();
+        return find();
+      },
+      { timeout: 2_000 },
+    );
+
+  it("shows the checkboxes on the selected row, and on every row once one is checked; x, Shift-click, ⌘A, and Escape", async () => {
+    const removeCss = usePageCss();
+    try {
+      renderWithFakeHost({ openOnReady: "/" });
+      const reviews = await list();
+      const box = (i: number) => boxes(reviews)[i];
+      expect(boxes(reviews).filter((b) => shown(b))).toEqual([]);
+      press("j");
+      expect(box(0)).toBeVisible();
+      expect(box(1)).not.toBeVisible();
+      expect(bar()).toBeNull();
+
+      press("x");
+      expect(box(0)).toBeChecked();
+      expect(boxes(reviews).every((b) => shown(b))).toBe(true);
+      expect(bar()).toHaveTextContent("1 selected");
+      expect(barButtons()).toEqual(["Skip", "Remove from the list", "Retry", "Clear"]);
+
+      // Shift and a click checks every row from the last one checked to it, and unchecks the same way.
+      shiftClick(box(3));
+      expect(checkedRuns(reviews)).toEqual(runs(reviews).slice(0, 4));
+      expect(bar()).toHaveTextContent("4 selected");
+      shiftClick(box(1));
+      expect(checkedRuns(reviews)).toEqual(runs(reviews).slice(0, 1));
+
+      // A running review offers only Skip, so the bar offers only what every checked row offers.
+      fireEvent.click(box(5));
+      expect(within(reviews).getAllByRole("listitem")[5]).toHaveTextContent("Reviewing");
+      expect(barButtons()).toEqual(["Skip", "Clear"]);
+      press("x");
+      expect(box(5)).not.toBeChecked();
+      expect(bar()).toHaveTextContent("1 selected");
+
+      press("Escape");
+      expect(bar()).toBeNull();
+      expect(checkedRuns(reviews)).toEqual([]);
+      // The row x last acted on stays selected, so its checkbox alone shows.
+      expect(boxes(reviews).filter((b) => shown(b))).toEqual([box(5)]);
+
+      // ⌘A selects every row the search shows, but not while typing in it, where it selects the text.
+      fireEvent.input(search(), { target: { value: "widgets" } });
+      search().focus();
+      press("a", { metaKey: true });
+      expect(bar()).toBeNull();
+      search().blur();
+      press("a", { metaKey: true });
+      expect(bar()).toHaveTextContent("6 selected");
+      fireEvent.input(search(), { target: { value: "" } });
+      expect(checkedRuns(reviews)).toHaveLength(6);
+      expect(within(reviews).getAllByRole("listitem")).toHaveLength(7);
+      fireEvent.click(within(bar()!).getByRole("button", { name: "Clear" }));
+      expect(bar()).toBeNull();
+    } finally {
+      removeCss();
+    }
+  });
+
+  it("skips the selected reviews with one call each, with Undo, removes them to Past reviews, which restores them, and retries them", async () => {
+    const host = renderWithFakeHost({ openOnReady: "/" });
+    const reviews = await list();
+    const [first, second] = runs(reviews);
+    const select = (...ids: string[]) => {
+      for (const id of ids) fireEvent.click(reviews.querySelector(`[data-row="${id}"] .w-row-check`)!);
+    };
+    select(first, second);
+    fireEvent.click(await barButton("Skip"));
+    expect(await screen.findByRole("status")).toHaveTextContent("Skipped 2 reviews.");
+    expect(host.calls("skip")).toEqual([[first], [second]]);
+    expect(bar()).toBeNull();
+    await waitFor(() => expect(statusWords(reviews).filter((word) => word === "Done")).toHaveLength(2));
+    fireEvent.click(await enabledIn(() => within(screen.getByRole("status")).getByRole("button", { name: "Undo" })));
+    await waitFor(() => expect(statusWords(reviews).filter((word) => word === "Done")).toHaveLength(0));
+    expect(host.calls("skip").slice(2)).toEqual([[first, "--undo"], [second, "--undo"]]);
+
+    select(first, second);
+    fireEvent.click(await barButton("Remove from the list"));
+    expect(await screen.findByRole("status")).toHaveTextContent("Removed 2 reviews from the list.");
+    await waitFor(() => expect(runs(reviews)).not.toContain(first));
+    expect(runs(reviews)).not.toContain(second);
+    expect(host.calls("remove")).toEqual([[first], [second]]);
+
+    fireEvent.click(tab("Past reviews"));
+    const past = await list("Past reviews");
+    expect(statusWords(past)).toEqual(["Removed", "Removed", "Earlier review"]);
+    // An earlier review offers nothing to do, so the bar offers no action for all three.
+    press("a", { metaKey: true });
+    expect(bar()).toHaveTextContent("3 selected");
+    expect(bar()).toHaveTextContent("No action fits every selected review.");
+    press("Escape");
+    for (const id of [first, second]) fireEvent.click(past.querySelector(`[data-row="${id}"] .w-row-check`)!);
+    fireEvent.click(await barButton("Restore to the list"));
+    expect(await screen.findByRole("status")).toHaveTextContent("Restored 2 reviews to the list.");
+    await waitFor(() => expect(statusWords(past)).toEqual(["Earlier review"]));
+    expect(host.calls("remove").slice(2)).toEqual([[first, "--undo"], [second, "--undo"]]);
+
+    fireEvent.click(tab("Reviews"));
+    const again = await list();
+    for (const id of [first, second]) fireEvent.click(again.querySelector(`[data-row="${id}"] .w-row-check`)!);
+    fireEvent.click(await barButton("Retry"));
+    expect(await screen.findByRole("status")).toHaveTextContent("Queued another review of 2 pull requests.");
+    expect(host.calls("retry")).toEqual([[first], [second]]);
+  }, 30_000);
+
+  it("keeps the reviews whose call failed selected, beside why, and says what the others did", async () => {
+    const host = renderWithFakeHost({
+      openOnReady: "/",
+      refuse: (action, [run]) => (action === "retry" && run === refused ? "whooper-retry: gh can't reach GitHub" : null),
+    });
+    const reviews = await list();
+    const [first, refused] = runs(reviews);
+    for (const box of boxes(reviews).slice(0, 2)) fireEvent.click(box);
+    fireEvent.click(await barButton("Retry"));
+    // One retry that worked says what whooper-retry printed.
+    expect(await screen.findByRole("status")).toHaveTextContent(/^queued another review of example-org\/widgets#\d+/);
+    expect(screen.getByRole("alert")).toHaveTextContent(`“${titleOf(refused)}”: whooper-retry: gh can't reach GitHub`);
+    expect(checkedRuns(reviews)).toEqual([refused]);
+    expect(bar()).toHaveTextContent("1 selected");
+    expect(host.calls("retry")).toEqual([[first], [refused]]);
   });
 });

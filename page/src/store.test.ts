@@ -21,7 +21,9 @@ function storeWithHost() {
   const lastCall = (action: string) => posted.flatMap((m) => (m.type === "call" && m.action === action ? [m.id] : [])).at(-1)!;
   const held = () => (flush(), store.held());
   const asking = () => (flush(), store.asking());
-  return { store, send, lastCall, held, asking };
+  /** The arguments of each call of action. */
+  const calls = (action: string) => posted.flatMap((m) => (m.type === "call" && m.action === action ? [m.args] : []));
+  return { store, send, lastCall, held, asking, calls };
 }
 
 describe("the page store", () => {
@@ -63,6 +65,30 @@ describe("the page store", () => {
     expect((error as CallError).message).toBe(stderr.trim());
     expect((error as CallError).failure).toEqual({ stage: "preview", exit_code: 12, stderr });
     expect(held()).toBe(true);
+    vi.advanceTimersByTime(HOLD_MS);
+    expect(held()).toBe(false);
+  });
+
+  it("runs an action once per run, each after the last replied, holding throughout, and reads the status once at the end", async () => {
+    const { store, send, lastCall, held, calls } = storeWithHost();
+    // A reply settles in a few microtasks.
+    const settle = async () => {
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+    };
+    const each = store.actOnEach("remove", ["r1", "r2"], ["--undo"]);
+    expect(calls("remove")).toEqual([["r1", "--undo"]]);
+    expect(held()).toBe(true);
+    send({ type: "result", reply_to: lastCall("remove"), json: "unmarked r1 as removed\n" });
+    await settle();
+    expect(calls("remove")).toEqual([["r1", "--undo"], ["r2", "--undo"]]);
+    expect(calls("status")).toEqual([]);
+    expect(held()).toBe(true);
+    send({ type: "error", reply_to: lastCall("remove"), message: "whooper-remove: no run r2 in the state folder's runs" });
+    expect(await each).toEqual([
+      { id: "r1", printed: "unmarked r1 as removed" },
+      { id: "r2", error: "whooper-remove: no run r2 in the state folder's runs" },
+    ]);
+    expect(calls("status")).toEqual([[]]);
     vi.advanceTimersByTime(HOLD_MS);
     expect(held()).toBe(false);
   });

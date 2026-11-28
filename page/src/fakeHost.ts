@@ -24,6 +24,9 @@ export interface FakeHostOptions {
   shown?: Record<string, Partial<Shown>>;
   /** What whooper-settings get prints, in place of the fixture's settings. */
   settings?: Record<string, unknown>;
+  /** The error a call of action with args fails with instead of running, as whooper-retry's when gh
+   * can't reach GitHub; null runs it. */
+  refuse?: (action: string, args: string[]) => string | null;
 }
 
 /** The actions prompting-time-plugin.json declares. */
@@ -306,6 +309,8 @@ export function createFakeHost(send: (message: HostMessage) => void, options: Fa
 
   async function run(action: string, args: string[]): Promise<unknown> {
     if (!DECLARED.has(action)) throw new Error(`Whooper declares no ${action} action.`);
+    const refusal = options.refuse?.(action, args);
+    if (refusal) throw new Error(refusal);
     const [runId, ...rest] = args;
     switch (action) {
       case "status":

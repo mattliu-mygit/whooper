@@ -701,6 +701,50 @@ ul {
   font-size: var(--s-size-sm);
 }
 
+/* A row's checkbox keeps its place while hidden, so the rows don't move when one shows. It shows on
+   the selected row, and on every row once one is checked. */
+.w-row-check {
+  flex: none;
+  margin: 0 0 0 var(--s-space-12);
+  accent-color: var(--s-primary);
+  visibility: hidden;
+}
+
+.w-row[data-selected] .w-row-check,
+.w-rows[data-checking] .w-row-check {
+  visibility: visible;
+}
+
+/* How many rows are checked, the actions that fit them all, and Clear; it stays in view while the list
+   scrolls. */
+.w-bulk {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-space-8);
+  padding: var(--s-space-8) var(--s-space-12);
+  border: var(--s-border-thin) var(--s-border-style) var(--s-border-interactive);
+  border-radius: var(--s-radius-sm);
+  background: var(--s-surface);
+  font-size: var(--s-size-sm);
+}
+
+.w-bulk-count {
+  font-weight: var(--s-weight-medium);
+}
+
+.w-bulk-none,
+.w-bulk-keys {
+  color: var(--s-text-muted);
+}
+
+.w-error-lines {
+  white-space: pre-line;
+}
+
 .w-row .pt-icon-button {
   margin-inline-end: var(--s-space-8);
   border-color: transparent;

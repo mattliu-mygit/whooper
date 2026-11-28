@@ -457,7 +457,12 @@ retries it. Past reviews, at `/past`, lists the reviews you removed, which its �
 earlier reviews of a pull request that a newer one replaced. Causes, at `/causes`, lists each cause
 that stops every review with the reviews it holds back. In Reviews and Past reviews, j and k select
 the next and previous row, around the ends, as they step through a walkthrough, and Enter opens it;
-Escape closes any open menu. While a review shows, the tabs fold to a narrow rail, as Prompting
+Escape closes any open menu. To act on several reviews at once, x selects the selected row's
+checkbox, which shows on that row and on every row once one is selected, Shift and a click selects
+every row from the last one you selected, ⌘A selects every row the search and chip show, and Escape
+clears them. A bar then says how many are selected and offers each action every one of them offers,
+which runs once per review, one after another; Skip and Remove offer Undo, and the reviews whose
+call failed stay selected, beside why. While a review shows, the tabs fold to a narrow rail, as Prompting
 Time's All work folds while a plugin shows: » and "Whooper · 2 waiting on you", or only "Whooper"
 when nothing waits on you, turned 90°, so only the walkthrough's own navigator stays beside the
 review. A click on the rail unfolds the tabs with the review still open, « at their top folds them

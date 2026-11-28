@@ -1,8 +1,8 @@
 import { createSignal, For, onSettled, Show, untrack } from "solid-js";
-import { EllipsisIcon, Menu, SearchIcon, StatusDot, type MenuItem } from "@prompting-time/ui";
+import { Button, EllipsisIcon, Menu, SearchIcon, StatusDot, type MenuItem } from "@prompting-time/ui";
 import manifest from "../../prompting-time-plugin.json";
 import type { Dot, StatusItem, StatusReview } from "./protocol";
-import type { PageStore } from "./store";
+import type { Outcome, PageStore } from "./store";
 import { TabHeader } from "./TabHeader";
 import { shortDate } from "./text";
 
@@ -37,8 +37,35 @@ interface Row {
   word: string;
   /** What the search looks in: the title, the repo, the PR number, and the author. */
   text: string;
-  menu: { value: "skip" | "unskip" | "remove" | "restore" | "retry"; label: string }[];
+  menu: RowAction[];
 }
+
+type RowAction = "skip" | "unskip" | "remove" | "restore" | "retry";
+
+/** What each row action calls, once per review, and how its notice words what it did: `what` is the
+ * review's quoted title, or "3 reviews". Skip and Remove offer Undo, which is Undo skip and Restore. */
+const ACTIONS: Record<
+  RowAction,
+  { label: string; command: "skip" | "remove" | "retry"; flags: string[]; done(what: string, outcomes: Outcome[]): string; undo?: RowAction }
+> = {
+  skip: { label: "Skip", command: "skip", flags: [], done: (what) => `Skipped ${what}.`, undo: "unskip" },
+  unskip: {
+    label: "Undo skip",
+    command: "skip",
+    flags: ["--undo"],
+    done: (what, outcomes) => `${what} ${outcomes.length === 1 ? "is" : "are"} no longer skipped.`,
+  },
+  remove: { label: "Remove from the list", command: "remove", flags: [], done: (what) => `Removed ${what} from the list.`, undo: "restore" },
+  restore: { label: "Restore to the list", command: "remove", flags: ["--undo"], done: (what) => `Restored ${what} to the list.` },
+  // One retry says what whooper-retry printed: which PR at which head the next round reviews.
+  retry: {
+    label: "Retry",
+    command: "retry",
+    flags: [],
+    done: (_, outcomes) => (outcomes.length === 1 ? outcomes[0].printed! : `Queued another review of ${outcomes.length} pull requests.`),
+  },
+};
+const ORDER = Object.keys(ACTIONS) as RowAction[];
 
 /** Whether every word of query is in text, ignoring case; "#133" and "133" both find PR 133. */
 export function matches(query: string, text: string): boolean {
@@ -70,11 +97,11 @@ export function ReviewsTab(props: { store: PageStore; filters: ListFilters }) {
     const review = reviewOf(item.id);
     const group = GROUPS.find((g) => g.id === item.group);
     const actions = item.actions ?? [];
-    const menu: Row["menu"] = [];
-    if (actions.includes("skip")) menu.push({ value: "skip", label: "Skip" });
-    else if (review?.skipped_by_user) menu.push({ value: "unskip", label: "Undo skip" });
-    if (actions.includes("remove")) menu.push({ value: "remove", label: "Remove from the list" });
-    if (actions.includes("retry")) menu.push({ value: "retry", label: "Retry" });
+    const menu: RowAction[] = [];
+    if (actions.includes("skip")) menu.push("skip");
+    else if (review?.skipped_by_user) menu.push("unskip");
+    if (actions.includes("remove")) menu.push("remove");
+    if (actions.includes("retry")) menu.push("retry");
     return {
       id: item.id,
       route: item.route,
@@ -160,7 +187,7 @@ export function PastTab(props: { store: PageStore; filters: ListFilters }) {
       dot: "idle",
       word: review.removed_by_user ? "Removed" : newer ? "Earlier review" : "Older",
       text: searchText(title, detail, review),
-      menu: review.removed_by_user ? [{ value: "restore", label: "Restore to the list" }] : [],
+      menu: review.removed_by_user ? ["restore"] : [],
     };
   };
   const rows = () => {
@@ -233,8 +260,16 @@ function SearchBox(props: { label: string; value: string; onInput: (value: strin
   );
 }
 
+/** Whether the key goes to text the user types in; a checkbox takes no text, so the list's keys work there. */
 const typing = (event: KeyboardEvent) =>
-  event.target instanceof HTMLElement && (event.target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName));
+  event.target instanceof HTMLElement &&
+  (event.target.isContentEditable ||
+    ["TEXTAREA", "SELECT"].includes(event.target.tagName) ||
+    (event.target instanceof HTMLInputElement && event.target.type !== "checkbox"));
+
+/** Whether a menu or dialog is open, which takes the keys, Escape among them, for itself. */
+const covered = () =>
+  [...document.querySelectorAll('[role="dialog"], [role="alertdialog"], [role="menu"]:not([hidden])')].some((element) => element.checkVisibility?.() ?? true);
 
 /**
  * The rows, and what the last row action did, with Undo for a skip or a removal. j and k select the
@@ -242,19 +277,73 @@ const typing = (event: KeyboardEvent) =>
  * and around, and move the focus to it; Enter opens it, also once the focus left the rows for the
  * page itself, as after Back to the list. Not while typing, with a modifier, or while a menu or dialog
  * is open, where Escape closes it.
+ *
+ * Each row has a checkbox, shown on the selected row and on every row once one is checked: x checks or
+ * unchecks the selected row, Shift and a click checks or unchecks every row from the last one checked
+ * or unchecked, ⌘A checks every row the search and group show, and Escape unchecks them all. A bar
+ * then says how many are selected and offers each action every checked row's ⋯ menu offers, which
+ * runs once per review, one after another, as the row's menu runs it for one. The bar counts and acts
+ * on only the checked rows the list shows; a checked row the search hides stays checked, unseen,
+ * until an action or Escape. The rows whose call failed stay checked, beside why.
  */
 function RowList(props: { store: PageStore; label: string; rows: Row[]; selected: string | null; onSelected(id: string): void; empty: string }) {
   const store = props.store;
   let list: HTMLUListElement | undefined;
   const buttonOf = (id: string) => list?.querySelector<HTMLButtonElement>(`[data-row="${CSS.escape(id)}"] .w-row-open`) ?? null;
 
+  const [checked, setChecked] = createSignal<ReadonlySet<string>>(new Set());
+  // The row last checked or unchecked, where a Shift-click's range starts.
+  let anchor: string | null = null;
+  const checkedRows = () => props.rows.filter((row) => checked().has(row.id));
+  const bulkActions = () => {
+    const rows = checkedRows();
+    return ORDER.filter((action) => rows.every((row) => row.menu.includes(action)));
+  };
+
+  /** Checks or unchecks row, or with range every row from the anchor to it, and selects it. */
+  function check(row: Row, on: boolean, range: boolean) {
+    const rows = props.rows;
+    const to = rows.findIndex((r) => r.id === row.id);
+    const from = range && anchor !== null ? rows.findIndex((r) => r.id === anchor) : -1;
+    const ids = from < 0 ? [row.id] : rows.slice(Math.min(from, to), Math.max(from, to) + 1).map((r) => r.id);
+    const next = new Set(checked());
+    for (const id of ids) {
+      if (on) next.add(id);
+      else next.delete(id);
+    }
+    setChecked(next);
+    anchor = row.id;
+    props.onSelected(row.id);
+  }
+
   onSettled(() => {
     const keys = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || typing(event) || event.metaKey || event.ctrlKey || event.altKey) return;
-      if (event.key !== "j" && event.key !== "k" && event.key !== "Enter") return;
-      if ([...document.querySelectorAll('[role="dialog"], [role="alertdialog"], [role="menu"]:not([hidden])')].some((element) => element.checkVisibility?.() ?? true)) return;
+      if (event.defaultPrevented || typing(event) || event.altKey) return;
+      const all = (event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === "a";
+      if (!all && (event.metaKey || event.ctrlKey)) return;
+      if (!all && !["j", "k", "Enter", "x", "Escape"].includes(event.key)) return;
+      if (covered()) return;
       const rows = untrack(() => props.rows);
       const now = rows.findIndex((row) => row.id === untrack(() => props.selected));
+      if (all) {
+        event.preventDefault();
+        setChecked(new Set(rows.map((row) => row.id)));
+        anchor = null;
+        return;
+      }
+      if (event.key === "Escape") {
+        if (untrack(checked).size === 0) return;
+        event.preventDefault();
+        setChecked(new Set<string>());
+        anchor = null;
+        return;
+      }
+      if (event.key === "x") {
+        if (now < 0) return;
+        event.preventDefault();
+        check(rows[now], !untrack(checked).has(rows[now].id), false);
+        return;
+      }
       if (event.key === "Enter") {
         // A focused button, a selected row's among them, takes Enter itself.
         if (now < 0 || (document.activeElement && document.activeElement !== document.body)) return;
@@ -274,51 +363,71 @@ function RowList(props: { store: PageStore; label: string; rows: Row[]; selected
     document.addEventListener("keydown", keys);
     return () => document.removeEventListener("keydown", keys);
   });
-  const [notice, setNotice] = createSignal<{ text: string; undo?: () => Promise<string> } | null>(null);
+  const [notice, setNotice] = createSignal<{ text: string; undo?: () => void } | null>(null);
   const [error, setError] = createSignal<string | null>(null);
 
-  async function run(task: () => Promise<string>, after: (printed: string) => { text: string; undo?: () => Promise<string> } | null) {
+  /** Runs action once for each row, and says what it did, with Undo for a skip or a removal, unless it
+   * is that Undo, and which calls failed and why; returns the rows that failed. */
+  async function apply(rows: Row[], action: RowAction, say = true): Promise<Row[]> {
+    const { command, flags, done, undo } = ACTIONS[action];
     setError(null);
     setNotice(null);
-    try {
-      setNotice(after(await task()));
-    } catch (e) {
-      setError((e as Error).message);
+    const outcomes = await store.actOnEach(command, rows.map((row) => row.id), flags);
+    const worked = rows.filter((_, i) => outcomes[i].error === undefined);
+    const failed = rows.filter((_, i) => outcomes[i].error !== undefined);
+    if (say && worked.length > 0) {
+      const what = worked.length === 1 ? quoted(worked[0].title) : `${worked.length} reviews`;
+      const text = done(what, outcomes.filter((outcome) => outcome.error === undefined));
+      setNotice({ text, undo: undo && (() => void apply(worked, undo, false)) });
     }
+    // One review's failure reads as before: the command's own words.
+    if (failed.length > 0)
+      setError(rows.length === 1 ? outcomes[0].error! : failed.map((row) => `${quoted(row.title)}: ${outcomes[rows.indexOf(row)].error}`).join("\n"));
+    return failed;
   }
 
-  function act(row: Row, action: string) {
-    const name = quoted(row.title);
-    switch (action) {
-      case "open":
-        return store.open(row.route);
-      case "skip":
-        return run(() => store.skip(false, row.id), () => ({ text: `Skipped ${name}.`, undo: () => store.skip(true, row.id) }));
-      case "unskip":
-        return run(() => store.skip(true, row.id), () => ({ text: `${name} is no longer skipped.` }));
-      case "remove":
-        return run(() => store.remove(false, row.id), () => ({ text: `Removed ${name} from the list.`, undo: () => store.remove(true, row.id) }));
-      case "restore":
-        return run(() => store.remove(true, row.id), () => ({ text: `Restored ${name} to the list.` }));
-      case "retry":
-        return run(() => store.retry(row.id), (printed) => ({ text: printed }));
-    }
+  async function applyChecked(action: RowAction) {
+    const failed = await apply(checkedRows(), action);
+    setChecked(new Set(failed.map((row) => row.id)));
+    anchor = null;
   }
 
   const menuItems = (row: Row): MenuItem[] => [
     { value: "open", label: "Open" },
-    ...row.menu.map((item) => ({ ...item, disabled: store.held() })),
+    ...row.menu.map((action) => ({ value: action, label: ACTIONS[action].label, disabled: store.held() })),
   ];
 
   return (
     <>
+      <Show when={checkedRows().length > 0}>
+        <div class="w-bulk" role="region" aria-label="Selected reviews">
+          <span class="w-bulk-count">{checkedRows().length} selected</span>
+          <For each={bulkActions()} fallback={<span class="w-bulk-none">No action fits every selected review.</span>}>
+            {(action) => (
+              <Button disabled={store.held()} onClick={() => void applyChecked(action)}>
+                {ACTIONS[action].label}
+              </Button>
+            )}
+          </For>
+          <span class="w-spacer" />
+          <span class="w-bulk-keys">x selects · ⌘A selects all · Esc clears</span>
+          <Button
+            onClick={() => {
+              setChecked(new Set<string>());
+              anchor = null;
+            }}
+          >
+            Clear
+          </Button>
+        </div>
+      </Show>
       <Show when={notice()}>
         {(current) => (
           <div class="w-notice" role="status">
             <span>{current().text}</span>
             <Show when={current().undo}>
               {(undo) => (
-                <button type="button" class="w-link" disabled={store.held()} onClick={() => run(undo(), () => null)}>
+                <button type="button" class="w-link" disabled={store.held()} onClick={() => undo()()}>
                   Undo
                 </button>
               )}
@@ -328,17 +437,32 @@ function RowList(props: { store: PageStore; label: string; rows: Row[]; selected
       </Show>
       <Show when={error()}>
         {(text) => (
-          <p class="w-error" role="alert">
+          <p class="w-error w-error-lines" role="alert">
             {text()}
           </p>
         )}
       </Show>
       <Show when={props.rows.length > 0} fallback={<p class="w-empty">{props.empty}</p>}>
-        <ul class="w-rows" aria-label={props.label} ref={(element: HTMLUListElement) => { list = element; }}>
+        <ul
+          class="w-rows"
+          aria-label={props.label}
+          data-checking={checkedRows().length > 0 ? "" : undefined}
+          ref={(element: HTMLUListElement) => {
+            list = element;
+          }}
+        >
           {/* Keyed by run, so a new read of the status keeps an open ⋯ menu open. */}
           <For each={props.rows} keyed={(row) => row.id}>
             {(row) => (
               <li class="w-row" data-row={row().id} data-selected={props.selected === row().id ? "" : undefined}>
+                <input
+                  type="checkbox"
+                  class="w-row-check"
+                  aria-label={`Select ${row().title}`}
+                  checked={checked().has(row().id)}
+                  onFocus={() => props.onSelected(row().id)}
+                  onClick={(e) => check(row(), e.currentTarget.checked, e.shiftKey)}
+                />
                 <button type="button" class="w-row-open" onFocus={() => props.onSelected(row().id)} onClick={() => store.open(row().route)}>
                   <span class="w-row-status">
                     <StatusDot status={row().dot} />
@@ -347,7 +471,12 @@ function RowList(props: { store: PageStore; label: string; rows: Row[]; selected
                   <span class="w-row-title">{row().title}</span>
                   <span class="w-row-detail">{row().detail}</span>
                 </button>
-                <Menu label={`Actions for ${row().title}`} icon={<EllipsisIcon />} items={menuItems(row())} onSelect={(value) => act(row(), value)} />
+                <Menu
+                  label={`Actions for ${row().title}`}
+                  icon={<EllipsisIcon />}
+                  items={menuItems(row())}
+                  onSelect={(value) => (value === "open" ? store.open(row().route) : void apply([row()], value as RowAction))}
+                />
               </li>
             )}
           </For>

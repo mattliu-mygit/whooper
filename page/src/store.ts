@@ -79,6 +79,9 @@ export interface PageState {
 
 export type PageStore = ReturnType<typeof createPageStore>;
 
+/** What one call of an action printed for run `id`, or the host's error message when it failed. */
+export type Outcome = { id: string; printed: string; error?: undefined } | { id: string; printed?: undefined; error: string };
+
 /** The review whose findings the diff draws, from what whooper-show printed, or null for a review that
  * runs, waits, or failed, which has none. */
 function reviewOf(shown: Shown): Review | null {
@@ -327,6 +330,23 @@ export function createPageStore(link: HostLink) {
     return printedText(printed);
   }
 
+  /** Runs action once for each run in ids, one after another, holding the action buttons until the last
+   * reply, then reads the status once; resolves with what each call printed or why it failed, in order. */
+  async function actOnEach(action: "skip" | "remove" | "retry", ids: readonly string[], flags: string[] = []): Promise<Outcome[]> {
+    const outcomes = await holding(async () => {
+      const done: Outcome[] = [];
+      for (const id of ids)
+        try {
+          done.push({ id, printed: printedText(await call(action, [id, ...flags])) });
+        } catch (e) {
+          done.push({ id, error: message(e) });
+        }
+      return done;
+    });
+    void readStatus();
+    return outcomes;
+  }
+
   // A round can take minutes, since it reviews what it finds, and opens nothing in Prompting Time, so
   // it holds no button but the Poll now buttons, which say so.
   const [rounds, setRounds] = createSignal(0);
@@ -384,10 +404,12 @@ export function createPageStore(link: HostLink) {
       });
       return answer;
     },
-    /** Skip, Remove, and Retry act on the open review, or on run `id`, as a list row's menu does. */
-    skip: (undo = false, id = runId()) => act("skip", [id, ...(undo ? ["--undo"] : [])]),
-    remove: (undo = false, id = runId()) => act("remove", [id, ...(undo ? ["--undo"] : [])]),
-    retry: (id = runId()) => act("retry", [id]),
+    /** Skip, Remove, and Retry act on the open review. */
+    skip: (undo = false) => act("skip", [runId(), ...(undo ? ["--undo"] : [])]),
+    remove: (undo = false) => act("remove", [runId(), ...(undo ? ["--undo"] : [])]),
+    retry: () => act("retry", [runId()]),
+    /** Skip, Remove, or Retry for each of the runs a list checked, or the one its row's ⋯ menu acts on. */
+    actOnEach,
     /** The settings whooper-settings get prints, with Whooper's defaults for what config.toml leaves out. */
     readSettings: async () => (await call("get-settings")) as Record<string, unknown>,
     /** Saves changed settings with whooper-settings set, which checks them and rejects with its reason. */
