@@ -578,7 +578,7 @@ class ReadAsksTest(unittest.TestCase):
 REPOS = {"example-org/example-repo": {}, "sample-org/plain-repo": {}}
 
 
-def work_item(kind="recheck", head="head3", number=12):
+def work_item(kind="first_review", head="head3", number=12):
     return {"kind": kind, "repo": "example-org/example-repo", "pr": number, "head_sha": head, "base_ref": "master",
             "source": "reviewed_by_user", "slack": None, "reason": "r"}
 
@@ -608,7 +608,7 @@ class SelectWorkTest(unittest.TestCase):
         finding its head moved to head."""
         slack = {"ts": "1943194837.000100", "tagged_user": True,
                  "permalink": "https://example.slack.com/archives/C0000000001/p1943194837000100"}
-        return {**work_item(kind="first_review", head=head), "source": "slack_ask", "slack": slack,
+        return {**work_item(head=head), "source": "slack_ask", "slack": slack,
                 "reason": "Alex asked for a review."}
 
     def make_run(self, run_id, item, removed=False, skipped=False):
@@ -644,33 +644,69 @@ class SelectWorkTest(unittest.TestCase):
         ]
         for status, failures, want in cases:
             with self.subTest(f"{status} {failures}"):
-                self.record("head3.recheck.json", status, failures)
+                self.record("head3.first_review.json", status, failures)
                 self.assertEqual(self.selected(work_item()), want)
 
     def test_record_for_another_head_or_kind_does_not_match(self):
-        self.record("head2.recheck.json", "done")
-        self.record("head3.first_review.json", "done")
-        self.record("head3.recheck.json", "done", pr_dir="example-org-example-repo-1")
+        self.record("head2.first_review.json", "done")
+        self.record("head3.recheck.json", "done")
+        self.record("head3.first_review.json", "done", pr_dir="example-org-example-repo-1")
         self.assertTrue(self.selected(work_item()))
 
-    def test_three_rechecks_today_stop_a_fourth(self):
+    def test_an_unreadable_record_counts_as_none(self):
+        # Such as one cut short by a crash before write_record wrote through a temporary file. The review
+        # writes the record again when it starts.
+        for text in ["", '{"status": "do', "[]"]:
+            with self.subTest(text):
+                path = self.prs / "example-org-example-repo-12" / "head3.first_review.json"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+                self.assertEqual(select_work([work_item()], self.prs, self.now, REPOS), ([work_item()], [], []))
+                # An unreadable record of another head does not count toward a recheck-list item's daily limit.
+                path.rename(path.with_name("head2.first_review.json"))
+                for head in ["head0", "head1"]:
+                    self.record(f"{head}.first_review.json", "stale", started_at="2031-08-01T16:00:00Z")
+                listed = self.listed_again()
+                self.assertEqual(select_work([], self.prs, self.now, REPOS, [listed]), ([listed], [], []))
+                shutil.rmtree(self.prs)
+
+    def test_a_recheck_is_dropped_until_whooper_review_rechecks(self):
+        # whooper-review reviews first reviews only, so a re-check the poll finds would fail every round.
+        recheck = {**work_item(kind="recheck"), "source": "reviewed_by_user"}
+        why = "whooper-review does not re-check a PR yet"
+        self.assertEqual(select_work([recheck], self.prs, self.now, REPOS), ([], [(recheck, why)], []))
+        # Not even a retry lets it through.
+        self.record("head3.recheck.json", "retry")
+        self.assertEqual(select_work([recheck], self.prs, self.now, REPOS), ([], [(recheck, why)], []))
+        # A re-check on the recheck list, as a round that waited left before this rule, leaves the list.
+        self.assertEqual(select_work([], self.prs, self.now, REPOS, [recheck]), ([], [(recheck, why)], [recheck]))
+        # The poll listing the PR as a re-check does not finish the PR's first review on the list, such as
+        # for new commits since the review whooper-submit posted, which then still gets its review.
+        listed = self.listed_again()
+        self.assertEqual(select_work([recheck], self.prs, self.now, REPOS, [listed]),
+                         ([listed], [(recheck, why)], []))
+
+    def test_three_reviews_today_hold_a_fourth_recheck_list_item(self):
         for head in ["head0", "head1", "head2"]:
-            self.record(f"{head}.recheck.json", "done", started_at="2031-08-01T16:00:00Z")
-        self.assertFalse(self.selected(work_item()))
-        self.assertTrue(self.selected(work_item(kind="first_review")))
-
-    def test_failed_third_recheck_today_is_retried(self):
-        self.record("head1.recheck.json", "done", started_at="2031-08-01T16:00:00Z")
-        self.record("head2.recheck.json", "done", started_at="2031-08-01T16:20:00Z")
-        self.record("head3.recheck.json", "failed", failures=1, started_at="2031-08-01T16:40:00Z")
+            self.record(f"{head}.first_review.json", "done", started_at="2031-08-01T16:00:00Z")
+        self.assertEqual(select_work([], self.prs, self.now, REPOS, [self.listed_again()])[0], [])
+        # The poll's own first reviews have no daily limit.
         self.assertTrue(self.selected(work_item()))
 
-    def test_rechecks_count_by_local_day(self):
-        self.record("head1.recheck.json", "done", started_at="2031-08-01T16:00:00Z")
-        self.record("head2.recheck.json", "done", started_at="2031-08-01T16:30:00Z")
+    def test_failed_third_review_today_is_retried(self):
+        self.record("head1.first_review.json", "done", started_at="2031-08-01T16:00:00Z")
+        self.record("head2.first_review.json", "done", started_at="2031-08-01T16:20:00Z")
+        self.record("head3.first_review.json", "failed", failures=1, started_at="2031-08-01T16:40:00Z")
+        listed = self.listed_again()
+        self.assertEqual(select_work([], self.prs, self.now, REPOS, [listed])[0], [listed])
+
+    def test_reviews_count_by_local_day(self):
+        self.record("head1.first_review.json", "done", started_at="2031-08-01T16:00:00Z")
+        self.record("head2.first_review.json", "done", started_at="2031-08-01T16:30:00Z")
         # 23:30 on 2031-07-31 at UTC-7, though 2031-08-01 in UTC.
-        self.record("head0.recheck.json", "done", started_at="2031-08-01T06:30:00Z")
-        self.assertTrue(self.selected(work_item()))
+        self.record("head0.first_review.json", "done", started_at="2031-08-01T06:30:00Z")
+        listed = self.listed_again()
+        self.assertEqual(select_work([], self.prs, self.now, REPOS, [listed])[0], [listed])
 
     def test_a_recheck_list_item_is_work_until_a_review_at_its_head_is_done_or_gives_up(self):
         listed = self.listed_again()
@@ -692,7 +728,7 @@ class SelectWorkTest(unittest.TestCase):
 
     def test_the_poll_listing_the_pr_finishes_its_recheck_list_item(self):
         # Such as a new ask for the PR, which the poll lists at the head the PR has now.
-        polled, listed = work_item(kind="first_review", head="head4"), self.listed_again()
+        polled, listed = work_item(head="head4"), self.listed_again()
         self.assertEqual(select_work([polled], self.prs, self.now, REPOS, [listed]), ([polled], [], [listed]))
 
     def test_the_recheck_limit_holds_a_recheck_list_item_for_the_next_day(self):
@@ -736,11 +772,9 @@ class SelectWorkTest(unittest.TestCase):
             # poll reads again, as after an edit, is the same ask.
             (standing, False),
             (listed, False),
-            # A new Slack post asks again, the PR has new commits, or the user, who has reviewed it since,
-            # is requested again.
+            # A new Slack post asks again, or the PR has new commits.
             (new_ask, True),
             ({**standing, "head_sha": "head4"}, True),
-            ({**standing, "kind": "recheck"}, True),
         ]
         for item, want in cases:
             with self.subTest(item=item):
@@ -768,8 +802,8 @@ class SelectWorkTest(unittest.TestCase):
         skipped = self.make_run("20310801T150000Z-12", listed, skipped=True)
         standing = {**work_item(kind="first_review"), "source": "github_request"}
         new_ask = {**listed, "slack": {**listed["slack"], "ts": "1943198437.000200"}}
-        # Unlike a removal, a new request holds back too: new commits, a new Slack post, or another kind.
-        for item in [standing, listed, new_ask, {**standing, "head_sha": "head4"}, {**standing, "kind": "recheck"}]:
+        # Unlike a removal, a new request holds back too: new commits or a new Slack post.
+        for item in [standing, listed, new_ask, {**standing, "head_sha": "head4"}]:
             with self.subTest(item=item):
                 self.assertEqual(select_work([item], self.prs, self.now, REPOS, runs_dir=self.runs),
                                  ([], [(item, "skipped by the user")], []))

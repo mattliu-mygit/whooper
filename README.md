@@ -566,7 +566,8 @@ posts only. Only PRs in the configured GitHub orgs count. Each item is one PR an
 - **recheck**: the user is requested by name again after reviewing, a post that mentions the user
   asks about a PR the user already reviewed, or the user reviewed the PR without approving, every
   thread the user started has an author reply or is resolved, and the head moved or the author
-  replied since the user's latest review.
+  replied since the user's latest review. whooper-review reviews first reviews only, so for now
+  whooper-select drops each re-check, and a re-check does not take the PR off the recheck list.
 
 When whooper-post or whooper-submit finds that a PR's head moved since its review, it posts
 nothing and puts the PR on the recheck list. The next round's whooper-select adds it to the work at
@@ -812,13 +813,14 @@ the recheck list while the commands above write to it.
   without findings. whooper-classify writes done with the run's `approval`, whooper-post and
   whooper-submit write stale when the head moved, and whooper-retry writes retry, keeping the
   count, at the head the PR has now.
-  whooper-select drops an item in a repo the config has no `[repos."<owner>/<repo>"]` table for,
-  an item whose record is done or running or has failed 3 times, a re-check of a PR that already
-  has 3 re-check records for other heads started today (local time), an item that asks again for
-  a review you removed ([Remove a review](#remove-a-review)), and any item of a PR whose newest review
-  you skipped ([Skip a review](#skip-a-review)). A recheck-list item counts under that
-  limit too, by the records of its own kind; dropped for it, the item stays on the list for the next
-  day. Of these, only the missing table drops an item whose record says retry.
+  whooper-select drops a re-check, which whooper-review cannot review yet, an item in a repo the
+  config has no `[repos."<owner>/<repo>"]` table for, an item whose record is done or running or has
+  failed 3 times, a recheck-list item of a PR that already has 3 records of its kind for other heads
+  started today (local time), an item that asks again for a review you removed
+  ([Remove a review](#remove-a-review)), and any item of a PR whose newest review you skipped
+  ([Skip a review](#skip-a-review)). A recheck-list item dropped for the daily limit stays on the
+  list for the next day. Of these, only a re-check and the missing table drop an item whose record
+  says retry. A record that cannot be read counts as none.
 - `rechecks/<owner>-<repo>-<pr>.json`: the recheck list: a PR whose head whooper-post or
   whooper-submit found moved since its review, as the work item for the new head, or whose review
   you asked for again with whooper-retry, as the run's work item at the head the PR has now, or whose

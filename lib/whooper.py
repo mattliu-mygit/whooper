@@ -3018,13 +3018,13 @@ def select_work(items, prs_dir, now, repos, rechecks=(), runs_dir=None):
     unreviewable, and returns the recheck-list items that no longer wait, for the caller to delete.
 
     items are the newest poll's, and rechecks the recheck list's (mark_new_commits). prs_dir holds the
-    records write_record writes, runs_dir the review runs, and repos is the config's [repos] table. An
-    item is dropped when repos has no table for its repo, since a review needs the repo's settings, or
-    when its record is running or done or has failed MAX_FAILURES times. A re-check is dropped when its
-    PR already has MAX_RECHECKS_PER_DAY re-check records for other heads started on now's local day. A
-    record that says retry, which whooper-retry writes when the user asks for another review (retry),
-    lets its item through whatever earlier reviews at its head did, and the daily limit does not hold
-    it either.
+    records write_record writes, runs_dir the review runs, and repos is the config's [repos] table. A
+    re-check is dropped, and leaves the recheck list, since whooper-review reviews first reviews only and
+    would fail it every round. An item is dropped when repos has no table for its repo, since a review
+    needs the repo's settings, or when its record is running or done or has failed MAX_FAILURES times. A
+    record that cannot be read counts as none, and the review writes it again when it starts. A record
+    that says retry, which whooper-retry writes when the user asks for another review (retry), lets its
+    item through whatever earlier reviews at its head did, and the daily limit does not hold it either.
 
     Whooper does not retry on its own a review the user removed (remove_review): while the newest run
     of an item's PR in runs_dir is marked removed, an item that asks for the same review again
@@ -3032,23 +3032,29 @@ def select_work(items, prs_dir, now, repos, rechecks=(), runs_dir=None):
     skipped (skip_review), every item of the PR is dropped, unless its record says retry, and a
     recheck-list item stays on the list, so the PR's review comes back once the user undoes the skip.
 
-    The limit holds a recheck-list item too, counting the records of the item's own kind, and an item
-    it drops stays on the list for the next day. A recheck-list item no longer waits once items list
-    its PR, since they carry the head the PR has now, once its record is done or has failed
+    A recheck-list item is dropped when its PR already has MAX_RECHECKS_PER_DAY records of the item's
+    kind for other heads started on now's local day, and stays on the list for the next day. A
+    recheck-list item no longer waits once items list its PR for a first review, since they carry the
+    head the PR has now, once its record is done or has failed
     MAX_FAILURES times, or once the removal of its PR's review drops it. Nothing here reads GitHub, so
     a listed PR merged, closed, or reviewed on GitHub since the mark still gets its review, at the head
     the mark saw; have whooper-poll fetch the listed PRs if such reviews come to waste runs.
     """
-    listed = {(i["repo"], i["pr"]) for i in items}
+    # A re-check the poll lists is dropped below, so it does not finish the PR's first review on the list.
+    listed = {(i["repo"], i["pr"]) for i in items if i["kind"] == "first_review"}
     finished = [r for r in rechecks if (r["repo"], r["pr"]) in listed]
     waiting = [r for r in rechecks if (r["repo"], r["pr"]) not in listed]
     work, drops = [], []
     for item, from_list in [(i, False) for i in items] + [(r, True) for r in waiting]:
         path = record_path(prs_dir, item)
         pr_dir = path.parent
-        record = json.loads(path.read_text()) if path.exists() else None
+        record = read_object(path)
         reason = None
-        if item["repo"] not in repos:
+        if item["kind"] != "first_review":
+            reason = "whooper-review does not re-check a PR yet"
+            if from_list:
+                finished.append(item)
+        elif item["repo"] not in repos:
             reason = f"the config has no [repos.\"{item['repo']}\"] table"
         elif record and record["status"] == "running":
             reason = "running at this head"
@@ -3069,11 +3075,13 @@ def select_work(items, prs_dir, now, repos, rechecks=(), runs_dir=None):
         elif runs_dir and (newest := newest_run(runs_dir, item["repo"], item["pr"])) and (
                 newest[0] / SKIPPED_BY_USER).exists():
             reason = "skipped by the user"
-        elif item["kind"] == "recheck" or from_list:
-            started = [
-                datetime.fromisoformat(json.loads(p.read_text())["started_at"]).astimezone(now.tzinfo).date()
-                for p in pr_dir.glob(f"*.{item['kind']}.json") if p != path
-            ]
+        elif from_list:
+            started = []
+            for other in pr_dir.glob(f"*.{item['kind']}.json"):
+                begun = (read_object(other) or {}).get("started_at") if other != path else None
+                # A record that cannot be read counts as none here too.
+                with suppress(TypeError, ValueError):
+                    started.append(datetime.fromisoformat(begun).astimezone(now.tzinfo).date())
             if started.count(now.date()) >= MAX_RECHECKS_PER_DAY:
                 reason = f"{MAX_RECHECKS_PER_DAY} re-checks already today"
         if reason:
