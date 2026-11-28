@@ -87,6 +87,7 @@ fi
 
 work=""
 agent_group="" watchdog_pid=""
+finished=false
 cleanup() {
   local status=$?
   # As in whooper-review, a process bash forked for a background command that runs this trap, as when it
@@ -94,6 +95,12 @@ cleanup() {
   # removes the work folder.
   if [[ "$(exec /bin/sh -c 'echo "$PPID"')" != "$$" ]]; then
     exit "$status"
+  fi
+  # As in whooper-review, bash 3.2, macOS's /bin/bash, runs this with $? at 0 when set -u stops the script
+  # on an unset variable. An ask that did not finish exits 1 then, so its caller does not take it for one
+  # that printed an answer.
+  if [[ "$finished" != true ]] && ((status == 0)); then
+    status=1
   fi
   # As in whooper-review, this also stops anything the run left running.
   if [[ -n "$agent_group" ]]; then
@@ -164,3 +171,4 @@ jq -n --arg question "$question" --arg finding "$finding" --rawfile answer "$wor
     transcript: (if $transcript == "" then null else $transcript end)}' > "$asks/$n.json.tmp"
 mv "$asks/$n.json.tmp" "$asks/$n.json"
 jq -r .answer "$asks/$n.json"
+finished=true

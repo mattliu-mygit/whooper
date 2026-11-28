@@ -5536,6 +5536,30 @@ class RunTest(unittest.TestCase):
                 self.assertEqual((result.returncode, failure),
                                  (1, "the review stopped at an unexpected error; see whooper-review's error output\n"))
 
+    def test_a_poll_or_an_ask_stopped_by_an_unset_variable_fails_under_each_bash(self):
+        # BASH_ENV, which bash reads before a script, gives the script a command that reads a variable nothing sets,
+        # standing in for any line that does: cat, which whooper-poll first runs itself as it writes the poll's
+        # prompt, and mkdir, which makes whooper-ask's asks folder. set -u stops the script there, once its cleanup
+        # trap is set, and bash 3.2 then runs the cleanup with $? at 0.
+        self.fake_review_requests()
+        run = self.state / "runs" / "20310727T010246Z-12"
+        run.mkdir(parents=True)
+        (run / "failure.txt").write_text("the review stopped at an unexpected error\n")
+        for command, args, function in [("whooper-poll", [], "cat"), ("whooper-ask", [run.name, "Why did it stop?"], "mkdir")]:
+            functions = Path(self.tmp.name) / f"{function}.sh"
+            functions.write_text(f'{function}() {{ : "$EXAMPLE_UNSET"; }}\n')
+            for n, bash in enumerate(BASHES):
+                with self.subTest(command, bash=str(bash)):
+                    folder = bash_folder(bash, Path(self.tmp.name) / f"{command}-bash-{n}")
+                    result = self.command(command, *args, env={"PATH": f"{folder}{os.pathsep}{self.env['PATH']}",
+                                                               "BASH_ENV": str(functions)})
+                    self.assertIn("EXAMPLE_UNSET: unbound variable", result.stderr)
+                    # whooper-round counts a poll that exits 0 as done, and goes on to select the work.
+                    self.assertEqual(result.returncode, 1, result.stderr)
+        # Neither saved anything: the poll moved no cursor, and the ask saved no answer.
+        self.assertFalse((self.state / "poll" / "cursor").exists())
+        self.assertFalse((run / "asks").exists())
+
     def test_a_fetch_github_refuses_for_want_of_a_login_names_that_cause(self):
         env, item, _ = self.pull_request()
         # A transport of git's stands in for GitHub refusing the fetch, as it does when gh, git's

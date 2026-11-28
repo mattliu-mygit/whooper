@@ -28,6 +28,7 @@ fi
 work=""
 agent_group=""
 watchdog_pid=""
+finished=false
 cleanup() {
   local status=$?
   # As in whooper-review, a process bash forked for a background command that runs this trap, as when it
@@ -35,6 +36,12 @@ cleanup() {
   # removes the work folder.
   if [[ "$(exec /bin/sh -c 'echo "$PPID"')" != "$$" ]]; then
     exit "$status"
+  fi
+  # As in whooper-review, bash 3.2, macOS's /bin/bash, runs this with $? at 0 when set -u stops the script
+  # on an unset variable. A poll that did not finish exits 1 then, so whooper-round does not go on to
+  # select work as if it had written its output.
+  if [[ "$finished" != true ]] && ((status == 0)); then
+    status=1
   fi
   if [[ -n "$agent_group" ]]; then
     kill -TERM -- "-$agent_group" 2>/dev/null || true
@@ -100,3 +107,4 @@ jq -r '[.[].pr_urls[]] | unique[]' "$work/asks.json" | "$root/bin/whooper-prs" >
 mv "$poll/$stamp.json.tmp" "$poll/$stamp.json"
 echo "$started" > "$poll/cursor"
 echo "$poll/$stamp.json"
+finished=true
