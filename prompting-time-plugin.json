@@ -28,7 +28,7 @@
   },
   "settings": "schemas/settings.json",
   "actions": [
-    { "name": "status", "title": "Status", "description": "Prints whether Whooper runs or is paused, the next round, the last round, the last 50 rounds, what stops every review, and the reviews of the last 30 days, as JSON, with the same in Prompting Time's status format 2. Reads files only.", "command": ["bin/whooper-status", "--json"], "confirm": false },
+    { "name": "status", "title": "Status", "description": "Prints whether Whooper runs or is paused, the next round, the last round, the last 50 rounds, how many rounds each of the last 15 days had, what stops every review, and the reviews of the last 30 days, as JSON, with the same in Prompting Time's status format 2. Reads files only.", "command": ["bin/whooper-status", "--json"], "confirm": false },
     { "name": "round", "title": "Poll now", "description": "Runs a round now: polls GitHub and Slack and reviews what it finds. Posts nothing.", "command": ["bin/whooper-round"], "confirm": false },
     { "name": "pause", "title": "Pause", "description": "Skips the scheduled rounds until you resume or Whooper starts again.", "command": ["bin/whooper-pause"], "confirm": false },
     { "name": "resume", "title": "Resume", "description": "Ends a pause.", "command": ["bin/whooper-resume"], "confirm": false },

@@ -213,8 +213,9 @@ def read_status(data):
     """Whooper's status for whooper-status --json, from the files under data, its state directory:
     whether whooper-run and a round are running, whether Whooper is paused, when the next scheduled
     round starts, how the last round ended, what blocks every review (read_blocked), the reviews of
-    the last REVIEW_DAYS days (read_reviews), and the last ROUNDS_KEPT rounds (add_round), newest first,
-    and beside them the same status in Prompting Time's status format 2 (status_v2). Times are local, in
+    the last REVIEW_DAYS days (read_reviews), the last ROUNDS_KEPT rounds (add_round), newest first, and
+    how many rounds started on each of the last ROUND_DAYS local days, by result, and beside them the
+    same status in Prompting Time's status format 2 (status_v2). Times are local, in
     ISO 8601 with the offset. It reads files, asks ps about the two
     lock holders, and checks that the process of each review's lock exists, and never calls GitHub,
     Slack, or a model. It reads the two locks once neither is being made (reading_locks), so a lock
@@ -243,6 +244,12 @@ def read_status(data):
     next_round = read(data / "next-round") if loop else None
     last = json.loads(read(data / "last-round.json") or "null")
     rounds = [json.loads(line) for line in (read(data / "rounds.jsonl") or "").splitlines()]
+    today = datetime.now().date()
+    days = [today - timedelta(days=back) for back in range(ROUND_DAYS - 1, -1, -1)]
+    by_day = {day: Counter() for day in days}
+    for r in rounds:
+        if (day := datetime.fromtimestamp(r["started_at"]).date()) in by_day:
+            by_day[day][r["result"]] += 1
     reviews = read_reviews(data, datetime.now(timezone.utc))
     status = {
         "version": 1,
@@ -257,7 +264,9 @@ def read_status(data):
         "reviews": reviews,
         "rounds": [{**r, "started_at": local_time(r["started_at"]),
                     "ended_at": local_time(r["ended_at"]) if r["ended_at"] is not None else None}
-                   for r in reversed(rounds)],
+                   for r in reversed(rounds[-ROUNDS_KEPT:])],
+        "rounds_by_day": [{"date": day.isoformat(), **{result: by_day[day][result] for result in ROUND_RESULTS}}
+                          for day in days],
     }
     return {**status, **status_v2(status, datetime.now(timezone.utc).astimezone())}
 
@@ -477,23 +486,31 @@ def status_v2(status, now):
     }
 
 
-# whooper-status lists the last 50 rounds, which is all rounds.jsonl keeps.
+# whooper-status lists the last 50 rounds, and counts how many rounds started on each of the last 15
+# local days, by result, so a chart of them covers those days. rounds.jsonl keeps the rounds both need.
 ROUNDS_KEPT = 50
+ROUND_DAYS = 15
+ROUND_RESULTS = ("done", "poll_failed", "interrupted", "skipped")
 
 
 def add_round(data, entry):
     """Adds entry, a round that ended or one whooper-run skipped, to data/rounds.jsonl, the history
-    whooper-status prints as rounds: one JSON object a line, oldest first, the last ROUNDS_KEPT. The
-    file is rewritten through a rename, so a program watching the folder never reads half of it, and
-    under the state folder's lock, so of a round run by hand and a round whooper-run skips that end at
-    the same moment, neither drops the other's line."""
+    whooper-status prints as rounds and counts by day: one JSON object a line, oldest first, each round
+    that started on one of the last ROUND_DAYS local days and, whenever they started, the last
+    ROUNDS_KEPT. The file is rewritten through a rename, so a program watching the folder never reads
+    half of it, and under the state folder's lock, so of a round run by hand and a round whooper-run
+    skips that end at the same moment, neither drops the other's line."""
     path = data / "rounds.jsonl"
+    first_day = datetime.now().date() - timedelta(days=ROUND_DAYS - 1)
     with folder_lock(data):
         try:
             lines = path.read_text().splitlines()
         except FileNotFoundError:
             lines = []
-        write_file(path, "".join(f"{line}\n" for line in [*lines, json.dumps(entry)][-ROUNDS_KEPT:]))
+        lines.append(json.dumps(entry))
+        kept = [line for n, line in enumerate(lines) if n >= len(lines) - ROUNDS_KEPT
+                or datetime.fromtimestamp(json.loads(line)["started_at"]).date() >= first_day]
+        write_file(path, "".join(f"{line}\n" for line in kept))
 
 
 # whooper-status lists the review runs that started in the last 30 days.

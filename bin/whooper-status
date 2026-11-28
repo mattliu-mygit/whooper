@@ -85,6 +85,10 @@
 #               paused, whose ended_at is null; selected is how many items the round selected, 0
 #               when it ended before selecting; reason says why it ended so, or is null: which poll
 #               step failed, the cause reviews wait on and how many wait, or that Whooper is paused
+#   rounds_by_day how many rounds started on each of the last 15 days, from <state>/rounds.jsonl,
+#               oldest first and today last, each {date, done, poll_failed, interrupted, skipped}: date
+#               is the local day, such as 2031-07-30, and each count is how many of that day's rounds
+#               ended with that result
 #
 # Beside these, the same status in Prompting Time's status format 2, which
 # schemas/prompting-time-status.json describes, for the groups and row actions

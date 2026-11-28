@@ -5616,7 +5616,7 @@ class RunTest(unittest.TestCase):
         # Status format 2's fields come beside format 1's, which they leave as they were.
         nothing = {"version": 1, "loop": {"running": False, "pid": None}, "paused": False, "next_round": None,
                    "round": {"running": False, "started_at": None, "reviewing": None}, "last_round": None,
-                   "blocked": None, "reviews": [], "rounds": [],
+                   "blocked": None, "reviews": [], "rounds": [], "rounds_by_day": self.rounds_by_day({}),
                    "format": 2, "agent": {"words": "Running", "dot": "idle"}, "blockers": [], "items": [],
                    "truncated": False}
         self.assertEqual(self.status(), nothing)
@@ -5662,6 +5662,8 @@ class RunTest(unittest.TestCase):
             "blocked": None,
             "reviews": [],
             "rounds": rounds,
+            # The rounds above are in 2031, after the last 15 days.
+            "rounds_by_day": self.rounds_by_day({}),
             "format": 2,
             "agent": {"words": "Reviewing example-org/example-repo#12", "dot": "running"},
             "blockers": [],
@@ -5678,6 +5680,39 @@ class RunTest(unittest.TestCase):
         self.assertEqual(self.status(), {**nothing, "last_round": last_round, "rounds": rounds})
         usage = self.command("whooper-status")
         self.assertEqual((usage.returncode, usage.stderr), (1, "usage: whooper-status --json\n"))
+
+    def rounds_by_day(self, counts):
+        """whooper-status's rounds_by_day with times in Los Angeles: each of the last 15 days, oldest first, with
+        counts, which maps a number of days before today to that day's counts by result, and 0 for the rest."""
+        today = datetime.now(ZoneInfo("America/Los_Angeles")).date()
+        return [{"date": (today - timedelta(days=back)).isoformat(),
+                 **{result: counts.get(back, {}).get(result, 0) for result in ["done", "poll_failed", "interrupted", "skipped"]}}
+                for back in range(14, -1, -1)]
+
+    def test_status_counts_the_rounds_of_each_of_the_last_15_days_and_lists_the_last_50(self):
+        zone = ZoneInfo("America/Los_Angeles")
+        today = datetime.now(zone).date()
+
+        def noon(back, minute=0):
+            """The Unix time of noon in Los Angeles back days before today, and minute minutes."""
+            return int(datetime.combine(today - timedelta(days=back), time(12, minute), zone).timestamp())
+
+        def ran(started, result):
+            return {"started_at": started, "ended_at": None if result == "skipped" else started + 60, "result": result,
+                    "selected": 0, "reason": None}
+
+        # Oldest first: a round 15 days back, before the window, one 14 days back, two yesterday, and 55 today.
+        history = [ran(noon(15), "done"), ran(noon(14), "poll_failed"), ran(noon(1), "interrupted"),
+                   ran(noon(1, 5), "skipped"), *(ran(noon(0, minute), "poll_failed" if minute < 2 else "done")
+                                                  for minute in range(55))]
+        self.state.mkdir(parents=True)
+        (self.state / "rounds.jsonl").write_text("".join(json.dumps(r) + "\n" for r in history))
+        status = self.status()
+        self.assertEqual(status["rounds_by_day"], self.rounds_by_day({
+            14: {"poll_failed": 1}, 1: {"interrupted": 1, "skipped": 1}, 0: {"done": 53, "poll_failed": 2}}))
+        # rounds lists the newest 50, newest first.
+        self.assertEqual([datetime.fromisoformat(r["started_at"]).timestamp() for r in status["rounds"]],
+                         [noon(0, minute) for minute in range(54, 4, -1)])
 
     def test_a_pause_lasts_until_whooper_run_restarts_and_skips_each_round_meanwhile(self):
         # A pause does not survive a restart: a new whooper-run deletes paused and runs its first round at
@@ -5717,16 +5752,28 @@ class RoundHistoryTest(unittest.TestCase):
     """whooper.py add-round, which whooper-round runs as each round ends and whooper-run as it skips
     one, on a throwaway state folder."""
 
-    def test_the_history_keeps_the_last_50_rounds_oldest_first(self):
+    def test_the_history_keeps_the_rounds_of_the_last_15_days_and_at_least_the_last_50_oldest_first(self):
+        # 51 rounds 20 days ago, a minute apart, then 60 that start now, a minute apart.
+        old = int((datetime.now() - timedelta(days=20)).timestamp())
+        now = int(datetime.now().timestamp())
+
+        def skipped(started):
+            return json.dumps({"started_at": started, "ended_at": None, "result": "skipped", "selected": 0,
+                               "reason": "Whooper is paused"})
+
         with tempfile.TemporaryDirectory() as tmp:
             for n in range(51):
-                main("add-round", tmp, json.dumps({"started_at": 1943194500 + 60 * n, "ended_at": None,
-                                                   "result": "skipped", "selected": 0, "reason": "Whooper is paused"}))
-            history = (Path(tmp) / "rounds.jsonl").read_text()
+                main("add-round", tmp, skipped(old + 60 * n))
             # Written through a rename, which leaves no temporary file behind.
             self.assertEqual(os.listdir(tmp), ["rounds.jsonl"])
-        starts = [json.loads(line)["started_at"] for line in history.splitlines()]
-        self.assertEqual(starts, [1943194500 + 60 * n for n in range(1, 51)])
+            starts = [json.loads(line)["started_at"] for line in (Path(tmp) / "rounds.jsonl").read_text().splitlines()]
+            # The old rounds are before the last 15 days, and the history keeps the last 50 of them.
+            self.assertEqual(starts, [old + 60 * n for n in range(1, 51)])
+            for n in range(60):
+                main("add-round", tmp, skipped(now + 60 * n))
+            starts = [json.loads(line)["started_at"] for line in (Path(tmp) / "rounds.jsonl").read_text().splitlines()]
+        # Once 50 newer rounds came, the old ones went, and every round of the last 15 days stays.
+        self.assertEqual(starts, [now + 60 * n for n in range(60)])
 
     def test_two_rounds_that_end_at_once_both_stay_in_the_history(self):
         # whooper-run adds a round it skips while a round run by hand ends: its line comes between the

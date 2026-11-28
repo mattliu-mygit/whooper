@@ -75,7 +75,7 @@ directory for changes:
 bin/whooper-round          # runs a round now, even while paused
 bin/whooper-pause          # whooper-run skips each round it comes to, and logs that it did
 bin/whooper-resume         # ends the pause
-bin/whooper-status --json  # what runs, whether Whooper is paused, the next and last rounds, the last 50 rounds, and the reviews
+bin/whooper-status --json  # what runs, whether Whooper is paused, the next and last rounds, the last 50 rounds, each of the last 15 days' rounds by result, and the reviews
 ```
 
 A pause lasts until whooper-resume ends it or whooper-run starts again: whooper-run deletes the
@@ -873,12 +873,14 @@ the recheck list while the commands above write to it.
   (`done`, `poll_failed`, or `interrupted`), how many items it selected, and each review's PR and
   outcome, where a review the round stopped in is `interrupted`, and one it did not start after
   another stopped at a cause that stops every review is `waiting`.
-- `rounds.jsonl`: the last 50 rounds, oldest first, one JSON object a line, which whooper-round adds
-  as each round ends and whooper-run as it skips one while paused: the round's start and end as Unix
+- `rounds.jsonl`: the rounds that started in the last 15 days, and at least the last 50, oldest
+  first, one JSON object a line, which whooper-round adds as each round ends and whooper-run as it
+  skips one while paused: the round's start and end as Unix
   times, the end null for a skipped round; its result (`done`, `poll_failed`, `interrupted`, or
   `skipped`); how many items it selected, 0 when it ended before selecting; and why it ended so, or
-  null, such as `The GitHub fetch failed` or `Whooper is paused`. whooper-status prints them, newest
-  first, as `rounds`.
+  null, such as `The GitHub fetch failed` or `Whooper is paused`. whooper-status prints the last 50,
+  newest first, as `rounds`, and how many of each of the last 15 days' rounds ended with each result,
+  oldest day first, as `rounds_by_day`.
 - `items/`: whooper-round's work items: `selected.jsonl`, the latest round's selection, and
   `<owner>-<repo>-<pr>-<kind>.json`, the item a review got.
 - `runs/<run-id>/`: one review run, named by its UTC start time and PR number. `run.json` is the
