@@ -99,6 +99,11 @@ impl Whooper {
         );
         let home = root.join("home");
         fs::create_dir_all(home.join(".claude/skills")).unwrap();
+        // Go's telemetry off, as go telemetry off leaves it, so go starts no telemetry process that
+        // outlives it and still writes in home as the test deletes it.
+        let mode = home.join("Library/Application Support/go/telemetry/mode");
+        fs::create_dir_all(mode.parent().unwrap()).unwrap();
+        fs::write(mode, "off").unwrap();
         Whooper {
             state: root.join("whooper"),
             tmp,
@@ -135,6 +140,7 @@ impl Whooper {
             .env("GIT_COMMITTER_NAME", "Sam")
             .env("GIT_COMMITTER_EMAIL", "sam@example.com")
             .env("GOTELEMETRY", "off")
+            .env("GOCACHE", go_cache())
             .env_remove("WHOOPER_RUN");
         command
     }
@@ -183,9 +189,9 @@ impl Whooper {
         );
     }
 
-    fn git(&self, folder: &Path, args: &[&str]) -> String {
-        let out = self.command(&[]).get_program().to_owned();
-        let _ = out;
+    /// Runs git in folder with the tests' environment and returns its output, failing the test unless
+    /// it exits 0.
+    pub fn git(&self, folder: &Path, args: &[&str]) -> String {
         let mut command = Command::new("git");
         command.args(args).current_dir(folder);
         for (k, v) in self.command(&[]).get_envs() {
@@ -249,6 +255,88 @@ impl Whooper {
         (item, merge_base)
     }
 
+    /// A review run's directory for PR 12, which changes base's files to head's, as review leaves it
+    /// when the run ends: run.json, diff.patch, and the worktrees head and base.
+    pub fn run_dir(&self, base: &[(&str, &str)], head: &[(&str, &str)]) -> PathBuf {
+        let (_, merge_base) = self.pull_request(base, head);
+        let origin = self.root().join("origin");
+        let head_sha = self.git(&origin, &["rev-parse", "pr-12"]);
+        let run = self.root().join("run");
+        for (tree, commit) in [("head", head_sha.as_str()), ("base", merge_base.as_str())] {
+            let path = run.join(tree);
+            self.git(
+                &origin,
+                &[
+                    "worktree",
+                    "add",
+                    "--quiet",
+                    "--detach",
+                    path.to_str().unwrap(),
+                    commit,
+                ],
+            );
+        }
+        fs::write(
+            run.join("run.json"),
+            json!({"head_sha": head_sha, "merge_base": merge_base}).to_string(),
+        )
+        .unwrap();
+        let mut command = Command::new("git");
+        command
+            .args(["diff", "--no-color", "--no-ext-diff", &merge_base, "HEAD"])
+            .current_dir(run.join("head"));
+        for (k, v) in self.command(&[]).get_envs() {
+            match v {
+                Some(v) => command.env(k, v),
+                None => command.env_remove(k),
+            };
+        }
+        fs::write(run.join("diff.patch"), command.output().unwrap().stdout).unwrap();
+        run
+    }
+
+    /// Runs whooper step name on run, within seconds when given, with env added, and returns its output.
+    pub fn step(
+        &self,
+        name: &str,
+        run: &Path,
+        seconds: Option<f64>,
+        env: &[(&str, &str)],
+    ) -> Output {
+        let mut args = vec![
+            "step".to_string(),
+            name.to_string(),
+            run.display().to_string(),
+        ];
+        if let Some(s) = seconds {
+            args.extend(["--seconds".to_string(), s.to_string()]);
+        }
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let mut command = self.command(&args);
+        command.envs(env.iter().copied());
+        command.output().unwrap()
+    }
+
+    /// Runs step name on run as step does, failing the test unless it exits 0, and returns the JSON in
+    /// file, or None when the step wrote none.
+    pub fn step_file(
+        &self,
+        name: &str,
+        run: &Path,
+        file: &str,
+        seconds: Option<f64>,
+        env: &[(&str, &str)],
+    ) -> Option<Value> {
+        let out = self.step(name, run, seconds, env);
+        assert!(
+            out.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let path = run.join(file);
+        path.exists().then(|| read_json(&path))
+    }
+
     /// Starts a process whose command line names command, standing in for a live copy of it.
     pub fn holder(&self, command: &str) -> std::process::Child {
         let path = self.root().join("holders").join(command);
@@ -278,6 +366,90 @@ impl Whooper {
         .unwrap();
         run
     }
+}
+
+/// The user's Go build cache, which every test shares so go builds the standard library once, not
+/// once a test; a throwaway folder when there is no go.
+pub fn go_cache() -> PathBuf {
+    static CACHE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            Command::new("go")
+                .args(["env", "GOCACHE"])
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .filter(|p| !p.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::temp_dir().join("whooper-test-go-cache"))
+        })
+        .clone()
+}
+
+/// PATH without the folders that hold an executable named any of names.
+pub fn path_without(names: &[&str]) -> String {
+    std::env::var("PATH")
+        .unwrap()
+        .split(':')
+        .filter(|folder| {
+            !names.iter().any(|name| {
+                fs::metadata(Path::new(folder).join(name))
+                    .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+/// Whether process pid is still running (or not yet reaped).
+pub fn alive(pid: i32) -> bool {
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// Waits up to seconds for process pid to end, and returns whether it did.
+pub fn ends_within(pid: i32, seconds: u64) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+    while alive(pid) {
+        if std::time::Instant::now() > deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    true
+}
+
+/// Waits up to 60 seconds for condition, failing the test with what otherwise.
+pub fn wait_for(what: &str, mut condition: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !condition() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// base's files with changes over them, in base's order and then the new ones.
+pub fn over<'a>(
+    base: &[(&'a str, &'a str)],
+    changes: &[(&'a str, &'a str)],
+) -> Vec<(&'a str, &'a str)> {
+    let mut files: Vec<(&str, &str)> = base
+        .iter()
+        .map(|(p, t)| {
+            (
+                *p,
+                changes.iter().find(|(c, _)| c == p).map_or(*t, |(_, t)| *t),
+            )
+        })
+        .collect();
+    files.extend(
+        changes
+            .iter()
+            .filter(|(c, _)| !base.iter().any(|(p, _)| p == c)),
+    );
+    files
 }
 
 pub fn work_item(repo: &str, pr: i64, head: &str) -> Value {

@@ -26,7 +26,7 @@ use crate::diff::{diff_files, json_lines};
 use crate::fsx::{self, Result, limit_text, listed, plural, read_object};
 use crate::proc;
 
-const SECONDS: f64 = 120.0;
+pub const SECONDS: f64 = 120.0;
 const MAX_NODES: usize = 40;
 /// TypeScript's runs end once this share of the step's limit has passed, so name search keeps the rest
 /// for the files TypeScript did not answer.
@@ -1239,11 +1239,8 @@ fn innermost(symbols: &[Symbol], line: i64) -> Option<&Symbol> {
         .find(|s| s.start <= line && line <= s.end)
 }
 
-/// whooper step connections: writes connections.json in run, while its worktrees exist.
-pub fn connections(run: &Path) -> Result<()> {
-    connections_within(run, SECONDS)
-}
-
+/// whooper step connections: writes connections.json in run, while its worktrees exist, within
+/// seconds.
 pub fn connections_within(run: &Path, seconds: f64) -> Result<()> {
     let item = read_object(&run.join("run.json")).unwrap_or_default();
     let patch = fsx::read_text(&run.join("diff.patch")).unwrap_or_default();

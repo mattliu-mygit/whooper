@@ -897,16 +897,41 @@ fn remove_any(path: &Path) -> std::io::Result<()> {
     }
 }
 
-/// The names of the review's steps that whooper step runs, each with the function that saves its file.
-pub fn steps() -> BTreeMap<&'static str, fn(&Path) -> Result<()>> {
+/// A step's function, which saves its file within a time limit in seconds.
+type Step = fn(&Path, f64) -> Result<()>;
+
+/// The names of the review's steps that whooper step runs, each with the function that saves its file
+/// and its time limit in seconds.
+pub fn steps() -> BTreeMap<&'static str, (Step, f64)> {
     BTreeMap::from([
         (
             "connections",
-            crate::connections::connections as fn(&Path) -> Result<()>,
+            (
+                crate::connections::connections_within as Step,
+                crate::connections::SECONDS,
+            ),
         ),
-        ("test-gaps", crate::gaps::test_gaps),
-        ("examples", crate::examples::examples),
-        ("mutation", crate::gaps::mutation),
+        (
+            "test-gaps",
+            (
+                crate::gaps::test_gaps_within as Step,
+                crate::gaps::TEST_GAPS_SECONDS,
+            ),
+        ),
+        (
+            "examples",
+            (
+                crate::examples::examples_within as Step,
+                crate::examples::SECONDS,
+            ),
+        ),
+        (
+            "mutation",
+            (
+                crate::gaps::mutation_within as Step,
+                crate::gaps::MUTATION_SECONDS,
+            ),
+        ),
     ])
 }
 

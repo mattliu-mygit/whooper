@@ -126,6 +126,9 @@ enum Command {
     Step {
         name: String,
         run: std::path::PathBuf,
+        /// The step's time limit in seconds instead of its own, for tests.
+        #[arg(long, hide = true)]
+        seconds: Option<f64>,
     },
 }
 
@@ -160,12 +163,12 @@ fn run(cli: Cli) -> Result<()> {
             proc::catch_signals();
             return review::review(&item, as_of.as_deref());
         }
-        Command::Step { name, run } => {
+        Command::Step { name, run, seconds } => {
             proc::catch_signals();
-            let Some(step) = review::steps().get(name.as_str()).copied() else {
+            let Some((step, limit)) = review::steps().get(name.as_str()).copied() else {
                 fail!("whooper: no step {name}")
             };
-            return step(&run);
+            return step(&run, seconds.unwrap_or(limit));
         }
         Command::Fetch => {
             proc::catch_signals();

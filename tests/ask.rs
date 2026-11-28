@@ -374,3 +374,101 @@ fn a_review_has_no_spending_limit_unless_the_config_sets_one() {
         );
     }
 }
+
+#[test]
+fn the_devin_ask_run_starts_read_only_in_an_empty_directory() {
+    let a = Ask::new();
+    let mut ran = read_json(&a.run.join("run.json"));
+    ran["agent"] = json!("devin");
+    fs::write(a.run.join("run.json"), ran.to_string()).unwrap();
+    let config = a.w.home.join(".config/devin/config.json");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(
+        &config,
+        json!({"agent": {"model": "user-model"},
+               "permissions": {"allow": ["Exec(git)", "Write(/**)"], "deny": ["Exec(rm)"]}})
+        .to_string(),
+    )
+    .unwrap();
+    // The run writes answer.md in its working directory and its export where --export says. A second
+    // call, devin rm, deletes the run's session.
+    a.w.fake(
+        "devin",
+        r#"fakes="${0%/*}"
+if [ "$1" = rm ]; then echo "$@" > "$fakes/removed"; exit 0; fi
+printf '%s\n' "$@" > "$fakes/args"
+env > "$fakes/env"
+pwd > "$fakes/cwd"
+ls -A > "$fakes/files"
+cp prompt.md "$fakes/prompt"
+while [ $# -gt 1 ]; do
+  case "$1" in --config) cp "$2" "$fakes/config.json" ;; --export) export="$2" ;; esac
+  shift
+done
+cp "$fakes/answer" answer.md
+echo '{"session_id": "session-7", "steps": []}' > "$export""#,
+    );
+    let mut command = a.w.command(&["ask", RUN_ID, QUESTION]);
+    // Devin Desktop sets these in the shells it starts.
+    command
+        .env("ACP_BACKEND", "windsurf")
+        .env("WINDSURF_EXT_HOST_PID", "1");
+    let out = command.output().unwrap();
+    assert_eq!(
+        text(&out),
+        (
+            Some(0),
+            "They hide a change from the reader.\n".into(),
+            String::new()
+        )
+    );
+    let args = a.recorded("args");
+    let after = |flag: &str| args[args.iter().position(|a| a == flag).unwrap() + 1].clone();
+    let prefix = a.run.join("asks/1");
+    assert_eq!(after("--permission-mode"), "accept-edits");
+    assert_eq!(after("--model"), "devin-review-model");
+    for (flag, suffix) in [
+        ("--config", ".devin-config.json"),
+        ("--export", ".transcript.json"),
+    ] {
+        assert_eq!(
+            fs::canonicalize(after(flag)).unwrap(),
+            fs::canonicalize(prefix.parent().unwrap())
+                .unwrap()
+                .join(format!("1{suffix}"))
+        );
+    }
+    // The user's config without its allow rules, which could approve a command or a write outside the
+    // working directory, and with the shell and Slack denied.
+    let used = read_json(&a.w.fakes.join("config.json"));
+    assert_eq!(used["agent"], json!({"model": "user-model"}));
+    assert_eq!(used["permissions"]["allow"], json!([]));
+    let denied: Vec<&str> = used["permissions"]["deny"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d.as_str().unwrap())
+        .collect();
+    assert_eq!(denied[..2], ["Exec(rm)", "exec"]);
+    assert!(
+        denied.iter().any(|d| d.starts_with("mcp__slack")),
+        "{denied:?}"
+    );
+    let env: Vec<String> = a
+        .recorded("env")
+        .iter()
+        .map(|l| l.split('=').next().unwrap().to_string())
+        .collect();
+    assert!(!env.contains(&"ACP_BACKEND".to_string()));
+    assert!(!env.contains(&"WINDSURF_EXT_HOST_PID".to_string()));
+    // It starts in an empty directory, not the run's, with only its prompt, which asks for the answer
+    // in answer.md through the file-writing tool.
+    let cwd = &a.recorded("cwd")[0];
+    assert!(!cwd.contains(a.run.to_str().unwrap()));
+    assert_eq!(a.recorded("files"), ["prompt.md"]);
+    let prompt = fs::read_to_string(a.w.fakes.join("prompt")).unwrap();
+    assert!(prompt.starts_with(&a.prompt(1)));
+    assert!(prompt.contains("answer.md in the working directory with your file-writing tool"));
+    assert_eq!(a.recorded("removed"), ["rm session-7 --force"]);
+    assert_eq!(read_json(&a.run.join("asks/1.json"))["agent"], "devin");
+}

@@ -3,72 +3,17 @@
 
 mod common;
 
-use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 
 use common::*;
 use serde_json::Value;
 
-/// A run directory for PR 12, which changes base's files to head's: run.json, diff.patch, and the
-/// worktrees head and base, as review leaves it when the run ends.
 fn run_dir(w: &Whooper, base: &[(&str, &str)], head: &[(&str, &str)]) -> PathBuf {
-    let (_, merge_base) = w.pull_request(base, head);
-    let origin = w.root().join("origin");
-    let git = |dir: &std::path::Path, args: &[&str]| {
-        let mut c = Command::new("git");
-        c.args(args).current_dir(dir);
-        for (k, v) in w.command(&[]).get_envs() {
-            match v {
-                Some(v) => c.env(k, v),
-                None => c.env_remove(k),
-            };
-        }
-        let out = c.output().unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8_lossy(&out.stdout).into_owned()
-    };
-    let head_sha = git(&origin, &["rev-parse", "pr-12"]).trim().to_string();
-    let run = w.root().join("run");
-    for (tree, commit) in [("head", head_sha.as_str()), ("base", merge_base.as_str())] {
-        let path = run.join(tree);
-        git(
-            &origin,
-            &[
-                "worktree",
-                "add",
-                "--quiet",
-                "--detach",
-                path.to_str().unwrap(),
-                commit,
-            ],
-        );
-    }
-    fs::write(
-        run.join("run.json"),
-        serde_json::json!({"head_sha": head_sha, "merge_base": merge_base}).to_string(),
-    )
-    .unwrap();
-    let patch = git(
-        &run.join("head"),
-        &["diff", "--no-color", "--no-ext-diff", &merge_base, "HEAD"],
-    );
-    fs::write(run.join("diff.patch"), patch).unwrap();
-    run
+    w.run_dir(base, head)
 }
 
 fn step(w: &Whooper, name: &str, run: &std::path::Path, file: &str) -> Value {
-    let out = w.run(&["step", name, run.to_str().unwrap()]);
-    assert!(
-        out.status.success(),
-        "{name}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    read_json(&run.join(file))
+    w.step_file(name, run, file, None, &[]).unwrap()
 }
 
 const CLI_BASE: &str =

@@ -17,7 +17,7 @@ use crate::diff::{diff_files, json_lines};
 use crate::fsx::{self, Result, limit_text, listed, plural, read_object};
 use crate::proc;
 
-const TEST_GAPS_SECONDS: f64 = 600.0;
+pub const TEST_GAPS_SECONDS: f64 = 600.0;
 /// go downloads nothing and runs the Go installed on this Mac, whatever a go.mod asks for.
 const GO_OFFLINE: [(&str, &str); 2] = [("GOPROXY", "off"), ("GOTOOLCHAIN", "local")];
 /// CI=true keeps Vitest and Jest from asking questions or writing new snapshots in the head's worktree,
@@ -883,10 +883,6 @@ fn order_of(patch: &str) -> HashMap<String, usize> {
 /// changed JavaScript and TypeScript lines are each a part, measured in that order within one limit, and
 /// the file holds them all. It is measured when a part is, and otherwise not, with the first part's
 /// reason. A PR whose diff adds no such line gets no file.
-pub fn test_gaps(run: &Path) -> Result<()> {
-    test_gaps_within(run, TEST_GAPS_SECONDS)
-}
-
 pub fn test_gaps_within(run: &Path, seconds: f64) -> Result<()> {
     let item = read_object(&run.join("run.json")).unwrap_or_default();
     let patch = fsx::read_text(&run.join("diff.patch")).unwrap_or_default();
@@ -948,7 +944,7 @@ pub fn test_gaps_within(run: &Path, seconds: f64) -> Result<()> {
     Ok(())
 }
 
-const MUTATION_SECONDS: f64 = 900.0;
+pub const MUTATION_SECONDS: f64 = 900.0;
 /// test_gaps.json shows at most this many survived or caught lines a file.
 const MUTATION_LINES_PER_FILE: usize = 7;
 /// gremlins gives each changed line's tests its coverage run's time times this: each change compiles its
@@ -1029,10 +1025,6 @@ pub fn mutation_change(text: &str, line: i64, column: i64, kind: &str) -> String
 /// their committed text back, or go. A line shows one change, a surviving one first, and a file at most
 /// MUTATION_LINES_PER_FILE lines. Without a test_gaps.json that measured lines, or without changed Go
 /// lines, it changes nothing.
-pub fn mutation(run: &Path) -> Result<()> {
-    mutation_within(run, MUTATION_SECONDS)
-}
-
 pub fn mutation_within(run: &Path, seconds: f64) -> Result<()> {
     let Some(mut gaps) = read_object(&run.join("test_gaps.json")) else {
         return Ok(());

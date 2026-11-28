@@ -22,7 +22,7 @@ use crate::diff::{diff_files, json_lines};
 use crate::fsx::{self, Result, limit_text, listed, plural, read_object};
 use crate::gaps::{Limit, TimeLimit, build_error, first_panic, normalize};
 
-const SECONDS: f64 = 300.0;
+pub const SECONDS: f64 = 300.0;
 const EXAMPLE_TIMEOUT: &str = "60s";
 const EXAMPLE_TEST: &str = "whooper_examples_test.go";
 /// A row shows at most this many characters of a result.
@@ -77,11 +77,7 @@ enum Ran {
 
 type Results = HashMap<(String, String), String>;
 
-/// whooper step examples.
-pub fn examples(run: &Path) -> Result<()> {
-    examples_within(run, SECONDS)
-}
-
+/// whooper step examples, within seconds.
 pub fn examples_within(run: &Path, seconds: f64) -> Result<()> {
     let request_path = run.join("examples.request.json");
     if !request_path.exists() {
