@@ -4,28 +4,21 @@
 # bin/whooper-review starts this in the PR's head worktree with no GitHub login and the run's
 # variables (README.md, "How a review run works"). The run loads what a normal session there loads:
 # the user's rules, skills, and hooks, the PR's own .devin/ and .claude/ files, and MCP servers. Its
-# config is the user's ~/.config/devin/config.json plus Whooper's two additions, written into the run
-# directory because the CLI rewrites the file it is given:
-#   - hooks/tool-use-id.sh after each exec call, which shows the run the IDs a finding cites;
-#   - deny rules for every tool of the two Slack servers Devin can load, so the run can post
-#     nothing. Deny rules hold in --permission-mode dangerous, which approves every other call.
+# config is the user's ~/.config/devin/config.json plus deny rules for every tool of the two Slack
+# servers Devin can load, so the run can post nothing, written into the run directory because the
+# CLI rewrites the file it is given. Deny rules hold in --permission-mode dangerous, which approves
+# every other call.
 #
 # The run writes findings.json, overview.json, and log.md to $WHOOPER_RUN itself. This writes
 # transcript.json (the run's ATIF export), stdout.log, and stderr.log there, prints the cost line in
 # ACUs, Devin's billing unit, deletes the run's Devin session, and exits with the CLI's exit code.
 set -euo pipefail
 
-root="$(cd "$(dirname "$0")/../.." && pwd)"
 run="$WHOOPER_RUN"
 user_config="$HOME/.config/devin/config.json"
 [[ -f "$user_config" ]] || user_config=/dev/null
-# Devin runs a hook's command through bash -c, and its config has no args to start a hook by its
-# path, as agents/claude/review gives Claude Code, so the command is the path quoted with jq's @sh.
-# Unquoted, bash would split the path at a space, as in the Application Support folder Prompting
-# Time installs Whooper in, so the hook would never start.
-jq -n --slurpfile user "$user_config" --arg hook "$root/hooks/tool-use-id.sh" '
+jq -n --slurpfile user "$user_config" '
   ($user[0] // {})
-  | .hooks.PostToolUse += [{matcher: "exec", hooks: [{type: "command", command: ($hook | @sh)}]}]
   | .permissions.deny += ["mcp__slack-remote__*", "mcp__slack__*"]' > "$run/devin-config.json"
 
 started="$(date +%s)"

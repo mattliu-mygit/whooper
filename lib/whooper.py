@@ -16,8 +16,6 @@ from the user's config file (config_path), never from this code. The bin/ script
                     | ask <agent> <run dir> <question> [<finding-id>]              -> an ask run's prompt, with the
                                                                                       record files it may read
   whooper.py check <schema.json> <value.json>                                      -> fails unless value fits schema
-  whooper.py claude-version                                                        -> fails unless Claude Code is new
-                                                                                      enough, when a job runs on claude
   whooper.py posts <slackdump channel.json> <oldest>                               -> the channel's posts JSON
   whooper.py asks <posts.json> <answer.json> <oldest>                              -> asks JSON
   whooper.py items <github.json> <asks.json> <slack-prs.json>                      -> {"items": [...]}
@@ -45,14 +43,12 @@ from the user's config file (config_path), never from this code. The bin/ script
   whooper.py wait <data dir> <work-item.json> <failure.json>                      -> a waiting run, the recheck list
   whooper.py skip <data dir> <run-id> [--undo]                                    -> marks the run skipped, or not
   whooper.py remove <data dir> <run-id> [--undo]                                  -> marks the run removed, or not
-  whooper.py classify <data dir> <run dir>                                         -> verdicts, digest, record
-  whooper.py post <data dir> <run dir> <head now> <review comments.json>          -> post.json, digest, record
+  whooper.py reviewed <data dir> <run dir> [<head now>]                            -> marks the record done, or stale
   whooper.py draft <data dir> <run-id> [<change>]                                  -> the run's drafts JSON
   whooper.py run-dir <data dir> <run-id> <command>                                 -> the run's directory, or
                                                                                       command's refusal
   whooper.py submit <data dir> <run dir> <head now> [--print] [--allow-mentions] [--approve-anyway]
                     [--expect=<fingerprint>]                                       -> submit-request.json, submit.json
-  whooper.py summary <run dir>                                                     -> the summary channel's text
   whooper.py skills <skills dir>                                                   -> {skill: content hash}
   whooper.py next-round [<Unix time the last round ended>]                         -> the next round's Unix time
   whooper.py add-round <data dir> <round JSON>                                     -> adds it to the round history
@@ -94,11 +90,6 @@ MAX_RECHECKS_PER_DAY = 3
 # An untagged team ask leaves a PR to whoever else reviewed it in the last 8 hours. After that,
 # the PR is fair game again.
 CLAIM_HOURS = 8
-# Auto-post rule v1 (design question 3): a finding posts without the user only when the run answers
-# all of these true and the transcript backs the first and third.
-RULE_V1 = ("ran_and_saw_failure", "caller_or_ci_visible", "introduced_by_pr", "not_already_raised", "not_pr_text")
-# Whooper's review body and every comment it posts start with this.
-MARKER = "Whooper AI"
 # A draft posts under the user's name, so it may not ping anyone or link outside the org's GitHub.
 # The lookbehind keeps email addresses and paths from counting as mentions. A match is the whole
 # handle, such as @alice or the team @example-org/reviewers, so whooper-submit can list it.
@@ -121,7 +112,6 @@ NEW_COMMITS_EXIT, NOT_SAFE_EXIT, MENTIONS_EXIT, CHANGED_EXIT, OUTSIDE_DIFF_EXIT 
 LABEL = re.compile(r"\*\*[A-Za-z]+(?: \([^)]*\))?:\*\*")
 LABELS = {"caller_visible_bug": "**issue:**", "ci_failure": "**issue:**", "nit": "**nit:**",
           "question": "**question:**", "other": "**suggestion:**"}
-LINK = re.compile(r"(?:https?://|www\.)[^\s)>\]]*")
 # How prompts/review.md names each agent's tools, limits, and way of returning the findings.
 # prompts/ask.md uses skill_tool too.
 REVIEW_WORDING = {
@@ -177,8 +167,8 @@ ASK_TIMEOUT_MINUTES = 10
 
 def read_schedule(config):
     """The config's [schedule], with SCHEDULE_DEFAULTS for what it leaves out, start and end as
-    times of day, and interval_minutes as an int (whole_number), so 15.0 reads as 15. Fails on a
-    schedule that next_round cannot follow."""
+    times of day. Fails on a schedule that next_round cannot follow, such as an interval_minutes of
+    15.0: the whole-number settings take integers, as the settings form sends them."""
     values = {**SCHEDULE_DEFAULTS, **config.get("schedule", {})}
     try:
         start, end = (datetime.strptime(values[key], "%H:%M").time() for key in ("start", "end"))
@@ -188,7 +178,7 @@ def read_schedule(config):
         raise SystemExit(f"whooper: [schedule] days takes names from {', '.join(DAYS)}, not {unknown}")
     # Each poll runs a model, so 0 or less would poll nonstop. bool is an int in Python, so true would
     # otherwise pass as 1.
-    interval = whole_number(values["interval_minutes"])
+    interval = values["interval_minutes"]
     if type(interval) is not int or interval < 1:
         raise SystemExit(f"whooper: [schedule] interval_minutes takes a whole number of minutes, at least 1; see {config_path()}")
     if not values["days"] or start >= end:
@@ -220,7 +210,7 @@ def read_status(data):
     """Whooper's status for whooper-status --json, from the files under data, its state directory:
     whether whooper-run and a round are running, whether Whooper is paused, when the next scheduled
     round starts, how the last round ended, what blocks every review (read_blocked), the reviews of
-    the last REVIEW_DAYS days (read_reviews), the last ROUNDS_KEPT rounds (add_round), newest first, and
+    the last REVIEW_DAYS days (read_reviews), and
     how many rounds started on each of the last ROUND_DAYS local days, by result, and beside them the
     same status in Prompting Time's status format 2 (status_v2). Times are local, in
     ISO 8601 with the offset. It reads files, asks ps about the two
@@ -259,8 +249,6 @@ def read_status(data):
             by_day[day][r["result"]] += 1
     reviews = read_reviews(data, datetime.now(timezone.utc))
     status = {
-        "version": 1,
-        "loop": {"running": bool(loop), "pid": loop},
         "paused": (data / "paused").exists(),
         "next_round": local_time(int(next_round)) if next_round else None,
         "round": {"running": bool(current), "started_at": local_time(record["started_at"]) if record else None,
@@ -269,9 +257,6 @@ def read_status(data):
                       if last else None,
         "blocked": read_blocked(reviews),
         "reviews": reviews,
-        "rounds": [{**r, "started_at": local_time(r["started_at"]),
-                    "ended_at": local_time(r["ended_at"]) if r["ended_at"] is not None else None}
-                   for r in reversed(rounds[-ROUNDS_KEPT:])],
         "rounds_by_day": [{"date": day.isoformat(), **{result: by_day[day][result] for result in ROUND_RESULTS}}
                           for day in days],
     }
@@ -493,18 +478,14 @@ def status_v2(status, now):
     }
 
 
-# whooper-status lists the last 50 rounds, and counts how many rounds started on each of the last 15
-# local days, by result, so a chart of them covers those days. rounds.jsonl keeps the rounds both need.
-ROUNDS_KEPT = 50
 ROUND_DAYS = 15
 ROUND_RESULTS = ("done", "poll_failed", "interrupted", "skipped")
 
 
 def add_round(data, entry):
     """Adds entry, a round that ended or one whooper-run skipped, to data/rounds.jsonl, the history
-    whooper-status prints as rounds and counts by day: one JSON object a line, oldest first, each round
-    that started on one of the last ROUND_DAYS local days and, whenever they started, the last
-    ROUNDS_KEPT. The file is rewritten through a rename, so a program watching the folder never reads
+    whooper-status counts by day: one JSON object a line, oldest first, each round that started on
+    one of the last ROUND_DAYS local days. The file is rewritten through a rename, so a program watching the folder never reads
     half of it, and under the state folder's lock, so of a round run by hand and a round whooper-run
     skips that end at the same moment, neither drops the other's line."""
     path = data / "rounds.jsonl"
@@ -515,8 +496,7 @@ def add_round(data, entry):
         except FileNotFoundError:
             lines = []
         lines.append(json.dumps(entry))
-        kept = [line for n, line in enumerate(lines) if n >= len(lines) - ROUNDS_KEPT
-                or datetime.fromtimestamp(json.loads(line)["started_at"]).date() >= first_day]
+        kept = [line for line in lines if datetime.fromtimestamp(json.loads(line)["started_at"]).date() >= first_day]
         write_file(path, "".join(f"{line}\n" for line in kept))
 
 
@@ -622,35 +602,17 @@ def failure_cause(step, output=""):
     return {"id": cause, "summary": summary, "scope": scope}
 
 
-# How whooper-review worded the first line of failure.txt at each step it stops at with its own
-# reason, which names the step of a review from before it saved failure.json. The setup script's
-# reason, "<script> failed", now ends with the last line the script printed on stderr.
-FAILURE_TEXTS = (
-    ("clone", re.compile(r"^no clone of ")),
-    ("time-limit", re.compile(r"^the review run passed its \d+-minute limit")),
-    ("findings", re.compile(r"^the review run exited \S+ without findings|^the review run's findings\.json does not fit")),
-    ("setup", re.compile(r"^\S.* failed(: |$)")),
-)
-
-
 def read_cause(run, outcome):
     """What kept the review in run from finishing, as failure_cause gives it, for a failed or waiting
     review, and None for any other outcome: the cause whooper-review saved in failure.json as it
-    stopped the review, or for one that waits, the cause in waiting.json (wait_review). Without that
-    file, as for a review from before whooper-review saved it, failure.txt names the step by its
-    wording (FAILURE_TEXTS), and its text is the step's output, so a review with neither, as after a
-    kill -9, is unknown."""
+    stopped the review, or for one that waits, the cause in waiting.json (wait_review). A review
+    without that file, as after a kill -9, is unknown."""
     if outcome not in ("failed", "waiting"):
         return None
     saved = read_object(run / ("waiting.json" if outcome == "waiting" else "failure.json")) or {}
     if isinstance(saved.get("id"), str) and isinstance(saved.get("summary"), str) and saved.get("scope") in ("all", "pr"):
         return {key: saved[key] for key in ("id", "summary", "scope")}
-    try:
-        text = (run / "failure.txt").read_text(errors="replace")
-    except OSError:
-        text = ""
-    first = text.partition("\n")[0]
-    return failure_cause(next((step for step, wording in FAILURE_TEXTS if wording.search(first)), None), text)
+    return failure_cause(None)
 
 
 # The empty file whooper-skip leaves in the directory of a run the user marked skipped: the review
@@ -837,7 +799,7 @@ def read_reviews(data, now):
 # attributes from the user's attributes file, such as a hunk-header pattern, each changed submodule
 # shown, unless the repo's .gitmodules or the user's config says to ignore that one, and object names
 # of at least 12 digits, which bin/whooper-review says why it chose. The settings git diff has no flag
-# for go before it with -c. rebuilt_diff passes the same ones, so keep the two lists the same.
+# for go before it with -c.
 PLAIN_DIFF = ("-c", "diff.suppressBlankEmpty=false", "-c", "core.quotePath=true", "-c", "core.bigFileThreshold=512m",
               "-c", "core.attributesFile=/dev/null", "-c", "diff.ignoreSubmodules=none", "diff", "--no-ext-diff",
               "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", "--submodule=short", "--unified=3",
@@ -861,19 +823,6 @@ def read_clone(repo, *args):
     git = subprocess.run(["git", "--git-dir", str(repo_clone(repo) / ".git"), "--no-lazy-fetch", *args],
                          capture_output=True, env=env)
     return git.stdout.decode(errors="replace") if git.returncode == 0 else None
-
-
-def rebuilt_diff(item):
-    """The diff a review read, for a run from before whooper-review kept it as diff.patch: git diff
-    between the merge base and the head that item, the run's run.json, records, in the repo's clone
-    (read_clone), with whooper-review's PLAIN_DIFF arguments, or None without run.json or its merge
-    base, as for a review that waits, and when the clone lacks either commit or one of their files. The
-    clone has no checkout, so git reads .gitattributes from the head commit, which whooper-review's diff
-    read from the head worktree: a file marked -diff shows as binary."""
-    if item is None or not item.get("merge_base"):
-        return None
-    base, head = item["merge_base"], item["head_sha"]
-    return read_clone(item["repo"], f"--attr-source={head}", *PLAIN_DIFF, base, head)
 
 
 # A hunk header of a patch git diff wrote: the hunk's first line in the old file and how many lines it
@@ -948,6 +897,21 @@ def diff_files(patch):
                 spans.append((start, start + count - 1))
         files.append((old if deleted else new, None if created else old, spans, added, removed))
     return files
+
+
+def in_diff(patch, path, side, line):
+    """Whether line of path is inside a hunk of patch, a run's diff.patch, where GitHub takes an inline
+    comment: counted in the head on side RIGHT, and at the merge base on side LEFT, for a deleted line."""
+    for part in re.split(r"^(?=diff --git )", patch, flags=re.M)[1:]:
+        new, old = next(((n, o) for n, o, *_ in diff_files(part)), (None, None))
+        if (old if side == "LEFT" else new) != path:
+            continue
+        for hunk in HUNK.finditer(part):
+            old_start, old_count, new_start, new_count = (int(n) if n is not None else 1 for n in hunk.groups())
+            start, count = (old_start, old_count) if side == "LEFT" else (new_start, new_count)
+            if start <= line < start + count:
+                return True
+    return False
 
 
 # The JSON Schema the overview.json a review run writes must fit, the first rule check_overview checks.
@@ -2540,8 +2504,14 @@ MUTATIONS = {
 # gives git after the run's own, so these win: paths relative to that folder, which gremlins compares with paths
 # relative to it; no lines around each change, since gremlins takes a hunk's lines as one range from its first added
 # line, so with context it would change unchanged lines and miss later changed ones; and no color, which gremlins
-# cannot read, so it would change every line.
-MUTATION_GIT = {"diff.relative": "true", "diff.context": "0", "color.diff": "false"}
+# cannot read, so it would change every line. The rest keep the user's git config from changing the patch's
+# shape, as whooper-review no longer pins git settings for every step.
+MUTATION_GIT = {"diff.relative": "true", "diff.context": "0", "color.diff": "false", "diff.interHunkContext": "0",
+                "diff.algorithm": "myers", "diff.indentHeuristic": "true", "diff.suppressBlankEmpty": "false",
+                "diff.renames": "true", "diff.renameLimit": "1000", "diff.orderFile": "/dev/null", "core.quotePath": "true",
+                "core.bigFileThreshold": "512m", "core.attributesFile": "/dev/null", "diff.ignoreSubmodules": "none",
+                "diff.submodule": "short", "diff.noprefix": "false", "diff.srcPrefix": "a/", "diff.dstPrefix": "b/",
+                "diff.mnemonicPrefix": "false", "core.abbrev": "12"}
 
 
 def mutation_change(text, line, column, kind):
@@ -2674,8 +2644,7 @@ def show_review(data, run_id):
     """One review run for Prompting Time's review screen, as whooper-show --json prints it:
     run.json, the outcome, the findings, whether it is safe to approve, and the posted review as
     read_review reads them, the PR's title and author in github.json, the drafts whooper-draft prints,
-    which only a review whose findings fit has, diff.patch, or for a run from before reviews kept it,
-    the diff rebuilt_diff rebuilds, failure.txt, and whooper-ask's answers. The overview the run wrote
+    which only a review whose findings fit has, diff.patch, failure.txt, and whooper-ask's answers. The overview the run wrote
     in overview.json comes once the review ended, and only when read_overview keeps it against that
     diff, as whooper-review did. From the repo's clone, without fetching (clone_log): the commits
     between the head the review read and the PR's newest head Whooper knows (pr_head), and the files
@@ -2701,8 +2670,6 @@ def show_review(data, run_id):
             return None
 
     diff = text("diff.patch")
-    if diff is None:
-        diff = rebuilt_diff(item)
     # whooper-review drops an overview.json that breaks a rule as soon as the run ends, but a run that
     # still runs may still change the file, and a review stopped before then, as at an interrupt, can
     # leave one it never checked.
@@ -2722,7 +2689,6 @@ def show_review(data, run_id):
     history = (clone_log(repo, f"--since={(started - timedelta(days=CO_CHANGE_DAYS)).isoformat()}", "--no-merges",
                          item["merge_base"]) if paths and item and item.get("merge_base") else None)
     return {
-        "version": 1,
         "run_id": run_id,
         "run": item,
         "title": title,
@@ -2825,35 +2791,19 @@ def check_schema(value, schema, where="the value", root=None):
 
 
 # The jobs Whooper runs, each on the agent the config's [jobs] names for it.
-JOBS = ("review", "poll", "summary")
+JOBS = ("review", "poll")
 
 
 def check_jobs(config):
-    """Fails unless the config's [jobs] names an agent for each of JOBS, and each job in it names an agent
-    with a launcher for it, agents/<agent>/<job>."""
+    """Fails unless the config's [jobs] names an agent for each of JOBS with a launcher for it,
+    agents/<agent>/<job>. Other keys in [jobs], such as the summary job Whooper no longer runs, are ignored."""
     if missing := [job for job in JOBS if job not in config.get("jobs", {})]:
-        raise SystemExit(f"whooper: [jobs] names no agent for {joined(missing, 'or')}; each of review, poll, and"
-                         f" summary names the agent it runs on; see {config_path()}")
-    for job, agent in config["jobs"].items():
+        raise SystemExit(f"whooper: [jobs] names no agent for {joined(missing, 'or')}; each of review and poll"
+                         f" names the agent it runs on; see {config_path()}")
+    for job in JOBS:
+        agent = config["jobs"][job]
         if not (ROOT / "agents" / agent / job).exists():
             raise SystemExit(f"whooper: [jobs] {job} names {agent!r}, which has no agents/{agent}/{job}")
-
-
-def whole_number(value):
-    """value as an int when it is a float with no fraction, such as 45.0, and as it is otherwise, such as 1.5, "45", or
-    true. TOML reads timeout_minutes = 45.0, typed by hand, as a float, which a settings form shows as 45, so typing 45
-    there sends nothing; the settings that take a whole number, such as [schedule] interval_minutes and [review]
-    timeout_minutes, read such a float as that number instead of refusing it."""
-    return int(value) if type(value) is float and value.is_integer() else value
-
-
-def whole_numbers(value, schema):
-    """value, part of the settings in SETTINGS_SCHEMA, with each setting the schema types as an integer read as
-    whole_number reads it, so 45.0 becomes 45, as JSON Schema counts it, and the rest as it is."""
-    if isinstance(value, dict):
-        properties = schema.get("properties", {})
-        return {key: whole_numbers(item, properties.get(key, {})) for key, item in value.items()}
-    return whole_number(value) if schema.get("type") == "integer" else value
 
 
 def check_config(config):
@@ -2866,14 +2816,14 @@ def check_config(config):
     stop on is refused with the message they would stop with."""
     # Each job runs on the agent [jobs] names, through its launcher agents/<agent>/<job>.
     check_jobs(config)
-    poll_timeout = whole_number(config.get("poll", {}).get("timeout_minutes", POLL_TIMEOUT_MINUTES))
+    poll_timeout = config.get("poll", {}).get("timeout_minutes", POLL_TIMEOUT_MINUTES)
     # A poll takes 2 to 3 minutes, so a shorter limit would stop every poll.
     if type(poll_timeout) is not int or poll_timeout < 5:
         raise SystemExit(f"whooper: [poll] timeout_minutes takes a whole number of minutes, at least 5; see {config_path()}")
     # whooper-review's watchdog multiplies the limit by 60 in bash, which knows whole numbers only, so 1.5
     # would stop the watchdog and leave the review with no time limit. bool is an int in Python, so true
     # would otherwise pass as 1.
-    review_timeout = whole_number(config.get("review", {}).get("timeout_minutes"))
+    review_timeout = config.get("review", {}).get("timeout_minutes")
     if type(review_timeout) is not int or review_timeout < 1:
         raise SystemExit(f"whooper: [review] timeout_minutes takes a whole number of minutes, at least 1; see {config_path()}")
     # whooper-ask's watchdog multiplies the limit in Python, so a fraction of a minute works too, and
@@ -2885,43 +2835,10 @@ def check_config(config):
 
 
 def joined(words, conjunction):
-    """words for a sentence, joined with commas and conjunction, such as "summary", "poll or summary", or
-    "review, poll, and summary"."""
+    """words for a sentence, joined with commas and conjunction, such as "poll", "review or poll", or
+    "review, poll, and ask"."""
     *rest, last = words
     return f"{', '.join(rest)}{',' if len(rest) > 1 else ''} {conjunction} {last}" if rest else last
-
-
-# The oldest Claude Code Whooper runs a job on: from 2.1.295, Claude Code blocks a call when a hook whose
-# onFailure is "block" cannot start, crashes, or times out, which the summary's Slack guard needs
-# (agents/claude/summary).
-CLAUDE_CODE_LEAST = (2, 1, 295)
-# How long check_claude waits for `claude --version`, which runs before any watchdog starts.
-CLAUDE_VERSION_SECONDS = 30
-
-
-def check_claude(config):
-    """Fails unless `claude --version` names Claude Code CLAUDE_CODE_LEAST or later, when a job in the config's
-    [jobs] runs on claude, and leaves claude alone otherwise. The commands that run agents call it as they
-    start, through whooper.py claude-version. claude gets no input and CLAUDE_VERSION_SECONDS to answer, so
-    one that waits, as at an update or login prompt, refuses instead of holding the round."""
-    jobs = [job for job, agent in config["jobs"].items() if agent == "claude"]
-    if not jobs:
-        return
-    try:
-        said = subprocess.run(["claude", "--version"], capture_output=True, text=True, stdin=subprocess.DEVNULL,
-                              timeout=CLAUDE_VERSION_SECONDS).stdout.strip()
-        found = f"`claude --version` says {said}" if said else "`claude --version` printed nothing"
-    except FileNotFoundError:
-        said, found = None, "no claude command is on PATH"
-    except subprocess.TimeoutExpired:
-        said, found = "", f"`claude --version` did not answer within {CLAUDE_VERSION_SECONDS} seconds"
-    version = re.match(r"([0-9]+)\.([0-9]+)\.([0-9]+)", said or "")
-    if version and tuple(map(int, version.groups())) >= CLAUDE_CODE_LEAST:
-        return
-    raise SystemExit(f"whooper: [jobs] {joined(jobs, 'and')} run{'s' if len(jobs) == 1 else ''} on claude, which needs"
-                     f" Claude Code {'.'.join(map(str, CLAUDE_CODE_LEAST))} or later, the first that blocks a Slack call"
-                     f" when its guard hook fails, but {found}; {'install' if said is None else 'update'} Claude Code,"
-                     f" or move {'that job' if len(jobs) == 1 else 'those jobs'} to devin")
 
 
 # The settings a settings form may edit, as a JSON Schema.
@@ -2944,7 +2861,7 @@ def read_settings(config):
         return {key: pick(value[key], sub) for key, sub in schema["properties"].items() if key in value}
 
     schema = json.loads(SETTINGS_SCHEMA.read_text())
-    return whole_numbers(pick(values, schema), schema)
+    return pick(values, schema)
 
 
 def write_settings(values):
@@ -2955,7 +2872,6 @@ def write_settings(values):
     come as a float with no fraction, such as 45.0, which JSON Schema counts as an integer, and is
     saved as that int (whole_numbers)."""
     schema = json.loads(SETTINGS_SCHEMA.read_text())
-    values = whole_numbers(values, schema)
     try:
         check_schema(values, schema, "settings")
     except ValueError as e:
@@ -3264,8 +3180,7 @@ def select_work(items, prs_dir, now, repos, rechecks=(), runs_dir=None, closed=N
     repos has no table for its repo, since a review needs the repo's settings, or when its record is done
     or has failed MAX_FAILURES times, or is running while a live whooper-review holds the PR's lock
     (lock_holder). A record that says running while none does is that of a review that ended without
-    writing how, as when a SIGKILL cut its cleanup short or its round stopped between whooper-review and
-    whooper-classify: this writes it failed, with one more failure, as an interrupted review's cleanup
+    writing how, as when a SIGKILL cut its cleanup short: this writes it failed, with one more failure, as an interrupted review's cleanup
     does, so the item is work again until its head has failed MAX_FAILURES times. A record that cannot be
     read counts as none, and the review writes it again when it starts. A record that says retry, which
     whooper-retry writes when the user asks for another review (retry), lets its item through whatever
@@ -3383,18 +3298,17 @@ def record_path(prs_dir, item):
     return prs_dir / f"{item['repo'].replace('/', '-')}-{item['pr']}" / f"{item['head_sha']}.{item['kind']}.json"
 
 
-def write_record(prs_dir, item, status, now, approval=None):
+def write_record(prs_dir, item, status, now):
     """Records a review run's status for the item's head and kind.
 
     running starts a run at now. failed counts one more failure at this head and done keeps the
     count, so whooper-select stops retrying a head after MAX_FAILURES. retry keeps the count too, and
-    select_work lets its item through anyway. classify passes the run's approval with done, and later
-    statuses for the same head keep it.
+    select_work lets its item through anyway.
     """
     path = record_path(prs_dir, item)
     started_at = now.isoformat(timespec="seconds")
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Under the PR folder's lock, two writers, such as whooper-review counting a failure while whooper-post
+    # Under the PR folder's lock, two writers, such as whooper-review counting a failure while whooper-submit
     # marks the head stale, cannot drop each other's change, and write_file never leaves half a record.
     # A record that cannot be read starts over.
     with folder_lock(path.parent):
@@ -3404,14 +3318,12 @@ def write_record(prs_dir, item, status, now, approval=None):
             "failures": old["failures"] + (status == "failed"),
             "started_at": started_at if status == "running" else old["started_at"],
         }
-        if approval := approval or old.get("approval"):
-            record["approval"] = approval
         write_file(path, json.dumps(record))
 
 
 def mark_new_commits(data, item, head_now, now):
-    """Records that a review run's PR has new commits since the run, for whooper-post and
-    whooper-submit, which post nothing then: the reviewed head's record says stale, and the recheck
+    """Records that a review run's PR has new commits since the run, for whooper-review as a review
+    ends and whooper-submit, which posts nothing then: the reviewed head's record says stale, and the recheck
     list under data holds the run's work item at head_now, so the next round's whooper-select reviews
     the new commits whatever brought the PR in. Without the list only a PR GitHub still lists would
     come back, since the poll reads each Slack post once. item is the run's run.json. A later mark of
@@ -3640,162 +3552,6 @@ def author_login(actor):
     return actor["login"] if actor else "ghost"
 
 
-def claude_shell_calls(events):
-    """Returns the Bash calls of a Claude Code run's main session, keyed by tool_use_id.
-
-    events is the run's stream-json transcript. Each call has its command and output, ok (the call
-    did not fail), cut (the transcript kept only a preview of the output), and finished, always
-    true, because Claude Code waits for a Bash call to end.
-    """
-    calls = {}
-    for e in events:
-        # A subagent's messages carry the ID of the Task call that started it.
-        if e["type"] not in ("assistant", "user") or e.get("parent_tool_use_id"):
-            continue
-        content = e["message"]["content"]
-        for block in content if isinstance(content, list) else []:
-            if block.get("type") == "tool_use" and block["name"] == "Bash":
-                calls[block["id"]] = {"command": block["input"]["command"], "output": "", "ok": True, "cut": False,
-                                      "finished": True}
-            elif block.get("type") == "tool_result" and block["tool_use_id"] in calls:
-                output = block["content"]
-                output = output if isinstance(output, str) else "".join(part.get("text", "") for part in output)
-                # The CLI shows only a 2 KB preview of a successful output over 30,000 characters. It
-                # also cuts a failed call's output, which is not ok anyway.
-                calls[block["tool_use_id"]].update(output=output, ok=not block.get("is_error"),
-                                                   cut="<persisted-output>" in output)
-    return calls
-
-
-def devin_shell_calls(export):
-    """Returns the exec calls of a Devin run's main session, keyed by tool_call_id.
-
-    export is the run's ATIF trajectory from devin --export, which holds the main session's calls
-    and none of a subagent's. A call given a workdir reads as a command that starts with cd to it.
-    exec ends a finished call's output with an "Exit code: <n>" line. A call without one was moved
-    to the background or rejected, so it did not finish inside its call. A long output is cut two
-    ways, each naming the file with the rest: exec keeps only its start and end, and the CLI keeps
-    only the first lines of any tool result too large for the transcript. The second cuts off the
-    exit code line, so the call finished but its exit code is unknown and it is not ok.
-    """
-    calls = {}
-    for step in export["steps"]:
-        outputs = {r.get("source_call_id"): r.get("content") for r in (step.get("observation") or {}).get("results", [])}
-        for call in step.get("tool_calls") or []:
-            if call.get("function_name") != "exec":
-                continue
-            args = call.get("arguments") or {}
-            command = args.get("command", "")
-            if args.get("workdir"):
-                command = f"cd {args['workdir']} && {command}"
-            output = outputs.get(call["tool_call_id"]) or ""
-            if isinstance(output, list):
-                output = "".join(part.get("text", "") for part in output)
-            exit_code = re.search(r"\nExit code: (-?\d+)\s*\Z", output)
-            too_large = "<truncation_notice>" in output
-            calls[call["tool_call_id"]] = {
-                "command": command, "output": output, "ok": bool(exit_code) and exit_code[1] == "0",
-                "cut": too_large or "The full terminal output is being written live to" in output,
-                "finished": bool(exit_code) or too_large,
-            }
-    return calls
-
-
-# Each agent's reader: a review run's directory -> the shell calls of the run's main session.
-SHELL_CALLS = {
-    "claude": lambda run: claude_shell_calls(
-        [json.loads(line) for line in (run / "transcript.jsonl").read_text().splitlines() if line]),
-    "devin": lambda run: devin_shell_calls(json.loads((run / "transcript.json").read_text())),
-}
-
-
-def classify(result, calls, fetched, run_dir):
-    """Returns each finding of a review run with its verdict and the checks it failed.
-
-    result is the run's findings.json, calls the shell calls of its main session from its agent's
-    reader in SHELL_CALLS, and run_dir the run directory, which held the worktrees head/ and base/.
-    fetched says whether the run's github.json was written, without which nobody can tell a point
-    was not already raised. A skipped run has no verdicts.
-
-    A finding is auto_post only when every rule_v1 answer is true, its line is in the diff (GitHub
-    takes inline comments only there), fetched is true, and two shell calls of the main session,
-    not of a subagent, back it. head_run finished inside its call, and its output contains observed.
-    base_run ran head_run's command, which names the head worktree, with the base worktree in its
-    place; it finished inside its call and succeeded, and its whole output was kept and does not
-    contain observed. Every nit is a shadow_nit, whatever its checks, and everything else goes to
-    the digest.
-    """
-    if result["status"] == "skipped":
-        return []
-    head_tree, base_tree = f"{run_dir}/head", f"{run_dir}/base"
-
-    verdicts = []
-    for f in result["findings"]:
-        failed = [f"rule_v1.{name} is false" for name in RULE_V1 if not f["rule_v1"][name]]
-        if not f["in_diff"]:
-            failed.append("the line is outside the diff")
-        if not fetched:
-            failed.append("the GitHub fetch failed")
-        head, base = calls.get(f["head_run"]), calls.get(f["base_run"])
-        if head is None:
-            failed.append(f"head_run {f['head_run']!r} is not a shell call of the main session")
-        elif not head["finished"]:
-            failed.append("head_run did not finish inside its call")
-        elif f["observed"] not in head["output"]:
-            failed.append("observed is not in the head_run output")
-        if base is None:
-            failed.append(f"base_run {f['base_run']!r} is not a shell call of the main session")
-        else:
-            if head is not None and (head_tree not in head["command"]
-                                     or base["command"] != head["command"].replace(head_tree, base_tree)):
-                failed.append("base_run is not head_run's command run in the base worktree")
-            if not base["finished"]:
-                failed.append("base_run did not finish inside its call")
-            elif not base["ok"]:
-                failed.append("base_run failed")
-            if base["cut"]:
-                failed.append("base_run's output was cut to a preview")
-            elif f["observed"] in base["output"]:
-                failed.append("observed is also in the base_run output")
-        verdict = "shadow_nit" if f["kind"] == "nit" else "digest" if failed else "auto_post"
-        verdicts.append({**f, "verdict": verdict, "checks_failed": failed})
-    return verdicts
-
-
-def hold_back(verdicts, comments, started, orgs):
-    """Splits a run's auto_post findings into those whooper-post sends and those it holds back,
-    moved to the digest with the reasons.
-
-    comments are the PR's review comments as GitHub's REST API lists them, and started is when the
-    run started. A finding is held back when a comment created since then covers its line, because
-    someone may have raised the point after the run read github.json, or when its draft @-mentions
-    someone or links anywhere but the GitHub pages of orgs.
-    """
-    def covers(c, f):
-        # line is null once a later push moves the comment off the diff; original_line remains.
-        end = c["line"] or c["original_line"]
-        start = c["start_line"] or c["original_start_line"] or end
-        return c["path"] == f["path"] and c["side"] == f["side"] and start <= f["line"] <= end
-
-    new = [c for c in comments if datetime.fromisoformat(c["created_at"]) >= started]
-    posts, held = [], []
-    for v in verdicts:
-        if v["verdict"] != "auto_post":
-            continue
-        reasons = []
-        if any(covers(c, v) for c in new):
-            reasons.append("a review comment written since the run started covers this line")
-        if MENTION.search(v["draft"]):
-            reasons.append("the draft @-mentions someone")
-        if any(not link.startswith(tuple(f"https://github.com/{org}/" for org in orgs)) for link in LINK.findall(v["draft"])):
-            reasons.append("the draft links outside the configured GitHub orgs")
-        if reasons:
-            held.append({**v, "verdict": "digest", "checks_failed": reasons})
-        else:
-            posts.append(v)
-    return posts, held
-
-
 def review_request(head_sha, event, body, comments):
     """The body of the one POST /repos/<owner>/<repo>/pulls/<pr>/reviews call that posts a review at
     head_sha: event is APPROVE or COMMENT, body is the review's message, and comments are (finding,
@@ -3815,7 +3571,7 @@ def read_findings(run_dir):
     before its schema check, such as at the time limit or for an empty file, so only a file that reads
     as findings shows that the review finished. The file need not fit the schema, so that an ask can
     answer about an older review, or one whooper-review stopped after the run wrote part of the file;
-    whooper-draft, whooper-submit, and whooper-classify read it with read_valid_findings instead."""
+    whooper-draft and whooper-submit read it with read_valid_findings instead."""
     try:
         result = json.loads((run_dir / "findings.json").read_text())
         # whooper-ask --finding looks findings up by ID.
@@ -3830,7 +3586,7 @@ FINDINGS_SCHEMA = ROOT / "schemas" / "findings.json"
 
 
 def read_valid_findings(run_dir, command):
-    """The findings.json of the review in run_dir, for whooper-<command>: draft, submit, or classify,
+    """The findings.json of the review in run_dir, for whooper-<command>: draft or submit,
     which read its fields without checking for each one. Refuses a review that did not finish, which
     left no findings.json or one that does not fit FINDINGS_SCHEMA, naming the first part that does not
     fit. whooper-review leaves findings.json as the run wrote it when it stops the review before its
@@ -3980,8 +3736,12 @@ def review_to_submit(data, run):
     drafts = read_drafts(run)
     comments = vetted_comments(result["findings"], drafts)
     # GitHub takes an inline comment only on a line inside a hunk of the PR's diff, and refuses the
-    # whole review for one comment elsewhere. The review run says which lines are inside with in_diff.
-    if outside := [f for f, _ in comments if not f["in_diff"]]:
+    # whole review for one comment elsewhere. The run's diff.patch says which lines are inside.
+    try:
+        patch = (run / "diff.patch").read_text(errors="replace")
+    except FileNotFoundError:
+        patch = ""
+    if outside := [f for f, _ in comments if not in_diff(patch, f["path"], f["side"], f["line"])]:
         refuse(OUTSIDE_DIFF_EXIT, "whooper-submit: nothing posted: these included comments are on lines outside the"
                " PR's diff, where GitHub takes no comment, so it would refuse the whole review:\n"
                + "".join(f"  finding {f['id']}: {f['title']} ({f['path']}:{f['line']})\n" for f in outside)
@@ -3989,53 +3749,10 @@ def review_to_submit(data, run):
     return result, drafts, comments
 
 
-APPROVAL_TEXT = {"approve_once_ci_passes": "Approve once CI passes", "look_first": "Look first"}
-
-
-def summary_text(run_dir):
-    """The summary channel's message for a run that whooper-post has handled: the PR, what posted or
-    would post, how many findings wait in the digest, and where the log is."""
-    def load(name):
-        return json.loads((run_dir / name).read_text())
-
-    item, result, post = load("run.json"), load("findings.json"), load("post.json")
-    lines = [
-        f"Whooper reviewed https://github.com/{item['repo']}/pull/{item['pr']} at {item['head_sha'][:12]}"
-        + (" (dry run)." if item["dry_run"] else "."),
-        f"{APPROVAL_TEXT[result['approval']['verdict']]}: {result['approval']['reason']}",
-    ]
-    if result["status"] == "skipped":
-        lines.append(f"Skipped: {result['skip_reason']}")
-    elif post["status"] == "stale":
-        lines.append(f"Posted nothing: the PR's head moved to {post['head_now'][:12]} during the review.")
-    elif post["posted"]:
-        lines.append(f"Would post these comments (print only, request in {post['request']}):")
-        lines += [f"- {p['title']} ({p['path']}:{p['line']})" for p in post["posted"]]
-    else:
-        lines.append("Nothing to post.")
-    # classify sent every finding but the auto_post ones to the digest, and whooper-post the held ones.
-    waiting = sum(v["verdict"] != "auto_post" for v in load("verdicts.json")) + len(post["held"])
-    if waiting:
-        lines.append(f"Findings in the digest: {waiting}")
-    lines.append(f"Log: {run_dir / 'log.md'}")
-    return "\n".join(lines)
-
-
-def append_digest(data, run_dir, item, verdicts):
-    """Adds findings that wait for the user to data/digest.jsonl, with the run they came from."""
-    with open(data / "digest.jsonl", "a") as digest:
-        for v in verdicts:
-            digest.write(json.dumps({
-                "run_id": item["run_id"], "repo": item["repo"], "pr": item["pr"], "head_sha": item["head_sha"],
-                "kind": item["kind"], "dry_run": item["dry_run"], "as_of": item["as_of"],
-                "log": str(run_dir / "log.md"), "finding": v,
-            }) + "\n")
-
-
 # The files of a review run's record that an ask run's prompt lists, in this order, with what each
 # holds. A file the run directory lacks is left out: only a review whooper-review stopped leaves
 # failure.txt, a Claude review leaves transcript.jsonl and a Devin review transcript.json,
-# drafts.json, submit.json, and summary.md come only from the user's choices or a Devin summary,
+# drafts.json and submit.json come only from the user's choices,
 # overview.json only from a run that wrote an overview, which overview.invalid.json holds instead when
 # whooper-review dropped it, and waiting.json only from a review whooper-round did not start.
 # failure.txt is here rather than in ASK_FAILURE_RECORD because a Devin review writes findings.json
@@ -4060,11 +3777,8 @@ ASK_RECORD = {
     "transcript.json": "the review's whole conversation, with every command it ran and that command's output",
     "run.json": "the work item: the PR, why it is the user's work, and the head and merge-base commits",
     "prompt.md": "the instructions the review followed",
-    "verdicts.json": "which findings Whooper would post on its own, and the checks each other finding failed",
-    "post.json": "what Whooper's own posting would post, and what it held back and why",
     "drafts.json": "the user's choices for the review: which comments go in, edited texts, approve or comment, and the message",
     "submit.json": "the review the user submitted to GitHub",
-    "summary.md": "Whooper's summary of the review",
     "waiting.json": "why the review has not run yet: the cause that stopped an earlier review in its round",
 }
 # The files an ask run's prompt also lists for a review that did not finish, one that left no
@@ -4162,8 +3876,6 @@ def main(command, *args):
             "WHOOPER_ORGS": " ".join(config["github"]["orgs"]),
             "WHOOPER_SLACK_USER": config["slack"]["user_id"],
             "WHOOPER_ASK_CHANNEL": config["slack"]["ask_channel"],
-            "WHOOPER_SUMMARY_CHANNEL": config["slack"]["summary_channel"],
-            "WHOOPER_SUMMARY_CHANNEL_NAME": config["slack"]["summary_channel_name"],
             "WHOOPER_SLACKDUMP_WORKSPACE": config["slack"]["slackdump_workspace"],
             "WHOOPER_REVIEW_TIMEOUT_MINUTES": review_timeout,
             # A poll run that hangs, such as on a request the network dropped, holds up the loop.
@@ -4171,7 +3883,7 @@ def main(command, *args):
             "WHOOPER_ASK_TIMEOUT_MINUTES": ask_timeout,
             # The script whooper-round runs after each review, relative to the config's directory.
             "WHOOPER_NOTIFY": config["dir"] / config["schedule"]["notify"] if "notify" in config.get("schedule", {}) else "",
-            **{f"WHOOPER_{job.upper()}_AGENT": agent for job, agent in config["jobs"].items()},
+            **{f"WHOOPER_{job.upper()}_AGENT": config["jobs"][job] for job in JOBS},
         }
         for name, value in values.items():
             print(f"{name}={shlex.quote(str(value))}")
@@ -4215,8 +3927,6 @@ def main(command, *args):
             values["skill_tool"] = REVIEW_WORDING[agent]["skill_tool"]
             facts = ask_facts(Path(run), question, *finding)
         print(fill((ROOT / "prompts" / f"{name}.md").read_text(), values) + facts, end="")
-    elif command == "claude-version":
-        check_claude(load_config())
     elif command == "check":
         schema, path = args
         try:
@@ -4265,7 +3975,7 @@ def main(command, *args):
         recheck_list = data / "rechecks"
         recheck_list.mkdir(exist_ok=True)
         # list_again writes the list under this lock too, so a mark of a PR that whooper-submit or
-        # whooper-post writes while the selection runs, as for new commits, waits for the deletes below
+        # whooper-review writes while the selection runs, as for new commits, waits for the deletes below
         # instead of being deleted with the item it replaces.
         with folder_lock(recheck_list):
             rechecks = [load(path) for path in sorted(recheck_list.glob("*.json"))]
@@ -4346,59 +4056,19 @@ def main(command, *args):
         data, item, failure = Path(args[0]), load(args[1]), load(args[2])
         cause = {key: failure[key] for key in ("id", "summary", "scope")}
         wait_review(data, item, cause, load_config()["jobs"]["review"], datetime.now(timezone.utc))
-    elif command == "classify":
-        # Not resolve(): the run's commands name its directory as whooper-review printed it, and on
-        # macOS a directory under $TMPDIR resolves to another path through /private.
-        data, run = Path(args[0]), Path(os.path.abspath(args[1]))
-        result = read_valid_findings(run, command)
-        # verdicts.json is written last, so a run that has it already added its findings to the digest.
-        if (run / "verdicts.json").exists():
-            raise SystemExit(f"whooper-classify: {run} is already classified")
-        item = load(run / "run.json")
-        # A run from before run.json recorded its agent was a claude run.
-        agent = item.get("agent", "claude")
-        if agent not in SHELL_CALLS:
-            raise SystemExit(f"whooper-classify: {run} ran on {agent}, which has no transcript reader")
-        verdicts = classify(result, SHELL_CALLS[agent](run), (run / "github.json").exists(), run)
-        append_digest(data, run, item, [v for v in verdicts if v["verdict"] != "auto_post"])
-        write_record(data / "prs", item, "done", datetime.now(timezone.utc), result["approval"])
-        (run / "verdicts.json").write_text(json.dumps(verdicts, indent=2))
-        print(f"approval: {result['approval']['verdict']}: {result['approval']['reason']}")
-        for v in verdicts:
-            print(f"{v['verdict']}: finding {v['id']} at {v['path']}:{v['line']}: {v['title']}")
-            for check in v["checks_failed"]:
-                print(f"    {check}")
-    elif command == "post":
-        data, run, head_now, comments = Path(args[0]), Path(args[1]).resolve(), args[2], load(args[3])
-        if not (run / "verdicts.json").exists():
-            raise SystemExit(f"whooper-post: {run} is not classified; run bin/whooper-classify first")
-        # post.json is written last, so a run that has it already moved its held findings to the digest.
-        if (run / "post.json").exists():
-            raise SystemExit(f"whooper-post: {run} was already handled; see its post.json")
-        item = load(run / "run.json")
-        if head_now != item["head_sha"]:
-            mark_new_commits(data, item, head_now, datetime.now(timezone.utc))
-            (run / "post.json").write_text(json.dumps({"status": "stale", "head_now": head_now, "posted": [], "held": []}))
-            print(f"stale: the PR's head is now {head_now}, so nothing posts; the next round reviews the new commits")
-            return
-        started, _ = parse_run_id(item["run_id"])
-        posts, held = hold_back(load(run / "verdicts.json"), comments, started, load_config()["github"]["orgs"])
-        append_digest(data, run, item, held)
-        request_file = run / "post-request.json"
-        if posts:
-            # Whooper's own review only comments: it never approves or requests changes.
-            body = f"{MARKER} review. Each comment reports a failure Whooper reproduced at this commit and not at the merge base."
-            request = review_request(item["head_sha"], "COMMENT", body, [(p, f"{MARKER}\n\n{p['draft']}") for p in posts])
-            request_file.write_text(json.dumps(request, indent=2))
-        (run / "post.json").write_text(json.dumps({
-            "status": "printed" if posts else "nothing to post",
-            "request": str(request_file) if posts else None,
-            "posted": [{"id": p["id"], "title": p["title"], "path": p["path"], "line": p["line"]} for p in posts],
-            "held": [{"id": h["id"], "title": h["title"], "reasons": h["checks_failed"]} for h in held],
-        }, indent=2))
-        for h in held:
-            print(f"held: finding {h['id']} at {h['path']}:{h['line']}: {', '.join(h['checks_failed'])}")
-        print(f"printed the request to {request_file}" if posts else "nothing to post")
+    elif command == "reviewed":
+        # whooper-review runs this once the review ends with findings that fit: the record at the reviewed
+        # head says done, so select_work starts no other review of it. When the PR has new commits since the
+        # review, as head now, the GitHub head whooper-review read after the run, says, the record says stale
+        # instead and the PR goes on the recheck list (mark_new_commits), so the next round reviews the new
+        # commits whatever brought the PR in.
+        data, run, head_now = Path(args[0]), Path(args[1]), (args[2] if len(args) > 2 else None)
+        item, now = load(run / "run.json"), datetime.now(timezone.utc)
+        write_record(data / "prs", item, "done", now)
+        if head_now and head_now != item["head_sha"]:
+            mark_new_commits(data, item, head_now, now)
+            print(f"whooper-review: the PR's head is now {head_now}; the next round reviews the new commits",
+                  file=sys.stderr)
     elif command == "draft":
         if len(args) < 2:
             raise SystemExit(DRAFT_USAGE)
@@ -4469,8 +4139,6 @@ def main(command, *args):
             write_file(run / "submit.json", claim, exclusive=True)
         except FileExistsError:
             raise SystemExit(f"whooper-submit: {run} was already submitted; see its submit.json")
-    elif command == "summary":
-        sys.stdout.write(summary_text(Path(args[0]).resolve()))
     elif command == "skills":
         print(json.dumps(skill_hashes(args[0])))
     elif command == "settings":

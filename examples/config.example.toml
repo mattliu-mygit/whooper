@@ -8,7 +8,7 @@ github_login = "sam-example"
 
 [github]
 orgs = ["example-org"]             # searches, Slack links, and links in drafts stay inside these orgs
-# Bot accounts that review PRs. A point one of them already raised does not auto-post again.
+# Bot accounts that review PRs. Reviews treat a point one of them already raised as raised.
 review_bots = [
   { login = "ci-review-bot", label = "the CI review bot" },
   { login = "assistant-bot", label = "the coding assistant" },
@@ -18,21 +18,18 @@ review_bots = [
 workspace_url = "https://example.slack.com"
 user_id = "U0000000000"            # your member ID: profile, "...", Copy member ID
 ask_channel = "C0000000001"        # where teammates ask you for reviews
-summary_channel = "C0000000002"    # a private channel for Whooper's summaries
-summary_channel_name = "#whooper"
 slackdump_workspace = "example"    # the poll's slackdump login: slackdump workspace new <name>
 
-# The agent each job runs on, required for all three. agents/ has a folder per agent with a launcher
+# The agent each job runs on, required for both. agents/ has a folder per agent with a launcher
 # per job it can run.
 [jobs]
 review = "devin"
 poll = "devin"
-summary = "devin"
 
 # Each agent's settings. Model names are the agent's own: Devin's names add the effort level.
 [agents.claude]
 review_model = "claude-opus-5-5"
-poll_model = "claude-haiku-5-5"    # also sends the summary
+poll_model = "claude-haiku-5-5"
 # budget_usd = 15                  # the most one review may spend; leave out for no limit
 
 [agents.devin]

@@ -39,7 +39,9 @@
 # examples.json (lib/whooper.py's examples). Then a step of at most 15 minutes has gremlins change each changed Go line
 # tests ran, one small change at a time, and adds to test_gaps.json which lines survived, the tests still passing, and
 # which were caught (lib/whooper.py's mutation). Whatever each step finds, and even if it fails, the review goes
-# on as it would without its file. bin/whooper-classify <run dir> then applies rule v1 to its findings.
+# on as it would without its file. A review that ends with findings that fit marks its <state>/prs record
+# done, or stale when gh says the PR's head moved during the review, which also puts the PR on the recheck
+# list so the next round reviews the new commits (lib/whooper.py's reviewed).
 #
 # While it runs, this script holds the PR's lock, <state>/locks/<owner>-<repo>-<pr>/, with its
 # process ID in pid and the run ID in run_id. On exit, a run that did not finish first counts as a
@@ -55,8 +57,6 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 eval "$("$root/lib/python" "$root/lib/whooper.py" env)"
-# With a job on claude, refuse a Claude Code older than 2.1.295 (lib/whooper.py's check_claude).
-"$root/lib/python" "$root/lib/whooper.py" claude-version || exit 1
 data="$WHOOPER_STATE"
 usage="usage: whooper-review <work-item.json> --dry-run [--as-of <time>]"
 # git takes an external diff tool from GIT_EXTERNAL_DIFF, and how many unchanged lines go around each
@@ -353,26 +353,6 @@ if [[ -n "$WHOOPER_REPO_SETUP" ]]; then
 fi
 step=review step_log=""
 
-# The run reads the change with its own git diff (prompts/review.md), so its environment gives git, as
-# config entries, which outrank the user's config files, the settings diff.patch's arguments pin, with
-# color.diff=never for --no-color, and diff.noprefix=false, diff.srcPrefix=a/, and diff.dstPrefix=b/ for
-# a/ and b/, and diff.relative=false, so a git diff the run starts in a subfolder of the head, as after
-# a probe's cd, still shows the whole change. --no-ext-diff and --no-textconv have no such entry: git
-# fails to start an empty diff.external rather than turn it off, and a textconv filter goes with the
-# diff attribute that names it, so core.attributesFile=/dev/null leaves the run only those the repo's
-# .gitattributes names; prompts/review.md tells the run to pass both flags instead (README.md). The
-# entries come after any the environment already holds, so of two entries of the same name the run's
-# wins. The run then sees the hunks, and so the lines inside them, that diff.patch shows, and that
-# GitHub takes comments on.
-config_count="${GIT_CONFIG_COUNT:-0}"
-run_config=()
-for setting in diff.context=3 diff.interHunkContext=0 diff.algorithm=myers diff.indentHeuristic=true \
-  diff.suppressBlankEmpty=false diff.renames=true diff.renameLimit=1000 diff.orderFile=/dev/null core.quotePath=true \
-  core.bigFileThreshold=512m core.attributesFile=/dev/null diff.ignoreSubmodules=none diff.submodule=short \
-  diff.noprefix=false diff.srcPrefix=a/ diff.dstPrefix=b/ color.diff=never core.abbrev=12 diff.relative=false; do
-  run_config+=("GIT_CONFIG_KEY_$config_count=${setting%%=*}" "GIT_CONFIG_VALUE_$config_count=${setting#*=}")
-  config_count=$((config_count + 1))
-done
 
 # Each step runs lib/whooper.py <step> <run directory> to save one file for the review screen, and stops at
 # a time limit of its own. Whatever it finds, and even if it fails, the review goes on as it would without
@@ -385,7 +365,6 @@ run_step() {
   step_file="$work/$1.group"
   (
     exec env GH_TOKEN=disabled GIT_SSH_COMMAND=false GIT_TERMINAL_PROMPT=0 TMPDIR="$run/tmp" \
-      "${run_config[@]}" GIT_CONFIG_COUNT="$config_count" \
       "$root/lib/python" "$root/lib/whooper.py" session "$step_file" \
       "$root/lib/python" "$root/lib/whooper.py" "$1" "$run" < /dev/null >&2
   ) &
@@ -433,7 +412,6 @@ agent_file="$work/agent.group"
 (
   cd "$run/head"
   exec env GH_TOKEN=disabled GIT_SSH_COMMAND=false GIT_TERMINAL_PROMPT=0 TMPDIR="$run/tmp" \
-    "${run_config[@]}" GIT_CONFIG_COUNT="$config_count" \
     "$root/lib/python" "$root/lib/whooper.py" session "$agent_file" \
     "$root/agents/$WHOOPER_REVIEW_AGENT/review" "$run/prompt.md" < /dev/null
 ) &
@@ -484,8 +462,11 @@ step=time-limit
 step=findings
 [[ -s "$run/findings.json" ]] ||
   die "the review run exited $agent_exit without findings; see $run/stderr.log and the transcript in $run"
-# A finding that does not fit the schema would break classify, post, and the summary later.
+# A finding that does not fit the schema would break whooper-draft and whooper-submit later.
 "$root/lib/python" "$root/lib/whooper.py" check "$root/schemas/findings.json" "$run/findings.json" ||
   { mv "$run/findings.json" "$run/findings.invalid.json"; die "the review run's findings.json does not fit the schema"; }
 [[ -f "$run/log.md" ]] || echo "whooper-review: the run wrote no log.md" >&2
+# Without the PR's head now, as when gh fails, the record says done at the reviewed head.
+head_now="$(gh api "repos/$repo/pulls/$pr" --jq .head.sha 2>/dev/null)" || head_now=""
+"$root/lib/python" "$root/lib/whooper.py" reviewed "$data" "$run" ${head_now:+"$head_now"}
 finished=true

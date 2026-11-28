@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Prints the work items to start, one JSON object per line: the newest poll's, and the recheck
-# list's in <state>/rechecks, PRs whose head whooper-post or whooper-submit found moved since their
+# list's in <state>/rechecks, PRs whose head whooper-review or whooper-submit found moved since their
 # review, whose review the user asked for again with bin/whooper-retry, or whose review waited in a
 # round after another stopped at a cause that stops every review. It drops re-checks, which
 # whooper-review cannot review yet, recheck-list items whose PR GitHub reported merged or closed when
@@ -9,7 +9,7 @@
 # while it is its PR's newest run, printing each with its reason on stderr, but not an item whose
 # record says retry unless it is a re-check or its PR is merged or closed. A record that says
 # running while no live whooper-review holds the PR's lock in <state>/locks, as after a review cut
-# short in its cleanup or a round stopped before whooper-classify, first becomes failed, with one
+# short in its cleanup, first becomes failed, with one
 # more failure, as an interrupted review's does. It deletes the recheck list's entries that no
 # longer wait: the poll lists the PR for a first review, the PR is merged or closed, the review at
 # the listed head is done or has failed 3 times, the entry asks again for a review the user removed,

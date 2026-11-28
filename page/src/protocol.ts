@@ -57,10 +57,8 @@ export interface Cause {
   scope: "all" | "pr";
 }
 
-/** `bin/whooper-status --json`, format version 1; its header describes each field. */
+/** `bin/whooper-status`; its header describes each field. */
 export interface WhooperStatus {
-  version: 1;
-  loop: { running: boolean; pid: number | null };
   paused: boolean;
   next_round: string | null;
   round: { running: boolean; started_at: string | null; reviewing: string | null };
@@ -96,14 +94,6 @@ export interface WhooperStatus {
     pr_head_sha: string | null;
     skipped_by_user: boolean;
     removed_by_user: boolean;
-  }[];
-  /** The last 50 rounds, newest first. */
-  rounds: {
-    started_at: string;
-    ended_at: string | null;
-    result: "done" | "poll_failed" | "interrupted" | "skipped";
-    selected: number;
-    reason: string | null;
   }[];
   /** How many rounds started on each of the last 15 local days, oldest first and today last, by how
    * they ended: date is the local day, such as 2031-07-30. An older Whooper leaves it out. */
@@ -142,9 +132,8 @@ export type StatusReview = WhooperStatus["reviews"][number];
 /** One day in the rounds_by_day of `bin/whooper-status --json`. */
 export type RoundsOfDay = NonNullable<WhooperStatus["rounds_by_day"]>[number];
 
-/** `bin/whooper-show --json <run-id>`, format version 1; its header describes each field. */
+/** `bin/whooper-show <run-id>`; its header describes each field. */
 export interface Shown {
-  version: 1;
   run_id: string;
   /** run.json, or null when whooper-review stopped before it wrote the file. */
   run: { repo: string; pr: number; head_sha?: string } | null;

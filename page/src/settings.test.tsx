@@ -116,18 +116,18 @@ describe("the Settings tab", () => {
 
   it("keeps each choice shown as edits redraw its options, and drops Not set once a choice is made", async () => {
     const settings = fixtures.settings();
-    settings.jobs = { review: "devin", poll: "claude" };
+    settings.jobs = { review: "devin" };
     await openSettings(settings);
     const options = (name: string) => [...field(name).querySelectorAll("option")].map((option) => option.textContent);
     expect(field("Review agent")).toHaveValue("devin");
-    expect(field("Summary agent")).toHaveValue("");
-    expect(options("Summary agent")).toEqual(["Not set", "Claude", "Devin"]);
+    expect(field("Poll agent")).toHaveValue("");
+    expect(options("Poll agent")).toEqual(["Not set", "Claude", "Devin"]);
     fireEvent.input(field("Poll every"), "30");
     expect(field("Review agent")).toHaveValue("devin");
-    expect(field("Summary agent")).toHaveValue("");
-    fireEvent.change(field("Summary agent"), { target: { value: "devin" } });
-    expect(options("Summary agent")).toEqual(["Claude", "Devin"]);
-    expect(field("Summary agent")).toHaveValue("devin");
+    expect(field("Poll agent")).toHaveValue("");
+    fireEvent.change(field("Poll agent"), { target: { value: "devin" } });
+    expect(options("Poll agent")).toEqual(["Claude", "Devin"]);
+    expect(field("Poll agent")).toHaveValue("devin");
     expect(field("Review agent")).toHaveValue("devin");
   });
 

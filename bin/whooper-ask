@@ -29,8 +29,6 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 eval "$("$root/lib/python" "$root/lib/whooper.py" env)"
-# With a job on claude, refuse a Claude Code older than 2.1.295 (lib/whooper.py's check_claude).
-"$root/lib/python" "$root/lib/whooper.py" claude-version || exit 1
 usage="usage: whooper-ask <run-id> <question> [--finding <finding-id>]"
 
 die() {
@@ -74,8 +72,7 @@ if jq -e . "$run/run.json" > /dev/null 2>&1; then
     && ps -o command= -p "$holder" 2>/dev/null | grep -q whooper-review; then
     die "the review is still running, in process $holder; ask again once it ends"
   fi
-  # A run from before run.json recorded its agent was a claude run, as whooper-classify assumes.
-  agent="$(jq -r '.agent // "claude"' "$run/run.json")"
+  agent="$(jq -r .agent "$run/run.json")"
 elif [[ -f "$run/failure.txt" ]]; then
   # whooper-review stopped this review before it wrote run.json, such as when the fetch failed or
   # the skills could not be hashed, and no agent ran. whooper-review writes failure.txt as it stops,

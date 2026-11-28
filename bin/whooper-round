@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Runs one round of Whooper now: whooper-fetch, whooper-poll, and whooper-select, then for each
-# selected item a dry-run whooper-review, whooper-classify, whooper-post --print, and
-# whooper-summary, and runs [schedule] notify as <notify> <title> <message> when that review
-# finishes or fails, unless bin/whooper-skip stopped it. Nothing posts to GitHub or Slack.
+# selected item a dry-run whooper-review, and runs [schedule] notify as <notify> <title> <message>
+# when that review finishes or fails, unless bin/whooper-skip stopped it. Nothing posts to GitHub or Slack.
 # whooper-run runs it on the config's [schedule]; run by hand, it runs a round even while Whooper is
 # paused.
 #
@@ -16,8 +15,8 @@
 # and exits 1 with "a round is already running" while another whooper-round holds it. While the
 # round runs, round.lock/round.json holds when it started and the PR it is reviewing. When the round
 # ends, done, failed, or stopped, it writes <state>/last-round.json, which bin/whooper-status reads,
-# and adds the round to <state>/rounds.jsonl, the history of the last 15 days' rounds and at least the
-# last 50, with a reason: which poll step failed, the cause reviews wait on and how many wait, or
+# and adds the round to <state>/rounds.jsonl, the history of the last 15 days' rounds, with a
+# reason: which poll step failed, the cause reviews wait on and how many wait, or
 # null. It exits 0 when the poll steps succeeded, whether or not each review did, and 1 when one
 # failed.
 #
@@ -81,12 +80,12 @@ trap 'trap "" INT TERM HUP; exit 130' INT TERM HUP
 # and HUP, so no signal leaves it behind.
 work="$(trap '' INT TERM HUP; mktemp -d)"
 
-# Runs bin/$1 with the arguments after it, whooper-fetch, whooper-poll, a review, or whooper-summary, in
+# Runs bin/$1 with the arguments after it, whooper-fetch, whooper-poll, or a review, in
 # a session of its own (lib/whooper.py session), as whooper-review starts its run, and returns its exit
 # code. The round waits for it in the background, so an INT, TERM, or HUP reaches finish at once, and
 # finish stops it through child.group in the work folder (stop_group). A Ctrl-C or kill -- -<pid> that
 # lands while the round forks a child can miss the child, which then ran to its end before the round
-# stopped, and the summary's agent has no time limit.
+# stopped.
 run_child() {
   local name="$1" code=0
   shift
@@ -127,10 +126,8 @@ take() {
 } 9< "$WHOOPER_STATE/locks" || exit 1
 
 echo "=== $(date '+%F %T') poll"
-# step names the poll step that runs, for the history's reason when it fails. The first refuses a Claude
-# Code older than 2.1.295 while a job runs on claude (lib/whooper.py's check_claude).
-if ! { step="The Claude Code version check" && "$root/lib/python" "$root/lib/whooper.py" claude-version &&
-  step="The GitHub fetch" && run_child whooper-fetch && step="The Slack poll" && run_child whooper-poll &&
+# step names the poll step that runs, for the history's reason when it fails.
+if ! { step="The GitHub fetch" && run_child whooper-fetch && step="The Slack poll" && run_child whooper-poll &&
   step="Selecting the work" && save "$items/selected.jsonl" "$root/bin/whooper-select"; }; then
   echo "a poll step failed; trying again next round"
   result=poll_failed reason="$step failed"
@@ -159,9 +156,6 @@ while IFS= read -r item <&3; do
   run_child whooper-review "$file" --dry-run > "$work/run.txt" || review_exit=$?
   run="$(cat "$work/run.txt")"
   if ((review_exit == 0)); then
-    "$root/bin/whooper-classify" "$run" < /dev/null
-    "$root/bin/whooper-post" "$(basename "$run")" --print < /dev/null
-    run_child whooper-summary "$(basename "$run")"
     notify "Whooper reviewed $pr" "$(jq -r '"\(.approval.verdict | gsub("_"; " ")), \(.findings | length) finding(s). \(.approval.reason | .[0:200])"' "$run/findings.json")"
     outcome=reviewed
   elif [[ -n "$run" && -e "$run/skipped-by-user" ]]; then

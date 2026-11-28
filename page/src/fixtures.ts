@@ -547,8 +547,6 @@ const day = (date: string, done: number, poll_failed = 0, interrupted = 0, skipp
 
 export function status(): WhooperStatus {
   return {
-    version: 1,
-    loop: { running: true, pid: 4242 },
     paused: false,
     next_round: "2031-07-27T15:45:00-07:00",
     round: { running: false, started_at: null, reviewing: null },
@@ -601,9 +599,6 @@ export function status(): WhooperStatus {
         ended_at: "2031-07-26T05:16:10-07:00", outcome: "reviewed", verdict: "look_first", skipped: false, findings: 2,
         safe_to_approve: false, submitted: null, needs_you: false, cause: null, head_sha: "0b7e2d91aa40",
         pr_head_sha: "c83d20e7f6a1", ...UNMARKED },
-    ],
-    rounds: [
-      { started_at: "2031-07-27T15:15:01-07:00", ended_at: "2031-07-27T15:22:40-07:00", result: "done", selected: 2, reason: null },
     ],
     // Polls that failed two days in a row, Jul 16 and 17, as while GitHub can't be reached; rounds stopped
     // partway on Jul 15 and 24; an afternoon paused on Jul 22; no rounds on Jul 13, 19, and 20; and today,
@@ -662,7 +657,7 @@ export function settings(): Record<string, unknown> {
   return {
     schedule: { interval_minutes: 15, start: "10:00", end: "18:00", days: ["mon", "tue", "wed", "thu", "fri"] },
     poll: { timeout_minutes: 10 },
-    jobs: { review: "claude", poll: "claude", summary: "claude" },
+    jobs: { review: "claude", poll: "claude" },
     agents: {
       claude: { review_model: "opus", poll_model: "sonnet" },
       devin: { review_model: "claude-opus-4-high", poll_model: "claude-sonnet-4" },

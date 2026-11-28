@@ -2,11 +2,8 @@
 # Prints Whooper's status as one JSON object, read from the files under <state> with no network
 # calls, where <state> is $XDG_STATE_HOME/whooper (default ~/.local/state/whooper):
 #
-#   whooper-status --json
+#   whooper-status
 #
-#   version     1, the number of this format
-#   loop        running: whether whooper-run runs, that is, its lock's process is alive and is a
-#               whooper-run; pid: that process's ID, or null
 #   paused      whether bin/whooper-pause paused the schedule
 #   next_round  when the round whooper-run waits for starts, or null while no whooper-run waits
 #   round       running, the same check for whooper-round; started_at; reviewing: the PR the round
@@ -79,12 +76,6 @@
 #     removed_by_user whether the user took the review out of their lists with bin/whooper-remove,
 #                 which leaves removed-by-user in the run directory; Whooper then does not retry it
 #                 on its own
-#   rounds      the last 50 rounds from <state>/rounds.jsonl, newest first, each {started_at,
-#               ended_at, result, selected, reason}: result is done, poll_failed, or interrupted,
-#               as in last_round, or skipped for a round whooper-run skipped while Whooper was
-#               paused, whose ended_at is null; selected is how many items the round selected, 0
-#               when it ended before selecting; reason says why it ended so, or is null: which poll
-#               step failed, the cause reviews wait on and how many wait, or that Whooper is paused
 #   rounds_by_day how many rounds started on each of the last 15 days, from <state>/rounds.jsonl,
 #               oldest first and today last, each {date, done, poll_failed, interrupted, skipped}: date
 #               is the local day, such as 2031-07-30, and each count is how many of that day's rounds
@@ -127,6 +118,6 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-[[ $# == 1 && "$1" == --json ]] || { echo "usage: whooper-status --json" >&2; exit 1; }
+(($# == 0)) || { echo "usage: whooper-status" >&2; exit 1; }
 eval "$("$root/lib/python" "$root/lib/whooper.py" env)"
 exec "$root/lib/python" "$root/lib/whooper.py" status "$WHOOPER_STATE"

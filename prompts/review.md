@@ -52,11 +52,7 @@ for this run, including the commits and paths, are at the end of this prompt.
    one {{shell}} call. To run a test the PR adds against the merge base, copy it into the base worktree
    in an earlier {{shell}} call of its own. If it does not compile there, the base call proves nothing.
    Keep probe output short, with test filters and without verbose flags: {{output_limit}}, and a
-   base output cut that way does not count.{{probe_rule}} After each {{shell}} call you see a line
-   "{{shell}} tool_use_id <id> ran: <command>". Put the head call's ID in
-   `head_run`, the base call's ID in `base_run`, and in `observed` a piece of the head output,
-   copied exactly (one line is best), that shows the failure and does not appear in the base output.
-   A finding without such a probe has empty strings in all three.
+   base output cut that way does not count.{{probe_rule}}
 6. Notes for this repository:
 
 {{repo_notes}}
@@ -68,23 +64,14 @@ result. Candidates you dropped or cleared go in the log, not in the findings.
 
 For each finding:
 - `path`, `line`, `side`: where the comment goes. `side` is RIGHT for a line of the head and LEFT
-  for a deleted line. `in_diff` is true only when that line is inside a hunk of
+  for a deleted line. Put each comment on a line inside a hunk of
   `git diff --no-ext-diff --no-textconv <merge base> HEAD -- <path>`, because GitHub accepts inline
-  comments only there.
+  comments only there; a point about another line goes in the comment on the nearest such line.
 - `title`: one line for {{user_name}}. `draft`: the comment as {{user_name}} would post it, following the skills'
   comment rules, with no marker and no support label.
 - `kind`: `caller_visible_bug` (a caller gets a different response, status, or message than at the
   merge base, a panic, or a request that runs twice), `ci_failure` (a test or check fails in CI),
   `nit`, `question`, or `other`. A nit also gets a `nit_kind`.
-- `rule_v1`: answer each one strictly. Most findings have some false answers, and that is fine.
-  - `ran_and_saw_failure`: you ran a probe at the head that goes through production code, not a test
-    fake, and saw the failure.
-  - `caller_or_ci_visible`: a caller or CI would see the failure, as in `caller_visible_bug` and
-    `ci_failure`.
-  - `introduced_by_pr`: the same probe at the merge base does not show it.
-  - `not_already_raised`: no person or review bot raised it in `github.json`. False
-    when the facts say `github.json` is missing.
-  - `not_pr_text`: the finding is not about the PR's title or body.
 
 ## Approval
 
@@ -166,8 +153,7 @@ PR changes no such function.
 Before you return, write `log.md` in the run directory. A later session must be able to explain
 every finding from the log alone, without redoing the review. It holds:
 - the PR, the head and merge-base commits, and what the change does, in two or three sentences;
-- for each finding, the evidence: the probe commands with their tool-use IDs and the output that
-  matters;
+- for each finding, the evidence: the probe commands and the output that matters;
 - the candidates you dropped or cleared, numbered d1, d2, ..., each with its reason;
 - what you ran, and what you could not run and why.
 

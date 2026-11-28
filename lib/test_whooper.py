@@ -19,9 +19,9 @@ from zoneinfo import ZoneInfo
 
 import whooper
 from whooper import (REVIEW_WORDING, SETTINGS_SCHEMA, add_round, bot_list, change_drafts, check_overview, check_schema,
-                     claude_shell_calls, classify, co_change, conversation, devin_shell_calls, diff_files, failure_cause,
+                     co_change, conversation, diff_files, failure_cause,
                      fill, main, mark_new_commits, next_round, pr_link, poll_items, read_asks, read_drafts, read_schedule,
-                     select_work, short_date, short_time, skill_hashes, slack_posts, status_v2, summary_text,
+                     select_work, short_date, short_time, skill_hashes, slack_posts, status_v2,
                      wait_review, write_record, write_settings)
 
 LOGIN = "sam-example"
@@ -39,14 +39,11 @@ review_bots = [{ login = "ci-review-bot", label = "the CI review bot" }]
 workspace_url = "https://example.slack.com"
 user_id = "U0000000000"
 ask_channel = "C0000000001"
-summary_channel = "C0000000002"
-summary_channel_name = "#whooper"
 slackdump_workspace = "example"
 
 [jobs]
 review = "claude"
 poll = "claude"
-summary = "claude"
 
 [agents.claude]
 review_model = "review-model"
@@ -99,15 +96,6 @@ def memory_heavy(test):
     only a few such tests at once."""
     test.memory_heavy = True
     return test
-
-
-# The first line of each fake claude that a command which runs agents may call: it answers --version as Claude
-# Code 2.1.314 does, which the command asks as it starts (lib/whooper.py's check_claude).
-CLAUDE_VERSION = 'if [ "$1" = --version ]; then echo "2.1.314 (Claude Code)"; exit; fi'
-# What those commands print when a job runs on claude and claude --version names a version before 2.1.295.
-CLAUDE_TOO_OLD = ("whooper: [jobs] review, poll, and summary run on claude, which needs Claude Code 2.1.295 or later,"
-                  " the first that blocks a Slack call when its guard hook fails, but `claude --version` says {}; update"
-                  " Claude Code, or move those jobs to devin\n")
 
 
 # How the review bots appear as GraphQL review authors.
@@ -600,7 +588,6 @@ def work_item(kind="first_review", head="head3", number=12):
             "source": "reviewed_by_user", "slack": None, "reason": "r"}
 
 
-
 class SelectWorkTest(unittest.TestCase):
     # 10:00 on 2031-08-01 in a UTC-7 timezone.
     now = datetime(2031, 8, 1, 10, 0, tzinfo=timezone(timedelta(hours=-7)))
@@ -906,16 +893,6 @@ class WriteRecordTest(unittest.TestCase):
             # whooper-select reads the same record.
             self.assertEqual(select_work([item], prs, second, REPOS)[0], [])
 
-    def test_stale_keeps_the_approval_done_recorded(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            prs, now = Path(tmp), datetime(2031, 8, 1, 17, 0, tzinfo=timezone.utc)
-            item = work_item(kind="first_review")
-            approval = {"verdict": "approve_once_ci_passes", "reason": "Ran the package tests."}
-            write_record(prs, item, "running", now)
-            write_record(prs, item, "done", now, approval)
-            write_record(prs, item, "stale", now)
-            path = prs / "example-org-example-repo-12" / "head3.first_review.json"
-            self.assertEqual(json.loads(path.read_text())["approval"], approval)
 
     def test_waits_for_the_pr_folders_lock_and_writes_through_a_temporary_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -930,7 +907,7 @@ class WriteRecordTest(unittest.TestCase):
                 write_file(target, text, **flags)
 
             with mock.patch.object(whooper, "write_file", spy):
-                # Another writer, such as whooper-post marking the head stale, holds the folder's lock and
+                # Another writer, such as whooper-submit marking the head stale, holds the folder's lock and
                 # writes the record meanwhile; this write waits, then counts from what it wrote.
                 with whooper.folder_lock(folder):
                     writer = threading.Thread(target=write_record, args=(prs, work_item(kind="first_review"), "failed", now))
@@ -1099,147 +1076,18 @@ class FailureCauseTest(unittest.TestCase):
                                  CAUSES[cause])
 
 
-def tool_call(tool_use_id, name, output, command="", is_error=False, subagent=None):
-    """Stream-json events for one tool call and its result. A failed Bash call's output starts with its
-    exit code. subagent is the ID of the Task call whose subagent made the call."""
-    return [
-        {"type": "assistant", "parent_tool_use_id": subagent, "message": {"content": [
-            {"type": "tool_use", "id": tool_use_id, "name": name, "input": {"command": command}}]}},
-        {"type": "user", "parent_tool_use_id": subagent, "message": {"content": [
-            {"type": "tool_result", "tool_use_id": tool_use_id, "content": output, "is_error": is_error}]}},
-    ]
-
-
-RUN = "/tmp/whooper/data/runs/20310727T010246Z-12"
-API = "github.com/example-org/example-repo/services/orders/internal/api"
-# A probe as prompts/review.md asks for it: it starts by entering one worktree.
-PROBE = "cd {}/services/orders && go test -run TestCreateOrder ./internal/api"
-HEAD_FAILS = f"Exit code 1\n--- FAIL: TestCreateOrder\n    got status 500, want 422\nFAIL\t{API}\t0.5s"
-
-# The CLI gives a tool result's content either as a string or as a list of text blocks.
-EVENTS = [
-    {"type": "user", "message": {"content": "the review prompt"}},
-    # The head probe fails, and the same probe passes at the merge base.
-    *tool_call("toolu_head", "Bash", HEAD_FAILS, PROBE.format(f"{RUN}/head"), is_error=True),
-    *tool_call("toolu_base", "Bash", [{"type": "text", "text": f"ok  \t{API}\t0.4s"}], PROBE.format(f"{RUN}/base")),
-    *tool_call("toolu_read", "Read", "got status 500, want 422"),
-    # Copying the PR's test into the base worktree prints nothing.
-    *tool_call("toolu_cp", "Bash", "(Bash completed with no output)",
-               f"cp {RUN}/head/services/orders/internal/api/orders_test.go {RUN}/base/services/orders/internal/api/"),
-    # The copied test calls a helper the PR adds, so at the merge base it does not compile and no base code runs.
-    *tool_call("toolu_base_build", "Bash",
-               f"Exit code 1\n# {API} [{API}.test]\ninternal/api/orders_test.go:40:9: undefined: newOrderRequest\n"
-               f"FAIL\t{API} [build failed]", PROBE.format(f"{RUN}/base"), is_error=True),
-    # A base output over 30,000 characters, of which the transcript keeps only a preview.
-    *tool_call("toolu_base_long", "Bash",
-               "<persisted-output>\nOutput too large (48.2KB). Full output saved to: /tmp/b1.txt\n\n"
-               "Preview (first 2KB):\n=== RUN   TestCreateOrder\n...\n</persisted-output>", PROBE.format(f"{RUN}/base")),
-    # The same probe in both trees, where an earlier cd that the commands do not show picked the tree.
-    *tool_call("toolu_head_cwd", "Bash", HEAD_FAILS, "go test -run TestCreateOrder ./internal/api", is_error=True),
-    *tool_call("toolu_base_cwd", "Bash", f"ok  \t{API}\t0.4s", "go test -run TestCreateOrder ./internal/api"),
-    # A subagent's head probe, inside the main session's Task call.
-    *tool_call("toolu_sub_head", "Bash", HEAD_FAILS, PROBE.format(f"{RUN}/head"), is_error=True, subagent="toolu_task"),
-    *tool_call("toolu_task", "Task", "The test fails at the head; toolu_sub_head shows it."),
-]
-
-
 def finding(**overrides):
     out = {
         "id": "1", "path": "services/orders/internal/api/orders.go", "line": 88, "side": "RIGHT", "in_diff": True,
         "title": "Bad JSON now returns 500", "draft": "**issue:** ...", "kind": "caller_visible_bug",
-        "rule_v1": {"ran_and_saw_failure": True, "caller_or_ci_visible": True, "introduced_by_pr": True,
-                    "not_already_raised": True, "not_pr_text": True},
-        "head_run": "toolu_head", "base_run": "toolu_base", "observed": "got status 500, want 422",
     }
     out.update(overrides)
     return out
 
 
-class ClaudeShellCallsTest(unittest.TestCase):
-    def test_lists_only_the_main_sessions_bash_calls(self):
-        self.assertEqual(sorted(claude_shell_calls(EVENTS)), sorted([
-            "toolu_head", "toolu_base", "toolu_cp", "toolu_base_build", "toolu_base_long", "toolu_head_cwd",
-            "toolu_base_cwd"]))
-
-    def test_reads_each_calls_command_output_and_outcome(self):
-        calls = claude_shell_calls(EVENTS)
-        self.assertEqual(calls["toolu_head"], {"command": PROBE.format(f"{RUN}/head"), "output": HEAD_FAILS,
-                                               "ok": False, "cut": False, "finished": True})
-        # Text blocks join into one output.
-        self.assertEqual(calls["toolu_base"]["output"], f"ok  \t{API}\t0.4s")
-        self.assertTrue(calls["toolu_base"]["ok"])
-        self.assertTrue(calls["toolu_base_long"]["cut"])
-
-
-def exec_step(call_id, output, command="", function="exec", workdir=None):
-    """One agent step of a Devin ATIF export: one tool call and its result."""
-    arguments = {"command": command, **({"workdir": workdir} if workdir else {})}
-    return {"source": "agent", "tool_calls": [{"tool_call_id": call_id, "function_name": function, "arguments": arguments}],
-            "observation": {"results": [{"source_call_id": call_id, "content": output}]}}
-
-
-def exec_output(output, exit_code):
-    """What exec reports for a command that finished."""
-    return f"Output from command in shell 5fae99:\n{output}\n\n\nExit code: {exit_code}"
-
-
-HEAD_FAILS_EXEC = exec_output(f"--- FAIL: TestCreateOrder\n    got status 500, want 422\nFAIL\t{API}\t0.5s", 1)
-# The same calls as EVENTS, as a Devin run's export records them. A subagent's calls are never in it.
-EXPORT = {"schema_version": "ATIF-v1.7", "steps": [
-    {"source": "user", "message": "the review prompt"},
-    exec_step("toolu_head", HEAD_FAILS_EXEC, PROBE.format(f"{RUN}/head")),
-    exec_step("toolu_base", exec_output(f"ok  \t{API}\t0.4s", 0), PROBE.format(f"{RUN}/base")),
-    exec_step("toolu_read", "got status 500, want 422", function="read"),
-    exec_step("toolu_cp", exec_output("", 0),
-              f"cp {RUN}/head/services/orders/internal/api/orders_test.go {RUN}/base/services/orders/internal/api/"),
-    exec_step("toolu_base_build", exec_output(
-        f"# {API} [{API}.test]\ninternal/api/orders_test.go:40:9: undefined: newOrderRequest\nFAIL\t{API} [build failed]", 1),
-        PROBE.format(f"{RUN}/base")),
-    # exec keeps the start and end of a long output and names the file with the rest.
-    exec_step("toolu_base_long", "Output from command in shell 5fae99. The full terminal output is being written live to "
-              "/tmp/devin-overflows-502/shell-5fae99/content.txt; read or grep it for anything omitted below. Preview:\n"
-              "<file-view>\n    1|=== RUN   TestCreateOrder\n</file-view>\n\nExit code: 0", PROBE.format(f"{RUN}/base")),
-    exec_step("toolu_head_cwd", HEAD_FAILS_EXEC, "go test -run TestCreateOrder ./internal/api"),
-    exec_step("toolu_base_cwd", exec_output(f"ok  \t{API}\t0.4s", 0), "go test -run TestCreateOrder ./internal/api"),
-    # A probe silent for 10 seconds, which exec moved to the background.
-    exec_step("toolu_base_bg", "No output produced after 10.0 seconds. Command running in background with ID: 21d1ae. "
-              "Run get_output with timeout if you need to wait.", PROBE.format(f"{RUN}/base")),
-    exec_step("toolu_task", "Subagent agent_id=b147292a completed successfully: the test fails at the head.",
-              function="run_subagent"),
-]}
-# Each agent's shell calls for the same review, from its own transcript reader.
-CALLS = {"claude": claude_shell_calls(EVENTS), "devin": devin_shell_calls(EXPORT)}
-
-
-class DevinShellCallsTest(unittest.TestCase):
-    def test_lists_only_exec_calls(self):
-        self.assertEqual(sorted(devin_shell_calls(EXPORT)), sorted([
-            "toolu_head", "toolu_base", "toolu_cp", "toolu_base_build", "toolu_base_long", "toolu_head_cwd",
-            "toolu_base_cwd", "toolu_base_bg"]))
-
-    def test_reads_each_calls_outcome_from_execs_report(self):
-        calls = devin_shell_calls(EXPORT)
-        self.assertEqual(calls["toolu_head"], {"command": PROBE.format(f"{RUN}/head"), "output": HEAD_FAILS_EXEC,
-                                               "ok": False, "cut": False, "finished": True})
-        self.assertTrue(calls["toolu_base"]["ok"])
-        self.assertEqual((calls["toolu_base_long"]["ok"], calls["toolu_base_long"]["cut"]), (True, True))
-        self.assertEqual((calls["toolu_base_bg"]["ok"], calls["toolu_base_bg"]["finished"]), (False, False))
-
-    def test_a_result_too_large_for_the_transcript_finished_but_is_cut(self):
-        output = ("Output from command in shell 11f977:\nPROBE status=422 body=...\n... (1422 lines shown).\n"
-                  "<truncation_notice>\nFull output written to: /tmp/devin-overflows-502/4c5282b9/content.txt\n"
-                  "</truncation_notice>")
-        call = devin_shell_calls({"steps": [exec_step("call_1", output, PROBE.format(f"{RUN}/head"))]})["call_1"]
-        self.assertEqual((call["finished"], call["cut"], call["ok"]), (True, True, False))
-
-    def test_a_workdir_reads_as_a_cd(self):
-        export = {"steps": [exec_step("call_1", exec_output("ok", 0), "go test ./internal/api", workdir=f"{RUN}/head")]}
-        self.assertEqual(devin_shell_calls(export)["call_1"]["command"], f"cd {RUN}/head && go test ./internal/api")
-
-
 # What whooper-review leaves of findings.json when it stops a review before its schema check, such as
-# at the time limit or for an empty file, each with the end of the refusal that whooper-draft,
-# whooper-submit, and whooper-classify give after the run's directory. A Devin review writes the file
+# at the time limit or for an empty file, each with the end of the refusal that whooper-draft
+# and whooper-submit give after the run's directory. A Devin review writes the file
 # itself, so one stopped at its time limit can leave findings and little else.
 UNFIT = "has a findings.json that does not fit schemas/findings.json, so its review did not finish: "
 UNFINISHED = [
@@ -1249,85 +1097,11 @@ UNFINISHED = [
     ("no list of findings", "{}", UNFIT + "findings.json lacks status, skip_reason, approval, findings"),
     ("findings and nothing else", json.dumps({"findings": [finding()]}),
      UNFIT + "findings.json lacks status, skip_reason, approval"),
-    ("a finding without its rule v1 answers", json.dumps({
+    ("a finding without its title", json.dumps({
         "status": "reviewed", "skip_reason": "", "approval": {"verdict": "look_first", "reason": "Ran no probe."},
-        "findings": [{key: value for key, value in finding().items() if key != "rule_v1"}]}),
-     UNFIT + "findings.json.findings[0] lacks rule_v1"),
+        "findings": [{key: value for key, value in finding().items() if key != "title"}]}),
+     UNFIT + "findings.json.findings[0] lacks title"),
 ]
-
-
-class ClassifyTest(unittest.TestCase):
-    def verdicts(self, f, fetched=True):
-        """The finding's verdict and failed checks under each agent's reader."""
-        result = {"status": "reviewed", "skip_reason": "", "findings": [f]}
-        return {agent: (out["verdict"], out["checks_failed"])
-                for agent, calls in CALLS.items() for [out] in [classify(result, calls, fetched, RUN)]}
-
-    def test_all_checks_pass_is_auto_post(self):
-        self.assertEqual(self.verdicts(finding()), {agent: ("auto_post", []) for agent in CALLS})
-
-    def test_any_failed_check_sends_the_finding_to_the_digest(self):
-        cases = [
-            (name, finding(rule_v1={**finding()["rule_v1"], name: False}), True)
-            for name in ["ran_and_saw_failure", "caller_or_ci_visible", "introduced_by_pr", "not_already_raised", "not_pr_text"]
-        ] + [
-            ("line outside the diff", finding(in_diff=False), True),
-            ("head_run names no tool call", finding(head_run="toolu_missing"), True),
-            ("head_run names a Read call", finding(head_run="toolu_read"), True),
-            ("head_run names a subagent's call", finding(head_run="toolu_sub_head"), True),
-            ("base_run names no tool call", finding(base_run=""), True),
-            ("base_run names a Read call", finding(base_run="toolu_read"), True),
-            ("base_run names another command", finding(base_run="toolu_cp"), True),
-            ("the probe names no worktree", finding(head_run="toolu_head_cwd", base_run="toolu_base_cwd"), True),
-            ("base_run failed", finding(base_run="toolu_base_build"), True),
-            ("base_run's output was cut", finding(base_run="toolu_base_long"), True),
-            ("base_run went to the background", finding(base_run="toolu_base_bg"), True),
-            ("observed is not in the head output", finding(observed="got status 400"), True),
-            ("observed is also in the base output", finding(observed="services/orders/internal/api"), True),
-            ("the GitHub fetch failed", finding(), False),
-        ]
-        for name, f, fetched in cases:
-            for agent, (verdict, failed) in self.verdicts(f, fetched).items():
-                with self.subTest(name, agent=agent):
-                    self.assertEqual(verdict, "digest")
-                    self.assertEqual(len(failed), 1, failed)
-
-    def test_every_nit_is_a_shadow_nit(self):
-        for name, f in [
-            ("passes every check", finding(kind="nit", nit_kind="codeowners_no_effect")),
-            ("fails a check", finding(kind="nit", nit_kind="wording", in_diff=False)),
-        ]:
-            with self.subTest(name):
-                self.assertEqual({v for v, _ in self.verdicts(f).values()}, {"shadow_nit"})
-
-    def test_skipped_run_has_no_verdicts(self):
-        # The schema allows findings on a skipped run, and a skipped PR gets no comments.
-        result = {"status": "skipped", "skip_reason": "not small", "findings": [finding()]}
-        for agent, calls in CALLS.items():
-            with self.subTest(agent):
-                self.assertEqual(classify(result, calls, True, RUN), [])
-
-    def test_a_review_that_did_not_finish_is_not_classified(self):
-        with tempfile.TemporaryDirectory() as data:
-            run = Path(data) / "runs" / "20310727T010246Z-12"
-            run.mkdir(parents=True)
-            (run / "run.json").write_text(json.dumps({
-                "kind": "first_review", "repo": "example-org/example-repo", "pr": 12, "head_sha": "h1",
-                "base_ref": "master", "source": "github_request", "slack": None, "reason": "r",
-                "run_id": run.name, "dry_run": True, "as_of": None, "agent": "claude"}))
-            (run / "transcript.jsonl").write_text("")
-            for name, content, why in UNFINISHED:
-                with self.subTest(name):
-                    if content is None:
-                        (run / "findings.json").unlink(missing_ok=True)
-                    else:
-                        (run / "findings.json").write_text(content)
-                    with self.assertRaises(SystemExit) as caught:
-                        main("classify", data, str(run))
-                    self.assertEqual(str(caught.exception), f"whooper-classify: {run} {why}")
-            # Nothing went to the digest or the PR's record.
-            self.assertEqual(sorted(p.name for p in Path(data).iterdir()), ["runs"])
-            self.assertFalse((run / "verdicts.json").exists())
 
 
 class CheckSchemaTest(unittest.TestCase):
@@ -2794,7 +2568,7 @@ class MutationTest(RunDirTest):
         folder, settings, *args = (self.tmp / "args").read_text().splitlines()
         merge_base = json.loads((run / "run.json").read_text())["merge_base"]
         self.assertEqual((Path(folder).resolve(), settings), (run.resolve() / "head" / "calc",
-                                                             "off local 3 diff.relative=true diff.context=0 color.diff=false"))
+                                                             "off local 20 diff.relative=true diff.context=0 color.diff=false"))
         self.assertEqual([args[:3], args[5:]], [["unleash", "--diff", merge_base],
                                                 ["--workers", "2", "--timeout-coefficient", "10"]])
 
@@ -3018,124 +2792,6 @@ class ExamplesTest(RunDirTest):
                 sleep(0.1)
 
 
-def review_comment(path="services/orders/internal/api/orders.go", line=88, start_line=None, side="RIGHT",
-                   created_at="2031-07-27T01:30:00Z"):
-    """A review comment as GitHub's REST API lists it, on the head's lines start_line to line."""
-    return {"path": path, "line": line, "original_line": line, "start_line": start_line,
-            "original_start_line": start_line, "side": side, "created_at": created_at}
-
-
-class PostTest(unittest.TestCase):
-    """whooper.py post for a run started 2031-07-27T01:02:46Z at head h1, whose verdicts are one
-    auto_post finding on orders.go:88 and one digest finding."""
-
-    def setUp(self):
-        self.data = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.run = self.data / "runs" / "20310727T010246Z-12"
-        self.run.mkdir(parents=True)
-        # run.json is the work item the review got, with the run's own fields.
-        self.work = {"kind": "first_review", "repo": "example-org/example-repo", "pr": 12, "head_sha": "h1", "base_ref": "master",
-                     "source": "github_request", "slack": None, "reason": "A GitHub review request names sam-example."}
-        self.item = {**self.work, "run_id": self.run.name, "dry_run": True, "as_of": None}
-        (self.run / "run.json").write_text(json.dumps(self.item))
-        approval = {"verdict": "look_first", "reason": "The question needs the author's answer."}
-        (self.run / "findings.json").write_text(json.dumps({"status": "reviewed", "skip_reason": "", "approval": approval, "findings": []}))
-        self.write_verdicts(finding())
-
-    def write_verdicts(self, auto_post):
-        verdicts = [{**auto_post, "verdict": "auto_post", "checks_failed": []},
-                    {**finding(id="2", title="A question"), "verdict": "digest", "checks_failed": ["rule_v1.ran_and_saw_failure is false"]}]
-        (self.run / "verdicts.json").write_text(json.dumps(verdicts))
-
-    def post(self, head_now="h1", comments=()):
-        path = self.data / "comments.json"
-        path.write_text(json.dumps(list(comments)))
-        with redirect_stdout(io.StringIO()):
-            main("post", str(self.data), str(self.run), head_now, str(path))
-        return json.loads((self.run / "post.json").read_text())
-
-    def digest(self):
-        path = self.data / "digest.jsonl"
-        return [json.loads(line)["finding"] for line in path.read_text().splitlines()] if path.exists() else []
-
-    def test_request_holds_only_the_auto_post_finding_as_a_comment_review_marked_whooper_ai(self):
-        post = self.post()
-        request = json.loads((self.run / "post-request.json").read_text())
-        self.assertEqual(post["status"], "printed")
-        self.assertEqual(request["event"], "COMMENT")
-        self.assertEqual(request["commit_id"], "h1")
-        self.assertTrue(request["body"].startswith("Whooper AI"))
-        self.assertEqual(request["comments"], [{"path": "services/orders/internal/api/orders.go", "line": 88,
-                                                "side": "RIGHT", "body": "Whooper AI\n\n**issue:** ..."}])
-
-    def test_moved_head_posts_nothing_marks_the_record_stale_and_lists_the_pr_again(self):
-        post = self.post(head_now="h2")
-        self.assertEqual(post["status"], "stale")
-        self.assertFalse((self.run / "post-request.json").exists())
-        record = self.data / "prs" / "example-org-example-repo-12" / "h1.first_review.json"
-        self.assertEqual(json.loads(record.read_text())["status"], "stale")
-        # The recheck list holds the work item at the new head, for the next round's whooper-select.
-        listed = self.data / "rechecks" / "example-org-example-repo-12.json"
-        self.assertEqual(json.loads(listed.read_text()), {**self.work, "head_sha": "h2"})
-
-    def test_finding_is_held_back_into_the_digest(self):
-        cases = [
-            ("a new comment on its line", finding(), [review_comment()]),
-            ("a new comment on a range that holds its line", finding(), [review_comment(line=90, start_line=85)]),
-            ("an @-mention in the draft", finding(draft="**issue:** @alice, this returns 500."), []),
-            ("a link outside the configured orgs", finding(draft="**issue:** see https://example.com/422."), []),
-            ("a www link", finding(draft="**issue:** see www.example.com."), []),
-        ]
-        for name, f, comments in cases:
-            with self.subTest(name):
-                self.setUp()
-                self.write_verdicts(f)
-                post = self.post(comments=comments)
-                self.assertEqual(post["status"], "nothing to post")
-                self.assertFalse((self.run / "post-request.json").exists())
-                [held] = self.digest()
-                self.assertEqual(held["verdict"], "digest")
-                self.assertEqual(len(held["checks_failed"]), 1, held["checks_failed"])
-
-    def test_finding_still_posts(self):
-        cases = [
-            ("a comment written before the run started", finding(), [review_comment(created_at="2031-07-27T00:59:00Z")]),
-            ("a new comment on another line", finding(), [review_comment(line=87)]),
-            ("a new comment on the deleted line with the same number", finding(), [review_comment(side="LEFT")]),
-            ("a new comment on another file", finding(), [review_comment(path="services/orders/README.md")]),
-            ("an email address and a link to an org's PR", finding(
-                draft="**issue:** ask alice@example.com; https://github.com/example-org/example-repo/pull/12 has the trace."), []),
-        ]
-        for name, f, comments in cases:
-            with self.subTest(name):
-                self.setUp()
-                self.write_verdicts(f)
-                self.assertEqual(self.post(comments=comments)["status"], "printed")
-                self.assertEqual(self.digest(), [])
-
-    def test_summary_counts_the_findings_the_digest_got(self):
-        # classify sent the digest finding there; the auto_post one reaches it only when held back.
-        cases = [
-            ("posted", {}, ["Would post these comments", "- Bad JSON now returns 500 (", "Findings in the digest: 1"]),
-            ("held back", {"comments": [review_comment()]}, ["Nothing to post.", "Findings in the digest: 2"]),
-            ("stale", {"head_now": "h2"}, ["the PR's head moved to h2", "Findings in the digest: 1"]),
-        ]
-        for name, post_args, want in cases:
-            with self.subTest(name):
-                self.setUp()
-                self.post(**post_args)
-                text = summary_text(self.run)
-                self.assertTrue(text.startswith("Whooper reviewed https://github.com/example-org/example-repo/pull/12 at h1 (dry run)."), text)
-                self.assertIn("\nLook first: The question needs the author's answer.\n", text)
-                for line in want:
-                    self.assertIn(line, text)
-
-    def test_second_call_refuses(self):
-        self.post()
-        with self.assertRaises(SystemExit):
-            self.post()
-
-
 @contextmanager
 def at_first_call(name, other):
     """Patches lib/whooper.py's function name so that its first call first runs other() in another
@@ -3162,10 +2818,9 @@ def at_first_call(name, other):
 class SubmitTest(unittest.TestCase):
     """bin/whooper-submit, and whooper.py draft, which bin/whooper-draft runs, on a review run of
     example-org/example-repo#12 at head h1 in a throwaway state folder; a few tests run
-    bin/whooper-classify and bin/whooper-post on it too, and one runs whooper.py status and show. gh
+    whooper.py status and show on it too. gh
     is a fake: it records each call in calls.log, reports the PR's head from the file head and the CI
-    checks on it from checks.json, lists a teammate's comment on finding 1's line written after the
-    review started, records the body of each review it is asked to post in posted.jsonl, and fails any
+    checks on it from checks.json, records the body of each review it is asked to post in posted.jsonl, and fails any
     other call, so no test can reach GitHub. Unless a test changes it, the run is not safe to approve:
     its verdict is look_first, and of its findings BUG, QUESTION, and NIT, only NIT is a nit."""
 
@@ -3179,6 +2834,11 @@ class SubmitTest(unittest.TestCase):
                   title="Old flag name", draft="This line still names the old --fast flag.")
     OTHER_NIT = finding(id="4", kind="nit", nit_kind="redundant_code", line=95, title="Unused count",
                         draft="**nit:** `count` is never read.")
+    PATCH = ("diff --git a/services/orders/internal/api/orders.go b/services/orders/internal/api/orders.go\n"
+             "--- a/services/orders/internal/api/orders.go\n+++ b/services/orders/internal/api/orders.go\n"
+             "@@ -30,70 +30,71 @@ func Create()\n"
+             "diff --git a/services/orders/README.md b/services/orders/README.md\n"
+             "--- a/services/orders/README.md\n+++ b/services/orders/README.md\n@@ -1,5 +1,4 @@\n")
     REASONS = {"approve_once_ci_passes": "Ran the orders tests; nothing needs the author.",
                "look_first": "The question needs the author's answer."}
 
@@ -3189,7 +2849,6 @@ class SubmitTest(unittest.TestCase):
         self.fakes = tmp / "bin"
         self.fakes.mkdir()
         (self.fakes / "head").write_text("h1\n")
-        (self.fakes / "comments.json").write_text(json.dumps([{**review_comment(), "user": {"login": "teammate"}}]))
         gh = self.fakes / "gh"
         gh.write_text("\n".join([
             "#!/bin/sh",
@@ -3200,7 +2859,6 @@ class SubmitTest(unittest.TestCase):
             '  "pr view 12 --repo example-org/example-repo --json headRefOid,statusCheckRollup")',
             '    jq -n --arg head "$(cat "$fakes/head")" --slurpfile checks "$fakes/checks.json"'
             " '{headRefOid: $head, statusCheckRollup: $checks[0]}' ;;",
-            '  "api --paginate repos/example-org/example-repo/pulls/12/comments?per_page=100") cat "$fakes/comments.json" ;;',
             '  "api --method POST repos/example-org/example-repo/pulls/12/reviews --input "*)',
             '    for arg; do [ "$previous" = --input ] && input="$arg"; previous="$arg"; done',
             # GitHub answers a comment on a line outside the diff with 422, and takes nothing.
@@ -3227,8 +2885,10 @@ class SubmitTest(unittest.TestCase):
         self.write_findings("look_first", [self.BUG, self.QUESTION, self.NIT])
 
     def write_run(self, work):
-        """Writes the run's run.json: the work item the review got, with the run's own fields."""
+        """Writes the run's run.json, the work item the review got with the run's own fields, and its diff.patch,
+        whose hunks hold lines 30 to 100 of orders.go in the head and lines 1 to 5 of the README at the merge base."""
         (self.run / "run.json").write_text(json.dumps({**work, "run_id": self.run.name, "dry_run": True, "as_of": None}))
+        (self.run / "diff.patch").write_text(self.PATCH)
 
     def write_findings(self, verdict, findings, skip_reason=""):
         """Gives the run the approval verdict, with its reason in REASONS, and the findings. With a
@@ -3320,7 +2980,7 @@ class SubmitTest(unittest.TestCase):
         self.assertEqual(self.posted(), [])
         self.assertFalse((self.run / "submit.json").exists())
         self.assertFalse((self.run / "submit-request.json").exists())
-        # The mark whooper-post leaves: the reviewed head's record says stale, and the recheck list
+        # The mark whooper-submit leaves: the reviewed head's record says stale, and the recheck list
         # holds the work item at the new head.
         record = self.state / "prs" / "example-org-example-repo-12" / "h1.first_review.json"
         self.assertEqual(json.loads(record.read_text())["status"], "stale")
@@ -3471,7 +3131,7 @@ class SubmitTest(unittest.TestCase):
         self.assertEqual(json.loads((self.run / "submit.json").read_text()), claim)
         # The losing claim's temporary file is gone too.
         self.assertEqual(sorted(p.name for p in self.run.iterdir()),
-                         ["drafts.json", "findings.json", "run.json", "submit-request.json", "submit.json"])
+                         ["diff.patch", "drafts.json", "findings.json", "run.json", "submit-request.json", "submit.json"])
 
     def test_a_review_github_refuses_can_be_submitted_again(self):
         self.draft("include", "1")
@@ -3513,7 +3173,7 @@ class SubmitTest(unittest.TestCase):
                     self.assertEqual(refused.returncode, 1, refused.stderr)
                     self.assertIn("nothing to submit", refused.stderr)
         self.assertEqual(self.posted(), [])
-        self.assertEqual(sorted(p.name for p in self.run.iterdir()), ["drafts.json", "findings.json", "run.json"])
+        self.assertEqual(sorted(p.name for p in self.run.iterdir()), ["diff.patch", "drafts.json", "findings.json", "run.json"])
 
     def test_print_shows_a_review_of_only_a_message_and_its_fingerprint(self):
         # The run is not safe to approve, so its review starts as a comment with nothing included.
@@ -3529,11 +3189,11 @@ class SubmitTest(unittest.TestCase):
 
     def test_a_comment_outside_the_diff_stops_the_review_before_it_reads_github(self):
         # GitHub takes an inline comment only on a line inside a hunk of the PR's diff, and refuses the
-        # whole review for one comment elsewhere. The review run says which lines are inside with in_diff.
+        # whole review for one comment elsewhere. The run's diff.patch says which lines are inside.
         outside = finding(id="5", kind="question", path="services/orders/internal/api/client.go", line=12,
-                          in_diff=False, title="Does the gateway retry too?",
+                          title="Does the gateway retry too?",
                           draft="**question:** Does the gateway retry this call too?")
-        self.write_findings("look_first", [self.BUG, self.QUESTION, {**self.NIT, "in_diff": False}, outside])
+        self.write_findings("look_first", [self.BUG, self.QUESTION, {**self.NIT, "line": 9}, outside])
         for finding_id in ["1", "3", "5"]:
             self.draft("include", finding_id)
         for flags in [[], ["--print"]]:
@@ -3541,13 +3201,13 @@ class SubmitTest(unittest.TestCase):
                 refused = self.submit(*flags)
                 self.assertEqual(refused.returncode, 14, refused.stderr)
                 self.assertEqual([line.strip() for line in refused.stderr.splitlines() if line.startswith("  ")],
-                                 ["finding 3: Old flag name (services/orders/README.md:3)",
+                                 ["finding 3: Old flag name (services/orders/README.md:9)",
                                   "finding 5: Does the gateway retry too? (services/orders/internal/api/client.go:12)"])
                 self.assertIn("bin/whooper-draft", refused.stderr)
         # It refused before any call to GitHub, even the one that reads the PR's head.
         self.assertEqual(self.gh_calls(), [])
         self.assertEqual(self.posted(), [])
-        self.assertEqual(sorted(p.name for p in self.run.iterdir()), ["drafts.json", "findings.json", "run.json"])
+        self.assertEqual(sorted(p.name for p in self.run.iterdir()), ["diff.patch", "drafts.json", "findings.json", "run.json"])
         # A comment outside the diff that the review leaves out stops nothing.
         for finding_id in ["3", "5"]:
             self.draft("leave-out", finding_id)
@@ -3702,7 +3362,7 @@ class SubmitTest(unittest.TestCase):
                     self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
                                      (1, "", "whooper-submit: the review is still running; submit it once it ends\n"))
         self.assertEqual(self.posted(), [])
-        self.assertEqual(sorted(p.name for p in self.run.iterdir()), ["drafts.json", "findings.json", "run.json"])
+        self.assertEqual(sorted(p.name for p in self.run.iterdir()), ["diff.patch", "drafts.json", "findings.json", "run.json"])
         # whooper-review deletes the lock when the review ends.
         shutil.rmtree(lock)
         submitted = self.submit()
@@ -3792,7 +3452,7 @@ class SubmitTest(unittest.TestCase):
         self.assertEqual(self.draft("comment"), {**drafts, "event": "COMMENT"})
         # Each change went to a temporary file renamed into place, so only drafts.json is new.
         self.assertEqual(json.loads((self.run / "drafts.json").read_text()), {**drafts, "event": "COMMENT"})
-        self.assertEqual(sorted(p.name for p in self.run.iterdir()), ["drafts.json", "findings.json", "run.json"])
+        self.assertEqual(sorted(p.name for p in self.run.iterdir()), ["diff.patch", "drafts.json", "findings.json", "run.json"])
 
     def test_two_changes_to_the_drafts_at_once_both_stay(self):
         # Prompting Time's page includes finding 2 while Whooper's agent sets the message: the agent's change
@@ -3835,33 +3495,32 @@ class SubmitTest(unittest.TestCase):
                     with self.assertRaises(SystemExit) as caught:
                         main(command, str(self.state), *args)
                     self.assertEqual(str(caught.exception), f"whooper-{command}: {run} {why}")
-        self.assertEqual(sorted(p.name for p in self.run.iterdir()), ["findings.json", "run.json"])
+        self.assertEqual(sorted(p.name for p in self.run.iterdir()), ["diff.patch", "findings.json", "run.json"])
 
-    def test_draft_submit_and_classify_refuse_findings_that_do_not_fit_the_schema(self):
+    def test_draft_and_submit_refuse_findings_that_do_not_fit_the_schema(self):
         # Findings and little else, as a Devin review stopped at its time limit can leave. An ask still
-        # answers about such a review (AskTest), but these three read its fields without checking for
+        # answers about such a review (AskTest), but these two read its fields without checking for
         # each one.
         (self.run / "findings.json").write_text(json.dumps({"findings": [self.BUG, self.QUESTION]}))
         for command, argument, run in [("whooper-draft", self.run.name, self.run),
-                                       ("whooper-submit", self.run.name, self.run.resolve()),
-                                       ("whooper-classify", str(self.run), self.run)]:
+                                       ("whooper-submit", self.run.name, self.run.resolve())]:
             with self.subTest(command):
                 result = subprocess.run([str(ROOT / "bin" / command), argument], env=self.env, capture_output=True,
                                         text=True, timeout=60)
                 # The refusal alone, with no traceback.
                 self.assertEqual((result.returncode, result.stdout, result.stderr),
                                  (1, "", f"{command}: {run} {UNFIT}findings.json lacks status, skip_reason, approval\n"))
-        # Nothing was drafted, posted, classified, or recorded.
+        # Nothing was drafted, posted, or recorded.
         self.assertEqual(self.posted(), [])
         self.assertEqual(sorted(p.name for p in self.state.iterdir()), ["runs"])
-        self.assertEqual(sorted(p.name for p in self.run.iterdir()), ["findings.json", "run.json"])
+        self.assertEqual(sorted(p.name for p in self.run.iterdir()), ["diff.patch", "findings.json", "run.json"])
 
-    def test_submit_and_post_refuse_a_run_json_they_cannot_read(self):
+    def test_submit_refuses_a_run_json_it_cannot_read(self):
         # whooper-review fills run.json with one jq, and the file stays empty when that jq fails, as when
         # the skills cannot be hashed.
         for name, content in [("empty", ""), ("cut short", '{"repo": "example-org/exa')]:
             (self.run / "run.json").write_text(content)
-            for command, flags in [("whooper-submit", []), ("whooper-post", ["--print"])]:
+            for command, flags in [("whooper-submit", [])]:
                 with self.subTest(name, command=command):
                     result = subprocess.run([str(ROOT / "bin" / command), self.run.name, *flags], env=self.env,
                                             capture_output=True, text=True, timeout=60)
@@ -3900,194 +3559,6 @@ def running(pid):
     return bool(stat) and not stat.startswith("Z")
 
 
-class SlackGuardTest(unittest.TestCase):
-    """hooks/slack-guard.sh, fed the PreToolUse input Claude Code sends it, under each bash in BASHES."""
-
-    HOOK = ROOT / "hooks" / "slack-guard.sh"
-    SLACK = "mcp__claude_ai_Slack__slack"
-    # The channels of the test config, which the hook reads through WHOOPER_CONFIG.
-    ASK_CHANNEL, SUMMARY_CHANNEL = "C0000000001", "C0000000002"
-    ASK = {"channel_id": ASK_CHANNEL, "message_ts": "1761700000.000100", "emoji": "eyes"}
-
-    def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, self.tmp)
-        text = "Whooper reviewed https://github.com/example-org/example-repo/pull/12 at cb54aa8.\nLog: log.md"
-        self.schedule = {"channel_id": self.SUMMARY_CHANNEL, "message": text, "post_at": 1761700180}
-        # Each bash gets a folder that puts it first on PATH, and a summary file of its own, since the hook
-        # lets each file's summary through once.
-        self.folders, self.summaries = {}, {}
-        for n, bash in enumerate(BASHES):
-            self.folders[bash] = bash_folder(bash, self.tmp / f"bash-{n}")
-            self.summaries[bash] = self.tmp / f"summary-{n}.txt"
-            self.summaries[bash].write_text(text)
-
-    def run_hook(self, bash, tool, tool_input, **env):
-        """Runs the hook as Claude Code does, by its path, with bash first on PATH, and with the variables a
-        summary run sets, changed by env, where None unsets one."""
-        env = {"PATH": os.environ["PATH"], "WHOOPER_CONFIG": os.environ["WHOOPER_CONFIG"],
-               "WHOOPER_ASK_TS": "1761700000.000100", "WHOOPER_SUMMARY_FILE": str(self.summaries[bash]),
-               "WHOOPER_SUMMARY_POST_AT": "1761700180", **env}
-        env = {k: v for k, v in env.items() if v is not None}
-        env["PATH"] = f"{self.folders[bash]}{os.pathsep}{env['PATH']}"
-        payload = json.dumps({"hook_event_name": "PreToolUse", "tool_name": f"{self.SLACK}_{tool}", "tool_input": tool_input})
-        return subprocess.run([str(self.HOOK)], input=payload, env=env, capture_output=True, text=True).returncode
-
-    def test_allows_eyes_on_the_ask_and_the_composed_summary(self):
-        for bash in BASHES:
-            with self.subTest(bash=str(bash)):
-                self.assertEqual(self.run_hook(bash, "add_reaction", self.ASK), 0)
-                self.assertEqual(self.run_hook(bash, "schedule_message", self.schedule), 0)
-
-    def test_blocks_everything_else(self):
-        # With no config, lib/whooper.py env prints nothing, so the channels it sets stay unset.
-        no_config = {"WHOOPER_CONFIG": str(self.tmp / "missing.toml")}
-        # A jq that fails stands in for any command in the hook that fails where it should not.
-        fakes = self.tmp / "fakes"
-        fake(fakes / "jq", "exit 1")
-        failing_jq = {"PATH": f"{fakes}{os.pathsep}{os.environ['PATH']}"}
-        cases = [
-            ("wrong channel", "add_reaction", {**self.ASK, "channel_id": self.SUMMARY_CHANNEL}, {}),
-            ("wrong ts", "add_reaction", {**self.ASK, "message_ts": "1761699999.000100"}, {}),
-            ("wrong emoji", "add_reaction", {**self.ASK, "emoji": "white_check_mark"}, {}),
-            ("a run that took no ask", "add_reaction", self.ASK, {"WHOOPER_ASK_TS": ""}),
-            ("a canvas", "create_canvas", {"title": "x", "content": "y"}, {}),
-            ("a read", "read_channel", {"channel_id": self.ASK_CHANNEL}, {}),
-            ("a draft", "send_message_draft", {"channel_id": self.SUMMARY_CHANNEL, "message": "hi"}, {}),
-            ("summary to another channel", "schedule_message", {**self.schedule, "channel_id": self.ASK_CHANNEL}, {}),
-            ("summary in a thread", "schedule_message", {**self.schedule, "thread_ts": "1761700000.000100"}, {}),
-            ("changed summary text", "schedule_message", {**self.schedule, "message": "Whooper approved this PR."}, {}),
-            ("another time", "schedule_message", {**self.schedule, "post_at": 1771700180}, {}),
-            # Each allowed call with a variable it reads unset, one its run sets or a channel. set -u stops the
-            # hook at one it does not check first: bash then exits 1, and bash 3.2 exits 0 when an EXIT trap
-            # is set, and Claude Code lets the call through after either.
-            ("eyes with WHOOPER_ASK_TS unset", "add_reaction", self.ASK, {"WHOOPER_ASK_TS": None}),
-            ("eyes with no config", "add_reaction", self.ASK, no_config),
-            ("the summary with WHOOPER_SUMMARY_FILE unset", "schedule_message", self.schedule,
-             {"WHOOPER_SUMMARY_FILE": None}),
-            ("the summary with WHOOPER_SUMMARY_POST_AT unset", "schedule_message", self.schedule,
-             {"WHOOPER_SUMMARY_POST_AT": None}),
-            ("the summary with no config", "schedule_message", self.schedule, no_config),
-            # Each allowed call when a command in the hook fails.
-            ("eyes when a command fails", "add_reaction", self.ASK, failing_jq),
-            ("the summary when a command fails", "schedule_message", self.schedule, failing_jq),
-        ]
-        for bash in BASHES:
-            for name, tool, tool_input, env in cases:
-                with self.subTest(name, bash=str(bash)):
-                    self.assertEqual(self.run_hook(bash, tool, tool_input, **env), 2)
-
-    def test_second_summary_is_blocked(self):
-        for bash in BASHES:
-            with self.subTest(bash=str(bash)):
-                self.assertEqual(self.run_hook(bash, "schedule_message", self.schedule), 0)
-                self.assertEqual(self.run_hook(bash, "schedule_message", self.schedule), 2)
-
-
-class LauncherHooksTest(unittest.TestCase):
-    """The hooks the launchers set in the settings or config they give their CLI: agents/claude/summary and
-    agents/claude/review in claude's settings, and agents/devin/review in devin's config. Each launcher runs
-    from a Whooper whose root path has a space, as the Application Support folder Prompting Time installs it
-    in has, and a single quote and a $, which a shell would read as quoting and a variable. The root links
-    to the real agents, lib, and schemas, and its hooks are fakes that save their input. A fake claude and a
-    fake devin save the settings and the config, and each test runs their hooks as the CLI runs a command
-    hook."""
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        tmp = Path(self.tmp.name)
-        self.root = tmp / "Application Support" / "Sam's $whooper"
-        self.root.mkdir(parents=True)
-        for name in ["agents", "lib", "schemas"]:
-            (self.root / name).symlink_to(ROOT / name)
-        for name in ["slack-guard.sh", "tool-use-id.sh"]:
-            fake(self.root / "hooks" / name, 'cat > "$0.input"')
-        # Each fake saves what its launcher gave it, claude its --settings and devin its --config file, as
-        # <fakes>/<CLI>.json.
-        self.fakes = tmp / "bin"
-        fake(self.fakes / "claude", "\n".join([
-            "while [ $# -gt 0 ]; do",
-            '  if [ "$1" = --settings ]; then printf %s "$2" > "${0%/*}/claude.json"; fi',
-            "  shift",
-            "done",
-        ]))
-        fake(self.fakes / "devin", "\n".join([
-            "while [ $# -gt 0 ]; do",
-            '  if [ "$1" = --config ]; then cp "$2" "${0%/*}/devin.json"; fi',
-            "  shift",
-            "done",
-        ]))
-        self.env = {**os.environ, "PATH": f"{self.fakes}:{os.environ['PATH']}", "XDG_STATE_HOME": str(tmp / "state"),
-                    "XDG_CACHE_HOME": str(tmp / "cache")}
-
-    def launch(self, cli, launcher, *args, **env):
-        """Runs agents/<cli>/<launcher> in the root with args and env, and returns the settings or config it gave
-        the CLI, whatever the launcher does once the CLI exits."""
-        result = subprocess.run([str(self.root / "agents" / cli / launcher), *args], env={**self.env, **env},
-                                capture_output=True, text=True, timeout=60)
-        given = self.fakes / f"{cli}.json"
-        self.assertTrue(given.exists(), result.stderr)
-        return json.loads(given.read_text())
-
-    def ran(self, cli, hook, payload, name):
-        """Runs a command hook from the settings or config as the CLI does, with payload and a newline on stdin,
-        and returns the input the fake hooks/<name> saved, or None when it did not run. Claude Code 2.1.314
-        starts a hook with args by its path, with them, and runs one without through /bin/sh -c. Devin CLI
-        3000.11.234 runs every hook through bash -c, with the first bash on PATH."""
-        saved = self.root / "hooks" / f"{name}.input"
-        saved.unlink(missing_ok=True)
-        if cli == "devin":
-            command = ["bash", "-c", hook["command"]]
-        elif "args" in hook:
-            command = [hook["command"], *hook["args"]]
-        else:
-            command = ["/bin/sh", "-c", hook["command"]]
-        subprocess.run(command, input=f"{payload}\n", capture_output=True, text=True, timeout=60)
-        return saved.read_text() if saved.exists() else None
-
-    def test_the_summary_runs_slack_guard_and_blocks_the_call_when_slack_guard_fails(self):
-        summary, run = Path(self.tmp.name) / "summary.txt", Path(self.tmp.name) / "run"
-        summary.write_text("Whooper reviewed https://github.com/example-org/example-repo/pull/12 at cb54aa8.")
-        run.mkdir()
-        [group] = self.launch("claude", "summary", str(summary), str(run))["hooks"]["PreToolUse"]
-        [hook] = group["hooks"]
-        payload = json.dumps({"hook_event_name": "PreToolUse",
-                              "tool_name": "mcp__claude_ai_Slack__slack_schedule_message",
-                              "tool_input": {"channel_id": "C0000000002", "message": summary.read_text(),
-                                             "post_at": 1761700180}})
-        self.assertEqual(self.ran("claude", hook, payload, "slack-guard.sh"), f"{payload}\n")
-        # Without it, Claude Code lets the call through when slack-guard cannot start, crashes, or times out.
-        self.assertEqual(hook.get("onFailure"), "block")
-
-    def test_a_claude_review_runs_tool_use_id_after_each_bash_call(self):
-        prompt, run = Path(self.tmp.name) / "prompt.md", Path(self.tmp.name) / "run"
-        prompt.write_text("Review this PR.")
-        run.mkdir()
-        hooks = self.launch("claude", "review", str(prompt), WHOOPER_RUN=str(run),
-                            WHOOPER_CLAUDE_REVIEW_MODEL="review-model")["hooks"]
-        for event in ["PostToolUse", "PostToolUseFailure"]:
-            with self.subTest(event):
-                [group] = hooks[event]
-                [hook] = group["hooks"]
-                payload = json.dumps({"hook_event_name": event, "tool_name": "Bash", "tool_use_id": "toolu_01",
-                                      "tool_input": {"command": "go test ./internal/api"}})
-                self.assertEqual(self.ran("claude", hook, payload, "tool-use-id.sh"), f"{payload}\n")
-
-    def test_a_devin_review_runs_tool_use_id_after_each_exec_call(self):
-        prompt, run = Path(self.tmp.name) / "prompt.md", Path(self.tmp.name) / "run"
-        prompt.write_text("Review this PR.")
-        run.mkdir()
-        # The home has no Devin config, so the launcher adds its hook to an empty config, not the user's.
-        config = self.launch("devin", "review", str(prompt), HOME=str(Path(self.tmp.name) / "home"),
-                             WHOOPER_RUN=str(run), WHOOPER_DEVIN_REVIEW_MODEL="review-model")
-        [group] = config["hooks"]["PostToolUse"]
-        [hook] = group["hooks"]
-        payload = json.dumps({"hook_event_name": "PostToolUse", "tool_name": "exec", "tool_use_id": "call_1",
-                              "tool_input": {"command": "go test ./internal/api"}})
-        self.assertEqual(self.ran("devin", hook, payload, "tool-use-id.sh"), f"{payload}\n")
-
-
 class RunTest(unittest.TestCase):
     """bin/whooper-run, whooper-round, whooper-review, whooper-ask, whooper-status, whooper-pause, and
     whooper-resume on a copy of the test config and a throwaway state folder, with gh, slackdump, and
@@ -4122,9 +3593,8 @@ class RunTest(unittest.TestCase):
         path.chmod(0o755)
 
     def claude_script(self, body):
-        """Writes the fake claude, which answers --version as Claude Code 2.1.314 does and runs body, a few lines
-        of sh, for any other call."""
-        self.script(self.fakes / "claude", f"{CLAUDE_VERSION}\n{body}")
+        """Writes the fake claude, which runs body, a few lines of sh."""
+        self.script(self.fakes / "claude", body)
 
     def start(self, path, out=subprocess.DEVNULL):
         process = subprocess.Popen([str(path)], env=self.env, stdout=out, stderr=subprocess.STDOUT,
@@ -4149,9 +3619,13 @@ class RunTest(unittest.TestCase):
         out, err = process.communicate(timeout=timeout)
         return subprocess.CompletedProcess(process.args, process.returncode, out, err)
 
+    def history(self):
+        """The rounds in <state>/rounds.jsonl, oldest first."""
+        return [json.loads(line) for line in (self.state / "rounds.jsonl").read_text().splitlines()]
+
     def status(self):
-        """whooper-status --json, with times in Los Angeles."""
-        result = self.command("whooper-status", "--json", env={"TZ": "America/Los_Angeles"})
+        """whooper-status, with times in Los Angeles."""
+        result = self.command("whooper-status", env={"TZ": "America/Los_Angeles"})
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
 
@@ -4478,9 +3952,7 @@ class RunTest(unittest.TestCase):
                 self.wait_for((paused / "stopped").exists, f"{name} to stop as it makes its lock")
                 status = self.status()
                 self.stop_in_gh(process)
-                if name == "whooper-run":
-                    self.assertEqual(status["loop"], {"running": True, "pid": process.pid})
-                else:
+                if name != "whooper-run":
                     self.assertEqual((status["round"]["running"], status["round"]["reviewing"]), (True, None))
                     self.assertIsNotNone(status["round"]["started_at"])
 
@@ -4555,8 +4027,8 @@ class RunTest(unittest.TestCase):
                                                          "agent": "claude", "run_id": run.name}))
             (folder / "findings.json").write_text(json.dumps({"status": "reviewed", "skip_reason": "", "findings": [],
                                                               "approval": {"verdict": "look_first", "reason": "r"}}))
-        for name, extra in [("whooper-draft", []), ("whooper-submit", []), ("whooper-post", ["--print"]),
-                            ("whooper-ask", ["Why?"]), ("whooper-retry", [])]:
+        for name, extra in [("whooper-draft", []), ("whooper-submit", []), ("whooper-ask", ["Why?"]),
+                            ("whooper-retry", [])]:
             for run_id in [f"../runs/{run.name}", "../elsewhere", ".."]:
                 with self.subTest(name, run_id=run_id):
                     result = self.command(name, run_id, *extra)
@@ -4572,7 +4044,6 @@ class RunTest(unittest.TestCase):
         run = self.state / "runs" / "20310727T010246Z-12"
         run.mkdir(parents=True)
         (run / "run.json").write_text(json.dumps({"repo": "sample-org/plain-repo", "pr": 12, "agent": "claude"}))
-        (run / "post.json").write_text("{}")
         item, prompt = Path(self.tmp.name) / "item.json", Path(self.tmp.name) / "prompt.md"
         item.write_text(json.dumps({"kind": "first_review", "repo": "sample-org/plain-repo", "pr": 12,
                                     "head_sha": "1" * 40, "base_ref": "main", "source": "github_request",
@@ -4580,8 +4051,7 @@ class RunTest(unittest.TestCase):
         prompt.write_text("Why?\n")
         launcher = [str(prompt), str(Path(self.tmp.name) / "answer"), str(run / "record")]
         for path, args in [("bin/whooper-review", [str(item), "--dry-run"]), ("bin/whooper-poll", []),
-                           ("bin/whooper-ask", [run.name, "Why?"]), ("bin/whooper-summary", [run.name]),
-                           ("bin/whooper-post", [run.name, "--print"]), ("bin/whooper-submit", [run.name]),
+                           ("bin/whooper-ask", [run.name, "Why?"]), ("bin/whooper-submit", [run.name]),
                            ("agents/claude/ask", launcher), ("agents/devin/ask", launcher),
                            ("agents/devin/poll", launcher)]:
             with self.subTest(path):
@@ -4741,27 +4211,6 @@ class RunTest(unittest.TestCase):
                " most GitHub returns for one search, so it may have left some out\n"))
         self.assertEqual(sorted(read.read_text().splitlines()), sorted(urls[:1000]))
 
-    def test_with_a_job_on_claude_each_command_that_runs_agents_refuses_claude_code_before_2_1_295(self):
-        # claude --version answers as Claude Code 2.1.294 does, and the fake logs any other call.
-        log = self.fakes / "claude.log"
-        self.script(self.fakes / "claude", 'if [ "$1" = --version ]; then echo "2.1.294 (Claude Code)"; exit; fi\n'
-                                           'echo "$*" >> "${0%/*}/claude.log"\nexit 1')
-        message = CLAUDE_TOO_OLD.format("2.1.294 (Claude Code)")
-        run = self.state / "runs" / "20310727T010246Z-12"
-        run.mkdir(parents=True)
-        (run / "failure.txt").write_text("the review stopped at an unexpected error\n")
-        for command, args in [("whooper-poll", []), ("whooper-review", [str(run / "item.json"), "--dry-run"]),
-                              ("whooper-summary", [run.name]), ("whooper-ask", [run.name, "Why did it stop?"])]:
-            with self.subTest(command):
-                result = self.command(command, *args)
-                self.assertEqual((result.returncode, result.stdout, result.stderr), (1, "", message))
-        # A round records the refusal as a failed poll, which Prompting Time and the page show.
-        round_ = self.command("whooper-round")
-        self.assertEqual((round_.returncode, round_.stderr), (1, message))
-        status = self.status()
-        self.assertEqual((status["last_round"]["result"], status["rounds"][0]["reason"]),
-                         ("poll_failed", "The Claude Code version check failed"))
-        self.assertFalse(log.exists())
 
     def test_a_round_reviews_each_selected_item_and_reports_how_it_ended(self):
         self.fake_one_review_request()
@@ -4779,8 +4228,7 @@ class RunTest(unittest.TestCase):
                          {"result": "done", "selected": 1,
                           "reviews": [{"pr": "example-org/example-repo#12", "outcome": "failed"}]})
         self.assertEqual(status["round"], {"running": False, "started_at": None, "reviewing": None})
-        self.assertEqual(status["rounds"], [{"started_at": last["started_at"], "ended_at": last["ended_at"],
-                                             "result": "done", "selected": 1, "reason": None}])
+        self.assertEqual([(r["result"], r["selected"], r["reason"]) for r in self.history()], [("done", 1, None)])
         self.assertEqual(self.notifications.read_text(),
                          "Whooper: example-org/example-repo#12 review failed | See whooper-round's output.\n")
         self.assertFalse((self.state / "round.lock").exists())
@@ -4802,7 +4250,7 @@ class RunTest(unittest.TestCase):
         status = self.status()
         self.assertEqual(status["last_round"]["reviews"], [{"pr": "sample-org/plain-repo#12", "outcome": "failed"},
                                                            {"pr": "sample-org/plain-repo#13", "outcome": "waiting"}])
-        self.assertEqual(status["rounds"][0]["reason"], "Docker isn't running, so 1 review(s) wait for the next round")
+        self.assertEqual(self.history()[-1]["reason"], "Docker isn't running, so 1 review(s) wait for the next round")
         # PR 13's review did not start: its run holds the work item and the cause it waits on, and needs no
         # one. Only the failed review sent a notification.
         waits, failed = status["reviews"]
@@ -4844,7 +4292,7 @@ class RunTest(unittest.TestCase):
         self.wait_for(self.notifications.exists, "the review's notification")
         status = self.status()
         running = status["round"]
-        self.assertEqual((status["loop"], status["next_round"]), ({"running": True, "pid": loop.pid}, None))
+        self.assertIsNone(status["next_round"])
         self.assertEqual((running["running"], running["reviewing"]), (True, "example-org/example-repo#12"))
         self.stop(loop)
         status = self.status()
@@ -4853,8 +4301,7 @@ class RunTest(unittest.TestCase):
         self.assertEqual({key: last[key] for key in ["result", "selected", "reviews"]},
                          {"result": "interrupted", "selected": 1,
                           "reviews": [{"pr": "example-org/example-repo#12", "outcome": "interrupted"}]})
-        self.assertEqual(status["rounds"], [{"started_at": last["started_at"], "ended_at": last["ended_at"],
-                                             "result": "interrupted", "selected": 1, "reason": None}])
+        self.assertEqual([(r["result"], r["selected"], r["reason"]) for r in self.history()], [("interrupted", 1, None)])
         self.assertFalse((self.state / "round.lock").exists())
 
     def test_a_review_keeps_the_diff_it_read_after_its_worktrees_go(self):
@@ -4877,12 +4324,11 @@ class RunTest(unittest.TestCase):
         run = Path(result.stdout.strip())
         self.assertEqual(run.parent, self.state / "runs")
         diff = (run / "diff.patch").read_text()
-        self.assertEqual(diff, run_diff.read_text())
         self.assertIn("\n+two\n", diff)
         self.assertIn("Binary files a/generated.txt and b/generated.txt differ", diff)
         self.assertFalse((run / "head").exists() or (run / "base").exists())
         # A past review shows the diff it kept.
-        shown = self.command("whooper-show", run.name, "--json")
+        shown = self.command("whooper-show", run.name)
         self.assertEqual(shown.returncode, 0, shown.stderr)
         self.assertEqual({key: json.loads(shown.stdout)[key] for key in ["outcome", "diff"]},
                          {"outcome": "reviewed", "diff": diff})
@@ -4987,76 +4433,6 @@ class RunTest(unittest.TestCase):
         [run] = (self.state / "runs").iterdir()
         self.assertEqual(((run / "diff.patch").read_text(), (tmp / "changed.txt").read_text()), (plain, names))
 
-    def test_the_run_reads_its_own_git_diff_as_the_kept_diff_whatever_the_git_config_says(self):
-        # The repo's own .gitattributes names app.txt's diff driver, so the textconv filter the user's config gives that
-        # driver reaches a git diff without --no-textconv, as diff.external reaches one without --no-ext-diff: no git
-        # setting turns either off, and an empty diff.external makes git fail to start it.
-        attributes = "generated.txt -diff\napp.txt diff=shout\n"
-        env, item, merge_base = self.pull_request(app=self.APP_IN_TWO_HUNKS,
-                                                  more={**self.MORE_FILES, ".gitattributes": (attributes, attributes)})
-        plain = self.plain_patch(env, merge_base)
-        self.write_git_config(env, self.diff_settings())
-        tmp = Path(self.tmp.name)
-        # The run reads the change with the git diff prompts/review.md names, and stops.
-        self.claude_script("\n".join([
-            "command=\"$(sed -n 's/.*Read the change with `\\([^`]*\\)`.*/\\1/p' \"$WHOOPER_RUN/prompt.md\")\"",
-            f"eval \"$(echo \"$command\" | sed 's/<merge base>/{merge_base}/')\" > '{tmp / 'run.diff'}'",
-            f"git config whooper.kept > '{tmp / 'kept.txt'}'"]))
-        # The environment Whooper starts in already holds git config: a setting the review sets again, which
-        # the review's own wins over, and one the run keeps.
-        self.command("whooper-review", str(item), "--dry-run",
-                     env={**env, "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "diff.context", "GIT_CONFIG_VALUE_0": "10",
-                          "GIT_CONFIG_KEY_1": "whooper.kept", "GIT_CONFIG_VALUE_1": "yes"})
-        [run] = (self.state / "runs").iterdir()
-        self.assertEqual(((tmp / "run.diff").read_text(), (run / "diff.patch").read_text(), (tmp / "kept.txt").read_text()),
-                         (plain, plain, "yes\n"))
-
-    def test_the_run_reads_the_whole_change_from_a_subfolder_whatever_diff_relative_says(self):
-        env, item, merge_base = self.pull_request(app=self.APP_IN_TWO_HUNKS, more=self.MORE_FILES)
-        plain = self.plain_patch(env, merge_base)
-        # diff.relative=true shows a git diff run in a subfolder only that folder's changes, with paths relative to it.
-        self.write_git_config(env, [{"diff.relative": "true"}])
-        tmp = Path(self.tmp.name)
-        # The run reads the change with git diff in docs/, as after a probe's cd there, and stops.
-        self.claude_script(f"cd docs && git diff {merge_base} HEAD > '{tmp / 'run.diff'}'")
-        self.command("whooper-review", str(item), "--dry-run", env=env)
-        self.assertEqual((tmp / "run.diff").read_text(), plain)
-
-    def test_the_kept_diff_the_runs_own_git_diff_and_the_rebuild_leave_out_gits_diff_variables(self):
-        # git takes an external diff tool from GIT_EXTERNAL_DIFF, and how many unchanged lines go around each change
-        # from GIT_DIFF_OPTS, whatever its config says, and GIT_DIFF_OPTS outranks even --unified.
-        env, item, merge_base = self.pull_request(app=self.APP_IN_TWO_HUNKS)
-        plain = self.plain_patch(env, merge_base)
-        tmp = Path(self.tmp.name)
-        self.script(tmp / "external", 'echo "external diff of $1"')
-        variables = {"GIT_EXTERNAL_DIFF": str(tmp / "external"), "GIT_DIFF_OPTS": "--unified=10"}
-        # The run reads the change with a plain git diff and stops.
-        self.claude_script(f"git diff {merge_base} HEAD > '{tmp / 'run.diff'}'")
-        self.command("whooper-review", str(item), "--dry-run", env={**env, **variables})
-        [run] = (self.state / "runs").iterdir()
-        self.assertEqual(((tmp / "run.diff").read_text(), (run / "diff.patch").read_text()), (plain, plain))
-        # whooper-show rebuilds the diff of a review from before reviews kept it the same way.
-        (run / "diff.patch").unlink()
-        shown = self.command("whooper-show", run.name, "--json", env={**env, **variables})
-        self.assertEqual(shown.returncode, 0, shown.stderr)
-        self.assertEqual(json.loads(shown.stdout)["diff"], plain)
-
-    def test_show_rebuilds_the_diff_of_a_review_from_before_reviews_kept_it(self):
-        env, item, merge_base = self.pull_request(app=self.APP_IN_TWO_HUNKS, more=self.MORE_FILES)
-        self.command("whooper-review", str(item), "--dry-run", env=env)
-        [run] = (self.state / "runs").iterdir()
-        kept = (run / "diff.patch").read_text()
-        # Reviews kept no diff.patch before whooper-review saved one.
-        (run / "diff.patch").unlink()
-        self.write_git_config(env, self.diff_settings())
-        clone = Path(self.tmp.name) / "cache" / "whooper" / "repos" / "sample-org-plain-repo"
-        before = files(clone)
-        shown = self.command("whooper-show", run.name, "--json", env=env)
-        self.assertEqual(shown.returncode, 0, shown.stderr)
-        # The same patch the review read, generated.txt shown as binary by the head's .gitattributes.
-        self.assertEqual(json.loads(shown.stdout)["diff"], kept)
-        self.assertIn("Binary files a/generated.txt and b/generated.txt differ", kept)
-        self.assertEqual(files(clone), before)
 
     def test_show_gives_no_diff_when_the_clone_lacks_a_reviewed_commit_or_file(self):
         env, item, _ = self.pull_request()
@@ -5071,7 +4447,7 @@ class RunTest(unittest.TestCase):
                                   text=True).stdout.strip()
 
         def diff():
-            shown = self.command("whooper-show", run.name, "--json", env=env)
+            shown = self.command("whooper-show", run.name, env=env)
             self.assertEqual(shown.returncode, 0, shown.stderr)
             return json.loads(shown.stdout)["diff"]
 
@@ -5129,7 +4505,7 @@ class RunTest(unittest.TestCase):
 
         def shown(run):
             """What whooper-show gives of the review's outcome, findings, and approval, and its overview."""
-            result = self.command("whooper-show", run.name, "--json", env=env)
+            result = self.command("whooper-show", run.name, env=env)
             self.assertEqual(result.returncode, 0, result.stderr)
             return {key: json.loads(result.stdout)[key]
                     for key in ["outcome", "findings", "safe_to_approve", "drafts", "failure", "cause", "overview"]}
@@ -5194,7 +4570,7 @@ class RunTest(unittest.TestCase):
         self.claude_script('mkdir "$WHOOPER_RUN/overview.json"\ncat "${0%/*}/result.json"')
         result = self.command("whooper-review", str(item), "--dry-run", env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
-        shown = self.command("whooper-show", Path(result.stdout.strip()).name, "--json", env=env)
+        shown = self.command("whooper-show", Path(result.stdout.strip()).name, env=env)
         self.assertEqual(shown.returncode, 0, shown.stderr)
         self.assertEqual({key: json.loads(shown.stdout)[key] for key in ["outcome", "findings", "failure", "overview"]},
                          {"outcome": "reviewed", "findings": findings, "failure": None, "overview": None})
@@ -5233,7 +4609,7 @@ class RunTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 run = Path(result.stdout.strip())
                 self.assertEqual(json.loads((run / "run.json").read_text())["agent"], agent)
-                shown = self.command("whooper-show", run.name, "--json", env=env)
+                shown = self.command("whooper-show", run.name, env=env)
                 self.assertEqual(shown.returncode, 0, shown.stderr)
                 self.assertEqual({key: json.loads(shown.stdout)[key] for key in ["outcome", "findings", "overview"]},
                                  {"outcome": "reviewed", "findings": findings, "overview": kept})
@@ -5273,7 +4649,7 @@ class RunTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             run = Path(result.stdout.strip())
             self.assertEqual((run / "findings.json").stat().st_mtime, written)
-            shown = self.command("whooper-show", run.name, "--json", env=env)
+            shown = self.command("whooper-show", run.name, env=env)
             self.assertEqual(shown.returncode, 0, shown.stderr)
             keys = ["outcome", "findings", "safe_to_approve", "drafts", "failure", "cause", "overview"]
             return result.stderr, run, {key: json.loads(shown.stdout)[key] for key in keys}
@@ -5346,7 +4722,7 @@ class RunTest(unittest.TestCase):
                 run = Path(result.stdout.strip())
                 self.assertEqual(json.loads((run / "connections.json").read_text()), shop_connections(found_by))
                 self.assertFalse((run / "head").exists() or (run / "base").exists())
-                shown = self.command("whooper-show", run.name, "--json", env=env)
+                shown = self.command("whooper-show", run.name, env=env)
                 self.assertEqual(shown.returncode, 0, shown.stderr)
                 self.assertEqual({key: json.loads(shown.stdout)[key] for key in ["outcome", "connections"]},
                                  {"outcome": "reviewed", "connections": shop_connections(found_by)})
@@ -5367,7 +4743,7 @@ class RunTest(unittest.TestCase):
         run = Path(result.stdout.strip())
         self.assertEqual(json.loads((run / "connections.json").read_text()), ts_shop_by_name_search(
             "TypeScript failed in the head's checkout (node was stopped by signal 9)"))
-        shown = self.command("whooper-show", run.name, "--json", env=env)
+        shown = self.command("whooper-show", run.name, env=env)
         self.assertEqual(shown.returncode, 0, shown.stderr)
         self.assertEqual(json.loads(shown.stdout)["outcome"], "reviewed")
 
@@ -5386,7 +4762,7 @@ class RunTest(unittest.TestCase):
         run = Path(result.stdout.strip())
         self.assertEqual(json.loads((run / "connections.json").read_text()), ts_shop_by_name_search(
             "TypeScript failed in the head's checkout (tsc --lsp was stopped by signal 9)"))
-        shown = self.command("whooper-show", run.name, "--json", env=env)
+        shown = self.command("whooper-show", run.name, env=env)
         self.assertEqual(shown.returncode, 0, shown.stderr)
         self.assertEqual(json.loads(shown.stdout)["outcome"], "reviewed")
 
@@ -5398,7 +4774,7 @@ class RunTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("whooper-review: the connections step failed, so the review has no connections.json\n",
                       result.stderr)
-        shown = self.command("whooper-show", Path(result.stdout.strip()).name, "--json", env=env)
+        shown = self.command("whooper-show", Path(result.stdout.strip()).name, env=env)
         self.assertEqual(shown.returncode, 0, shown.stderr)
         self.assertEqual({key: json.loads(shown.stdout)[key] for key in ["outcome", "failure", "connections"]},
                          {"outcome": "reviewed", "failure": None, "connections": None})
@@ -5439,7 +4815,7 @@ class RunTest(unittest.TestCase):
         return result, Path(result.stdout.strip())
 
     def shown_fields(self, run, *keys):
-        shown = self.command("whooper-show", run.name, "--json", env=self.git_env())
+        shown = self.command("whooper-show", run.name, env=self.git_env())
         self.assertEqual(shown.returncode, 0, shown.stderr)
         return {key: json.loads(shown.stdout)[key] for key in keys}
 
@@ -5593,7 +4969,7 @@ class RunTest(unittest.TestCase):
                 {"repository": {"nameWithOwner": "sample-org/plain-repo"}, "number": 12, "headRefOid": head}]))
 
         def shown():
-            result = self.command("whooper-show", run.name, "--json", env=env)
+            result = self.command("whooper-show", run.name, env=env)
             self.assertEqual(result.returncode, 0, result.stderr)
             return {key: json.loads(result.stdout)[key] for key in ["commits_since_review", "co_change"]}
 
@@ -5814,15 +5190,14 @@ class RunTest(unittest.TestCase):
                         self.assertEqual((last["result"], last["reviews"]),
                                          ("interrupted", [{"pr": "example-org/example-repo#12", "outcome": "interrupted"}]))
 
-    def test_a_stop_that_misses_the_fetch_poll_or_summary_being_started_stops_it_and_the_round_at_once(self):
-        # As for a review, a Ctrl-C or kill -- -<pid> that lands while whooper-round forks whooper-fetch, whooper-poll,
-        # or whooper-summary reaches the round but can miss the child being forked, and the round then stopped only
-        # once that child had run to its end, which for the summary's agent has no time limit. A fake uv stops the
+    def test_a_stop_that_misses_the_fetch_or_poll_being_started_stops_it_and_the_round_at_once(self):
+        # As for a review, a Ctrl-C or kill -- -<pid> that lands while whooper-round forks whooper-fetch or
+        # whooper-poll reaches the round but can miss the child being forked, and the round then stopped only
+        # once that child had run to its end. A fake uv stops the
         # child's first lib/python as it starts, and the test meanwhile sends TERM to the round alone, standing in for
         # the stop the child missed. The child goes on only once the round has exited, or after 10 seconds. Under bash
         # 3.2 and 5 alike, the round exits 130 at once, and the child never runs: after the pause, the child itself
-        # starts no lib/python of its own, which the fake uv notes in ran. The round reaches the summary once its
-        # review succeeds.
+        # starts no lib/python of its own, which the fake uv notes in ran.
         env, item, _ = self.pull_request()
         head = json.loads(item.read_text())["head_sha"]
         uv, tmp = shutil.which("uv"), Path(self.tmp.name)
@@ -5844,7 +5219,7 @@ class RunTest(unittest.TestCase):
                 return False
             return True
 
-        for case, child in enumerate(["/bin/whooper-fetch", "/bin/whooper-poll", "/bin/whooper-summary "]):
+        for case, child in enumerate(["/bin/whooper-fetch", "/bin/whooper-poll"]):
             for n, bash in enumerate(BASHES):
                 with self.subTest(child.strip(), bash=str(bash)):
                     paused, ran, home = tmp / f"paused-{case}-{n}", tmp / f"ran-{case}-{n}", tmp / f"state-{case}-{n}"
@@ -6225,34 +5600,6 @@ class RunTest(unittest.TestCase):
                 self.assertEqual((result.returncode, failure),
                                  (1, "the review stopped at an unexpected error; see whooper-review's error output\n"))
 
-    def test_a_review_limit_typed_as_a_float_gives_the_watchdog_that_many_minutes_under_each_bash(self):
-        # whooper-review's watchdog sleeps the limit times 60, which bash multiplies, and bash 3.2 and 5 both stop the
-        # review at a syntax error on 45.0. With [review] timeout_minutes = 45.0, edited by hand, the watchdog sleeps
-        # 2700 seconds under each bash, as with 45. The test reads them from the watchdog's sleep, the only sleep in
-        # whooper-review's process group, while the review run, whose fake claude sleeps in a group of its own, waits.
-        config = Path(self.env["WHOOPER_CONFIG"])
-        config.write_text(config.read_text().replace("timeout_minutes = 45\n", "timeout_minutes = 45.0\n"))
-        env, item, _ = self.pull_request()
-        self.fake_claude(review="exec sleep 30")
-
-        def watchdog_seconds(review):
-            found = subprocess.run(["pgrep", "-g", str(review.pid), "-x", "sleep"], capture_output=True,
-                                   text=True).stdout.split()
-            commands = [subprocess.run(["ps", "-o", "command=", "-p", pid], capture_output=True, text=True).stdout
-                        for pid in found]
-            return next((m[1] for c in commands if (m := re.fullmatch(r"sleep (\S+)", c.strip()))), None)
-
-        for n, bash in enumerate(BASHES):
-            with self.subTest(bash=str(bash)):
-                folder = bash_folder(bash, Path(self.tmp.name) / f"bash-{n}")
-                review = self.start_command("whooper-review", str(item), "--dry-run",
-                                            env={**env, "PATH": f"{folder}{os.pathsep}{env['PATH']}"})
-                self.wait_for(lambda: review.poll() is not None or watchdog_seconds(review),
-                              "whooper-review to stop or start its watchdog")
-                seconds = watchdog_seconds(review)
-                self.stop(review)
-                shutil.rmtree(self.state / "runs", ignore_errors=True)
-                self.assertEqual(seconds, "2700", review.communicate()[1])
 
     def test_a_poll_or_an_ask_stopped_by_an_unset_variable_fails_under_each_bash(self):
         # BASH_ENV, which bash reads before a script, gives the script a command that reads a variable nothing sets,
@@ -6391,11 +5738,11 @@ class RunTest(unittest.TestCase):
         answered = self.command("whooper-ask", run.name, "Why did this review fail?", env=env)
         self.assertEqual((answered.returncode, answered.stdout), (0, "It stopped.\n"), answered.stderr)
 
-    def test_status_reports_the_loop_pause_next_round_and_rounds_from_the_state_folder(self):
+    def test_status_reports_the_pause_next_round_and_rounds_from_the_state_folder(self):
         # Status format 2's fields come beside format 1's, which they leave as they were.
-        nothing = {"version": 1, "loop": {"running": False, "pid": None}, "paused": False, "next_round": None,
+        nothing = {"paused": False, "next_round": None,
                    "round": {"running": False, "started_at": None, "reviewing": None}, "last_round": None,
-                   "blocked": None, "reviews": [], "rounds": [], "rounds_by_day": self.rounds_by_day({}),
+                   "blocked": None, "reviews": [], "rounds_by_day": self.rounds_by_day({}),
                    "format": 2, "agent": {"words": "Running", "dot": "idle"}, "blockers": [], "items": [],
                    "truncated": False}
         self.assertEqual(self.status(), nothing)
@@ -6422,17 +5769,7 @@ class RunTest(unittest.TestCase):
              "reason": "Whooper is paused"},
             {"started_at": 1943196301, "ended_at": 1943196760, "result": "done", "selected": 1, "reason": None},
         ]))
-        rounds = [
-            {"started_at": "2031-07-30T09:45:01-07:00", "ended_at": "2031-07-30T09:52:40-07:00", "result": "done",
-             "selected": 1, "reason": None},
-            {"started_at": "2031-07-30T09:30:00-07:00", "ended_at": None, "result": "skipped", "selected": 0,
-             "reason": "Whooper is paused"},
-            {"started_at": "2031-07-30T09:15:00-07:00", "ended_at": "2031-07-30T09:15:07-07:00",
-             "result": "poll_failed", "selected": 0, "reason": "The GitHub fetch failed"},
-        ]
         self.assertEqual(self.status(), {
-            "version": 1,
-            "loop": {"running": True, "pid": loop},
             "paused": True,
             "next_round": "2031-07-30T10:15:00-07:00",
             "round": {"running": True, "started_at": "2031-07-30T10:00:02-07:00",
@@ -6440,7 +5777,6 @@ class RunTest(unittest.TestCase):
             "last_round": last_round,
             "blocked": None,
             "reviews": [],
-            "rounds": rounds,
             # The rounds above are in 2031, after the last 15 days.
             "rounds_by_day": self.rounds_by_day({}),
             "format": 2,
@@ -6456,9 +5792,9 @@ class RunTest(unittest.TestCase):
         (self.lock / "pid").write_text(f"{gone.pid}\n")
         (self.state / "round.lock" / "pid").write_text(f"{os.getpid()}\n")
         (self.state / "paused").unlink()
-        self.assertEqual(self.status(), {**nothing, "last_round": last_round, "rounds": rounds})
-        usage = self.command("whooper-status")
-        self.assertEqual((usage.returncode, usage.stderr), (1, "usage: whooper-status --json\n"))
+        self.assertEqual(self.status(), {**nothing, "last_round": last_round})
+        usage = self.command("whooper-status", "--json")
+        self.assertEqual((usage.returncode, usage.stderr), (1, "usage: whooper-status\n"))
 
     def rounds_by_day(self, counts):
         """whooper-status's rounds_by_day with times in Los Angeles: each of the last 15 days, oldest first, with
@@ -6468,7 +5804,7 @@ class RunTest(unittest.TestCase):
                  **{result: counts.get(back, {}).get(result, 0) for result in ["done", "poll_failed", "interrupted", "skipped"]}}
                 for back in range(14, -1, -1)]
 
-    def test_status_counts_the_rounds_of_each_of_the_last_15_days_and_lists_the_last_50(self):
+    def test_status_counts_the_rounds_of_each_of_the_last_15_days(self):
         zone = ZoneInfo("America/Los_Angeles")
         today = datetime.now(zone).date()
 
@@ -6489,9 +5825,6 @@ class RunTest(unittest.TestCase):
         status = self.status()
         self.assertEqual(status["rounds_by_day"], self.rounds_by_day({
             14: {"poll_failed": 1}, 1: {"interrupted": 1, "skipped": 1}, 0: {"done": 53, "poll_failed": 2}}))
-        # rounds lists the newest 50, newest first.
-        self.assertEqual([datetime.fromisoformat(r["started_at"]).timestamp() for r in status["rounds"]],
-                         [noon(0, minute) for minute in range(54, 4, -1)])
 
     def test_a_pause_lasts_until_whooper_run_restarts_and_skips_each_round_meanwhile(self):
         # A pause does not survive a restart: a new whooper-run deletes paused and runs its first round at
@@ -6513,18 +5846,16 @@ class RunTest(unittest.TestCase):
         status = self.status()
         self.assertGreater(datetime.fromisoformat(status["next_round"]), skipped)
         # The skipped round ran nothing, so the last round is still the first, and the history lists both.
-        self.assertEqual({key: status[key] for key in ["loop", "paused", "round"]},
-                         {"loop": {"running": True, "pid": loop.pid}, "paused": True,
-                          "round": {"running": False, "started_at": None, "reviewing": None}})
+        self.assertEqual({key: status[key] for key in ["paused", "round"]},
+                         {"paused": True, "round": {"running": False, "started_at": None, "reviewing": None}})
         last = status["last_round"]
         self.assertEqual(last["result"], "poll_failed")
-        [skip, first] = status["rounds"]
-        self.assertEqual(first, {"started_at": last["started_at"], "ended_at": last["ended_at"],
-                                 "result": "poll_failed", "selected": 0, "reason": "The GitHub fetch failed"})
+        [first, skip] = self.history()
+        self.assertEqual({key: first[key] for key in ["result", "selected", "reason"]},
+                         {"result": "poll_failed", "selected": 0, "reason": "The GitHub fetch failed"})
         self.assertEqual({key: skip[key] for key in ["ended_at", "result", "selected", "reason"]},
                          {"ended_at": None, "result": "skipped", "selected": 0, "reason": "Whooper is paused"})
-        self.assertTrue(datetime.fromisoformat(last["ended_at"]) < datetime.fromisoformat(skip["started_at"])
-                        <= skipped)
+        self.assertTrue(datetime.fromisoformat(last["ended_at"]).timestamp() < skip["started_at"] <= skipped.timestamp())
         self.assertEqual(self.command("whooper-resume").returncode, 0)
         self.assertFalse((self.state / "paused").exists())
 
@@ -6533,8 +5864,8 @@ class RoundHistoryTest(unittest.TestCase):
     """whooper.py add-round, which whooper-round runs as each round ends and whooper-run as it skips
     one, on a throwaway state folder."""
 
-    def test_the_history_keeps_the_rounds_of_the_last_15_days_and_at_least_the_last_50_oldest_first(self):
-        # 51 rounds 20 days ago, a minute apart, then 60 that start now, a minute apart.
+    def test_the_history_keeps_the_rounds_of_the_last_15_days_oldest_first(self):
+        # 5 rounds 20 days ago, a minute apart, then 3 that start now, a minute apart.
         old = int((datetime.now() - timedelta(days=20)).timestamp())
         now = int(datetime.now().timestamp())
 
@@ -6543,18 +5874,14 @@ class RoundHistoryTest(unittest.TestCase):
                                "reason": "Whooper is paused"})
 
         with tempfile.TemporaryDirectory() as tmp:
-            for n in range(51):
+            for n in range(5):
                 main("add-round", tmp, skipped(old + 60 * n))
             # Written through a rename, which leaves no temporary file behind.
             self.assertEqual(os.listdir(tmp), ["rounds.jsonl"])
-            starts = [json.loads(line)["started_at"] for line in (Path(tmp) / "rounds.jsonl").read_text().splitlines()]
-            # The old rounds are before the last 15 days, and the history keeps the last 50 of them.
-            self.assertEqual(starts, [old + 60 * n for n in range(1, 51)])
-            for n in range(60):
+            for n in range(3):
                 main("add-round", tmp, skipped(now + 60 * n))
             starts = [json.loads(line)["started_at"] for line in (Path(tmp) / "rounds.jsonl").read_text().splitlines()]
-        # Once 50 newer rounds came, the old ones went, and every round of the last 15 days stays.
-        self.assertEqual(starts, [now + 60 * n for n in range(60)])
+        self.assertEqual(starts, [now + 60 * n for n in range(3)])
 
     def test_two_rounds_that_end_at_once_both_stay_in_the_history(self):
         # whooper-run adds a round it skips while a round run by hand ends: its line comes between the
@@ -6632,19 +5959,6 @@ class ScheduleTest(unittest.TestCase):
                     main("next-round", str(int(ended.timestamp())))
                 self.assertEqual((int(out.getvalue()), err.getvalue()), (int(want.timestamp()), note))
 
-    def test_an_interval_typed_as_a_float_with_no_fraction_is_that_many_minutes(self):
-        # TOML reads interval_minutes = 15.0, edited by hand, as a float, which a settings form shows as 15, so typing 15
-        # there sends nothing. read_schedule takes it as 15, and so does next-round, which whooper-run runs before each
-        # wait.
-        interval = read_schedule({"schedule": {"interval_minutes": 15.0}})["interval_minutes"]
-        self.assertEqual((interval, type(interval)), (15, int))
-        with tempfile.TemporaryDirectory() as tmp:
-            config = Path(tmp) / "config.toml"
-            config.write_text(CONFIG + "\n[schedule]\ninterval_minutes = 15.0\n")
-            out = io.StringIO()
-            with mock.patch.dict(os.environ, WHOOPER_CONFIG=str(config)), redirect_stdout(out):
-                main("next-round", str(int(at("wed", "10:06").timestamp())))
-        self.assertEqual(int(out.getvalue()), int(at("wed", "10:21").timestamp()))
 
     def test_a_schedule_whooper_run_cannot_follow_fails(self):
         for name, values in [
@@ -6709,9 +6023,9 @@ class ConfigTest(unittest.TestCase):
 
     def test_a_poll_limit_that_is_not_a_whole_number_of_at_least_five_minutes_fails(self):
         # whooper-poll's watchdog multiplies the limit by 60 in bash, as whooper-review's does, and a poll takes 2 to 3
-        # minutes. A float with no fraction, such as 7.0, is that whole number, and env prints it as one.
+        # minutes. A float, even one with no fraction such as 7.0, is refused: the settings form sends whole numbers.
         # (value in the config, what env prints for it, or None where env fails)
-        for value, printed in [("7.0", "7"), ("3", None), ("4.0", None), ("7.5", None), ('"7"', None), ("true", None)]:
+        for value, printed in [("7", "7"), ("7.0", None), ("3", None), ("4.0", None), ("7.5", None), ('"7"', None), ("true", None)]:
             with self.subTest(value), tempfile.TemporaryDirectory() as tmp:
                 config = Path(tmp) / "config.toml"
                 config.write_text(CONFIG + f"\n[poll]\ntimeout_minutes = {value}\n")
@@ -6752,10 +6066,9 @@ class ConfigTest(unittest.TestCase):
 
     def test_a_review_limit_that_is_not_a_whole_number_of_minutes_fails(self):
         # whooper-review's watchdog multiplies the limit by 60 in bash, which knows whole numbers only, so 1.5 would
-        # leave the review with no time limit. A float with no fraction, such as 45.0, which a settings form shows as
-        # 45, is that whole number, and env prints it as one, so bash never reads 45.0.
+        # leave the review with no time limit. A float, even 45.0, is refused: the settings form sends whole numbers.
         # (value in the config, what env prints for it, or None where env fails)
-        for value, printed in [("45", "45"), ("1", "1"), ("45.0", "45"), ("1.5", None), ("0", None), ("0.0", None),
+        for value, printed in [("45", "45"), ("1", "1"), ("45.0", None), ("1.5", None), ("0", None), ("0.0", None),
                                ("-5", None), ('"45"', None), ("true", None), (None, None)]:
             with self.subTest(value), tempfile.TemporaryDirectory() as tmp:
                 config = Path(tmp) / "config.toml"
@@ -6781,18 +6094,26 @@ class ConfigTest(unittest.TestCase):
             finally:
                 os.environ["WHOOPER_CONFIG"] = test_config
 
-    def test_a_config_without_each_of_the_three_jobs_fails_naming_the_missing_one(self):
-        jobs = 'review = "claude"\npoll = "claude"\nsummary = "claude"\n'
+    def test_a_config_without_each_of_the_two_jobs_fails_naming_the_missing_one(self):
+        jobs = 'review = "claude"\npoll = "claude"\n'
         for missing, text in [("review", CONFIG.replace('review = "claude"\n', "")),
-                              ("summary", CONFIG.replace('summary = "claude"\n', "")),
-                              ("review, poll, or summary", CONFIG.replace(f"[jobs]\n{jobs}", ""))]:
+                              ("poll", CONFIG.replace('poll = "claude"\n', "")),
+                              ("review or poll", CONFIG.replace(f"[jobs]\n{jobs}", ""))]:
             with self.subTest(missing), tempfile.TemporaryDirectory() as tmp:
                 config = Path(tmp) / "config.toml"
                 config.write_text(text)
                 with mock.patch.dict(os.environ, WHOOPER_CONFIG=str(config)), self.assertRaises(SystemExit) as stop:
                     self.command("env")
-                self.assertEqual(str(stop.exception), f"whooper: [jobs] names no agent for {missing}; each of review,"
-                                                      f" poll, and summary names the agent it runs on; see {config}")
+                self.assertEqual(str(stop.exception), f"whooper: [jobs] names no agent for {missing}; each of review"
+                                                      f" and poll names the agent it runs on; see {config}")
+
+    def test_a_config_that_still_names_the_removed_summary_job_loads(self):
+        # Whooper ran a Slack summary job until it was removed; a config written for it keeps working.
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.toml"
+            config.write_text(CONFIG.replace('poll = "claude"\n', 'poll = "claude"\nsummary = "claude"\n'))
+            with mock.patch.dict(os.environ, WHOOPER_CONFIG=str(config)):
+                self.assertIn("WHOOPER_REVIEW_AGENT=claude", self.command("env"))
 
     def test_a_repo_missing_from_the_config_fails(self):
         with self.assertRaises(SystemExit):
@@ -6813,7 +6134,7 @@ class ConfigTest(unittest.TestCase):
             with self.subTest(agent):
                 review = self.command("prompt", "review", "example-org/example-repo", agent)
                 self.assertNotIn("{{", review)
-                self.assertIn(f'"{wording["shell"]} tool_use_id <id> ran: <command>"', review)
+                self.assertIn(f"{wording['shell']} call", review)
 
     def test_a_placeholder_without_a_value_fails(self):
         with self.assertRaises(SystemExit):
@@ -6833,77 +6154,6 @@ class ConfigTest(unittest.TestCase):
         ]:
             with self.subTest(url):
                 self.assertEqual(bool(link.search(url)), matches)
-
-
-class ClaudeVersionTest(unittest.TestCase):
-    """whooper.py claude-version, which the commands that run agents run as they start, with a fake claude that
-    answers --version, alone on PATH."""
-
-    def check(self, version=None, config=None, body=None):
-        """Runs the check with claude --version answering version, or with no claude on PATH for None, or with a
-        claude that runs body, a few lines of sh, on config's text, or the test config; returns the message it stops
-        with, or None."""
-        with tempfile.TemporaryDirectory() as tmp:
-            fakes = Path(tmp) / "bin"
-            fakes.mkdir()
-            if body is not None:
-                fake(fakes / "claude", body)
-            elif version is not None:
-                fake(fakes / "claude", f'[ "$1" = --version ] && echo "{version}"\necho "$*" >> "{tmp}/calls"')
-            path = Path(tmp) / "config.toml"
-            path.write_text(config or CONFIG)
-            with mock.patch.dict(os.environ, PATH=str(fakes), WHOOPER_CONFIG=str(path)):
-                try:
-                    main("claude-version")
-                except SystemExit as stop:
-                    return f"{stop}\n"
-                finally:
-                    self.calls = (Path(tmp) / "calls").read_text() if (Path(tmp) / "calls").exists() else ""
-        return None
-
-    def test_claude_code_2_1_295_and_later_runs(self):
-        for version in ["2.1.295 (Claude Code)", "2.1.314 (Claude Code)", "2.10.0 (Claude Code)", "3.0.0"]:
-            with self.subTest(version):
-                self.assertIsNone(self.check(version))
-                self.assertEqual(self.calls, "--version\n")
-
-    def test_an_older_or_unreadable_version_or_no_claude_refuses(self):
-        for version, said in [("2.1.294 (Claude Code)", "`claude --version` says 2.1.294 (Claude Code)"),
-                              ("1.9.999", "`claude --version` says 1.9.999"),
-                              ("Claude Code", "`claude --version` says Claude Code"),
-                              (None, "no claude command is on PATH")]:
-            with self.subTest(version):
-                fix = "install" if version is None else "update"
-                self.assertEqual(self.check(version), CLAUDE_TOO_OLD.split(" but ")[0] + f" but {said}; {fix} Claude"
-                                 " Code, or move those jobs to devin\n")
-
-    def test_a_claude_that_does_not_answer_in_time_refuses_and_one_that_reads_its_input_gets_none(self):
-        # This test's input is a pipe nobody closes, as a terminal would be, so a claude that read it would wait.
-        read, write = os.pipe()
-        saved = os.dup(0)
-        os.dup2(read, 0)
-        try:
-            with mock.patch.object(whooper, "CLAUDE_VERSION_SECONDS", 2):
-                self.assertEqual(self.check(body="exec /bin/sleep 30"), CLAUDE_TOO_OLD.split(" but ")[0] + " but"
-                                 " `claude --version` did not answer within 2 seconds; update Claude Code, or move those"
-                                 " jobs to devin\n")
-                # A claude that reads its input to the end, as one waiting at a prompt would, gets an empty input.
-                self.assertIsNone(self.check(body='/bin/cat >/dev/null\necho "2.1.314 (Claude Code)"'))
-        finally:
-            os.dup2(saved, 0)
-            for fd in (saved, read, write):
-                os.close(fd)
-
-    def test_the_message_names_only_the_jobs_on_claude(self):
-        config = CONFIG.replace('review = "claude"', 'review = "devin"').replace('poll = "claude"', 'poll = "devin"')
-        self.assertEqual(self.check("2.1.0", config),
-                         "whooper: [jobs] summary runs on claude, which needs Claude Code 2.1.295 or later, the first"
-                         " that blocks a Slack call when its guard hook fails, but `claude --version` says 2.1.0; update"
-                         " Claude Code, or move that job to devin\n")
-
-    def test_no_job_on_claude_leaves_claude_alone(self):
-        self.assertIsNone(self.check("2.1.0", CONFIG.replace('= "claude"', '= "devin"')))
-        self.assertEqual(self.calls, "")
 
 
 EXAMPLE = (ROOT / "examples" / "config.example.toml").read_text()
@@ -6981,7 +6231,6 @@ class AskTest(unittest.TestCase):
             fake(self.fakes / name, "exit 1")
         # The launcher passes the prompt right after -p.
         fake(self.fakes / "claude", "\n".join([
-            CLAUDE_VERSION,
             'fakes="${0%/*}"',
             'printf "%s" "$2" > "$fakes/prompt"',
             'printf "%s\\n" "$@" > "$fakes/args"',
@@ -7027,7 +6276,7 @@ class AskTest(unittest.TestCase):
                      "drafts.json", "asks/1.json"]:
             self.assertIn(f"{self.run / name}: ", prompt)
         # Files the run does not have, and files that hold nothing to answer from.
-        for name in ["transcript.json", "submit.json", "summary.md", "stderr.log", "asks/1.prompt.md"]:
+        for name in ["transcript.json", "submit.json", "stderr.log", "asks/1.prompt.md"]:
             self.assertNotIn(f"{self.run / name}: ", prompt)
         self.assertIn("finding 2, Invisible characters in the setup steps (README.md:3)", prompt)
         self.assertTrue(prompt.endswith(f"\n{question}\n"))
@@ -7164,7 +6413,7 @@ class AskTest(unittest.TestCase):
         self.assertNotIn(f"{self.run / 'stderr.log'}: ", self.prompt("claude", str(self.run), self.QUESTION))
 
     def test_findings_that_do_not_fit_the_schema_can_still_be_asked_about(self):
-        # whooper-draft, whooper-submit, and whooper-classify refuse findings and little else, as a
+        # whooper-draft and whooper-submit refuse findings and little else, as a
         # Devin review stopped at its time limit can leave (SubmitTest), but an ask answers from what
         # the file holds.
         (self.run / "findings.json").write_text(json.dumps({"findings": [finding(), self.NIT]}))
@@ -7234,7 +6483,7 @@ class AskTest(unittest.TestCase):
         # so a process whose command line names the fake lasts the whole run.
         config = Path(self.tmp.name) / "config.toml"
         config.write_text(CONFIG + "\n[ask]\ntimeout_minutes = 0.05\n")
-        fake(self.fakes / "claude", f"{CLAUDE_VERSION}\nsleep 30")
+        fake(self.fakes / "claude", "sleep 30")
         self.addCleanup(subprocess.run, ["pkill", "-KILL", "-f", self.tmp.name])
         started = monotonic()
         result = self.ask(self.run.name, self.QUESTION, env={"WHOOPER_CONFIG": str(config)})
@@ -7360,7 +6609,7 @@ class AskLauncherTest(unittest.TestCase):
 
 
 class ReviewsTest(unittest.TestCase):
-    """The reviews bin/whooper-status --json lists and the review bin/whooper-show --json prints, read
+    """The reviews bin/whooper-status lists and the review bin/whooper-show prints, read
     from review runs of example-org/example-repo in a throwaway state folder, with times in Los
     Angeles. Both read files only, and gh, slackdump, claude, and devin are fakes that fail, so no test
     can reach GitHub, Slack, or a model."""
@@ -7371,6 +6620,10 @@ class ReviewsTest(unittest.TestCase):
                   draft="**nit:** This line still names the old --fast flag.")
     DIFF = "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -3 +3 @@\n-fast\n+quick\n"
     REQUEST = {"commit_id": "h1", "event": "APPROVE", "body": "", "comments": []}
+
+    # The step whooper-review names in failure.json for each reason it writes in failure.txt.
+    STEPS = [("the review run passed its", "time-limit"), ("the review run exited", "findings"),
+             ("the review run's findings.json does not fit", "findings"), ("no clone of ", "clone")]
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -7415,6 +6668,11 @@ class ReviewsTest(unittest.TestCase):
         path.write_text(content if isinstance(content, str) else json.dumps(content))
         when = (self.started(run) + timedelta(minutes=minutes)).timestamp()
         os.utime(path, (when, when))
+        # whooper-review saves the cause in failure.json beside each failure.txt it writes.
+        if name == "failure.txt" and isinstance(content, str) and not (run / "failure.json").exists():
+            step = next((step for prefix, step in self.STEPS if content.startswith(prefix)), None)
+            if step:
+                (run / "failure.json").write_text(json.dumps(failure_cause(step, content)))
 
     def fetched(self, run):
         """Gives the run the diff and the PR's conversation whooper-review saves before the review starts."""
@@ -7473,7 +6731,7 @@ class ReviewsTest(unittest.TestCase):
         return run
 
     def status(self):
-        result = subprocess.run([str(ROOT / "bin" / "whooper-status"), "--json"], env=self.env, capture_output=True,
+        result = subprocess.run([str(ROOT / "bin" / "whooper-status")], env=self.env, capture_output=True,
                                 text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
@@ -7500,7 +6758,7 @@ class ReviewsTest(unittest.TestCase):
 
     def shown(self, run):
         """What whooper-show prints for the run."""
-        result = self.show(run.name, "--json")
+        result = self.show(run.name)
         self.assertEqual((result.returncode, result.stderr), (0, ""))
         return json.loads(result.stdout)
 
@@ -7724,32 +6982,15 @@ class ReviewsTest(unittest.TestCase):
         self.write(saved, "failure.txt", "/config/setup.sh failed: Cannot connect to the Docker daemon at"
                    " unix:///var/run/docker.sock. Is the docker daemon running?\n", 2)
         self.write(saved, "failure.json", CAUSES["docker_unavailable"], 2)
-        # Reviews from before failure.json get the cause that whooper-review's wording of failure.txt at
-        # each step names, and unknown for any other.
-        older = []
-        for hours, (text, cause) in enumerate([
-            ("the review run passed its 45-minute limit; see /state/runs/x/stderr.log and the transcript in"
-             " /state/runs/x\n", "time_limit"),
-            ("the review run exited 1 without findings; see /state/runs/x/stderr.log and the transcript in"
-             " /state/runs/x\n", "agent_no_findings"),
-            ("the review run's findings.json does not fit the schema\n", "agent_no_findings"),
-            ("/Users/sam/.config/whooper/setup.sh failed\n", "setup_failed"),
-            ("no clone of example-org/example-repo at /cache/repos/example-org-example-repo; see README.md\n",
-             "repo_not_configured"),
-            ("the review was interrupted\n", "unknown"),
-            ("the review stopped at an unexpected error; see whooper-review's error output\n", "unknown"),
-        ], start=2):
-            run = self.make_run(timedelta(hours=hours), pr=20 + hours)
-            self.fetched(run)
-            self.write(run, "failure.txt", text, 2)
-            older.append((run, cause))
-        # A failure.json cut short reads as missing, so failure.txt names the cause.
+        # A review without failure.json, as after a kill -9, or with one cut short, is unknown.
+        older = self.make_run(timedelta(hours=2), pr=22)
+        self.fetched(older)
+        self.write(older, "failure.txt", "/Users/sam/.config/whooper/setup.sh failed\n", 2)
         cut = self.make_run(timedelta(hours=10), pr=30)
         self.fetched(cut)
         self.write(cut, "failure.txt", "/config/setup.sh failed\n", 2)
         self.write(cut, "failure.json", '{"id": "docker_unav', 2)
-        expected = {saved.name: CAUSES["docker_unavailable"], cut.name: CAUSES["setup_failed"],
-                    **{run.name: CAUSES[cause] for run, cause in older}}
+        expected = {saved.name: CAUSES["docker_unavailable"], older.name: CAUSES["unknown"], cut.name: CAUSES["unknown"]}
         self.assertEqual({r["run_id"]: r["cause"] for r in self.reviews()}, expected)
         self.assertEqual({run_id: self.shown(self.state / "runs" / run_id)["cause"] for run_id in expected}, expected)
 
@@ -7769,7 +7010,7 @@ class ReviewsTest(unittest.TestCase):
         ])
         # It has no findings, drafts, or diff yet, since its review has not fetched the merge base.
         self.assertEqual(self.shown(waits), {
-            "version": 1, "run_id": waits.name, "run": json.loads((waits / "run.json").read_text()), "title": None,
+            "run_id": waits.name, "run": json.loads((waits / "run.json").read_text()), "title": None,
             "author": None, "outcome": "waiting", "findings": None, "safe_to_approve": False, "drafts": None,
             "diff": None, "failure": None, "asks": [], "submitted": None, "cause": CAUSES["docker_unavailable"],
             "head_sha": "h1", "skipped_by_user": False, "removed_by_user": False, "overview": None,
@@ -7869,7 +7110,7 @@ class ReviewsTest(unittest.TestCase):
         self.finish(run, findings=[finding(), self.NIT])
         shown = self.shown(run)
         self.assertEqual(shown, {
-            "version": 1, "run_id": run.name, "run": json.loads((run / "run.json").read_text()),
+            "run_id": run.name, "run": json.loads((run / "run.json").read_text()),
             "title": self.TITLE, "author": "alice",
             "outcome": "reviewed", "findings": self.findings(findings=[finding(), self.NIT]),
             # The run is not safe to approve, so until the user changes anything the review only comments
@@ -7898,7 +7139,7 @@ class ReviewsTest(unittest.TestCase):
         self.fetched(failed)
         reason = f"the review run passed its 45-minute limit; see {failed}/stderr.log and the transcript in {failed}\n"
         self.write(failed, "failure.txt", reason, 45)
-        nothing = {"version": 1, "findings": None, "safe_to_approve": False, "drafts": None, "asks": [],
+        nothing = {"findings": None, "safe_to_approve": False, "drafts": None, "asks": [],
                    "submitted": None, "overview": None, "commits_since_review": None, "co_change": [],
                    "connections": None, "test_gaps": None, "examples": None}
         self.assertEqual(self.shown(failed), {
@@ -8219,14 +7460,14 @@ class ReviewsTest(unittest.TestCase):
         # A run ID names a folder right under runs/, so a path reads nothing outside it.
         for run_id in ["20310101T000000Z-1", "..", "../whooper", f"../runs/{run.name}"]:
             with self.subTest(run_id):
-                result = self.show(run_id, "--json")
+                result = self.show(run_id)
                 self.assertEqual((result.returncode, result.stdout, result.stderr),
                                  (1, "", f"whooper-show: no run {run_id} in {self.state / 'runs'}\n"))
-        for args in [[], ["--json"], [run.name], [run.name, run.name, "--json"]]:
+        for args in [[], [run.name, run.name], [run.name, "--json"]]:
             with self.subTest(args=args):
                 result = self.show(*args)
                 self.assertEqual((result.returncode, result.stdout, result.stderr),
-                                 (1, "", "usage: whooper-show <run-id> --json\n"))
+                                 (1, "", "usage: whooper-show <run-id>\n"))
 
 
 class StatusFormat2Test(unittest.TestCase):
@@ -8624,7 +7865,7 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(json.loads(self.settings("get")), {
             "schedule": {"interval_minutes": 15, "start": "10:00", "end": "18:00", "days": ["mon", "tue", "wed", "thu", "fri"]},
             "poll": {"timeout_minutes": 10},
-            "jobs": {"review": "claude", "poll": "claude", "summary": "claude"},
+            "jobs": {"review": "claude", "poll": "claude"},
             "agents": {"claude": {"review_model": "review-model", "poll_model": "poll-model", "budget_usd": 15},
                        "devin": {"review_model": "devin-review-model", "poll_model": "devin-poll-model"}},
             "review": {"timeout_minutes": 45, "skills": ["review-skill", "language-skill"]},
@@ -8638,16 +7879,16 @@ class SettingsTest(unittest.TestCase):
                 self.assertEqual(sorted(schema["enum"]), sorted(p.parent.name for p in (ROOT / "agents").glob(f"*/{job}")))
 
     def test_set_refuses_a_save_that_leaves_a_job_without_an_agent(self):
-        path = self.use_config(EXAMPLE.replace('summary = "devin"\n', ""))
+        path = self.use_config(EXAMPLE.replace('poll = "devin"\n', ""))
         before = path.read_text()
         with self.assertRaises(SystemExit) as stop:
             self.settings("set", json.dumps({"schedule": {"interval_minutes": 30}}))
-        self.assertEqual(str(stop.exception), "whooper: [jobs] names no agent for summary; each of review, poll, and"
-                                              f" summary names the agent it runs on; see {path}")
+        self.assertEqual(str(stop.exception), "whooper: [jobs] names no agent for poll; each of review and poll"
+                                              f" names the agent it runs on; see {path}")
         self.assertEqual(path.read_text(), before)
         # A save that gives the job an agent goes through.
-        self.settings("set", json.dumps({"schedule": {"interval_minutes": 30}, "jobs": {"summary": "claude"}}))
-        self.assertEqual(json.loads(self.settings("get"))["jobs"], {"review": "devin", "poll": "devin", "summary": "claude"})
+        self.settings("set", json.dumps({"schedule": {"interval_minutes": 30}, "jobs": {"poll": "claude"}}))
+        self.assertEqual(json.loads(self.settings("get"))["jobs"], {"review": "devin", "poll": "claude"})
 
     def test_set_refuses_a_save_that_leaves_a_time_limit_whooper_refuses_to_start_on(self):
         # whooper.py env, which each script starts with, stops on a time limit edited by hand into config.toml, so a
@@ -8684,19 +7925,6 @@ class SettingsTest(unittest.TestCase):
                 self.settings("set", json.dumps({"review": {"timeout_minutes": 30}}))
                 self.assertEqual(path.read_text(), EXAMPLE.replace("timeout_minutes = 45 ", "timeout_minutes = 30 ", 1))
 
-    def test_a_whole_number_typed_as_a_float_reads_as_that_number_and_a_save_of_another_setting_keeps_it(self):
-        # TOML reads interval_minutes = 15.0 or timeout_minutes = 45.0, edited by hand, as a float, which a settings
-        # form shows as 15 or 45, so typing 15 or 45 there sends nothing. The checks take it as that whole number, so
-        # get prints it as one, and a save of another setting goes through and keeps the line as it is.
-        edited = (EXAMPLE.replace("interval_minutes = 15\n", "interval_minutes = 15.0\n", 1)
-                  .replace("timeout_minutes = 45 ", "timeout_minutes = 45.0 ", 1)
-                  .replace("timeout_minutes = 10 ", "timeout_minutes = 10.0 ", 1))
-        path = self.use_config(edited)
-        got = json.loads(self.settings("get"))
-        numbers = [got["schedule"]["interval_minutes"], got["poll"]["timeout_minutes"], got["review"]["timeout_minutes"]]
-        self.assertEqual([(number, type(number)) for number in numbers], [(15, int), (10, int), (45, int)])
-        self.settings("set", json.dumps({"jobs": {"review": "claude"}}))
-        self.assertEqual(path.read_text(), edited.replace('[jobs]\nreview = "devin"', '[jobs]\nreview = "claude"', 1))
 
     def test_set_rewrites_a_line_whose_value_equals_the_saved_one_in_python_but_has_another_type(self):
         # Python's == calls true equal to 1, and read_schedule refuses interval_minutes = true and the config check a
@@ -8714,19 +7942,17 @@ class SettingsTest(unittest.TestCase):
                 self.settings("set", json.dumps(values))
                 self.assertEqual(path.read_text(), EXAMPLE.replace(line, saved, 1))
 
-    def test_a_whole_number_sent_as_a_float_saves_as_that_number(self):
-        # JSON Schema counts 45.0 as an integer, so a save of {"review": {"timeout_minutes": 45.0}}, as Python's
-        # json.dumps writes 45, goes through and writes 45, which the checks read as they read 45.
-        for values, line, saved in [
-            ({"review": {"timeout_minutes": 45.0}}, "timeout_minutes = 30 ", "timeout_minutes = 45 "),
-            ({"schedule": {"interval_minutes": 20.0}}, "interval_minutes = 15\n", "interval_minutes = 20\n"),
-            ({"poll": {"timeout_minutes": 5.0}}, "timeout_minutes = 10 ", "timeout_minutes = 5 "),
-        ]:
+    def test_a_whole_number_sent_as_a_float_is_refused(self):
+        # The settings form sends whole numbers, so 45.0 comes only from a hand-written request, which is refused
+        # with the setting's name and the file left as it was.
+        for values, where in [({"review": {"timeout_minutes": 45.0}}, "settings.review.timeout_minutes"),
+                              ({"schedule": {"interval_minutes": 20.0}}, "settings.schedule.interval_minutes")]:
             with self.subTest(values):
-                edited = EXAMPLE.replace("timeout_minutes = 45 ", "timeout_minutes = 30 ", 1)
-                path = self.use_config(edited)
-                self.settings("set", json.dumps(values))
-                self.assertEqual(path.read_text(), edited.replace(line, saved, 1))
+                path = self.use_config(EXAMPLE)
+                with self.assertRaises(SystemExit) as stop:
+                    self.settings("set", json.dumps(values))
+                self.assertIn(where, str(stop.exception))
+                self.assertEqual(path.read_text(), EXAMPLE)
 
     def test_a_save_takes_the_ask_limits_whooper_ask_starts_on_and_refuses_the_rest(self):
         # whooper-ask's watchdog sleeps the limit times 60 in Python, so any number of minutes above 0 works, such as

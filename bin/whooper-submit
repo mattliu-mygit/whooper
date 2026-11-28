@@ -22,7 +22,7 @@
 # Prompting Time handles its own way posts nothing and exits with its own code:
 #
 #   10  The PR has new commits since the review. The reviewed head's record says stale and the PR
-#       goes on the recheck list, as whooper-post does, so the next round reviews the new commits
+#       goes on the recheck list, as whooper-review does when the head moves during a review, so the next round reviews the new commits
 #       whatever brought the PR in; bin/whooper-round runs that round now.
 #   11  The review approves, and the run is not safe to approve. It lists why: a review that failed,
 #       with the reason whooper-review saved in failure.txt, since it stopped before it finished

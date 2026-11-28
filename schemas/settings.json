@@ -59,12 +59,7 @@
       "additionalProperties": false,
       "properties": {
         "review": { "title": "Review agent", "enum": ["claude", "devin"] },
-        "poll": { "title": "Poll agent", "description": "Reads the ask channel's posts and picks the review asks.", "enum": ["claude", "devin"] },
-        "summary": {
-          "title": "Summary agent",
-          "description": "Claude schedules the summary in the summary channel; Devin writes it to summary.md in the run's folder.",
-          "enum": ["claude", "devin"]
-        }
+        "poll": { "title": "Poll agent", "description": "Reads the ask channel's posts and picks the review asks.", "enum": ["claude", "devin"] }
       }
     },
     "agents": {
@@ -79,7 +74,7 @@
           "additionalProperties": false,
           "properties": {
             "review_model": { "title": "Review model", "type": "string" },
-            "poll_model": { "title": "Poll model", "description": "Also sends the summary.", "type": "string" },
+            "poll_model": { "title": "Poll model", "type": "string" },
             "budget_usd": { "title": "Most one review may spend (USD)", "description": "Leave out for no limit.", "type": "number", "minimum": 1 }
           }
         },

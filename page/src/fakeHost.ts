@@ -195,11 +195,10 @@ export function createFakeHost(send: (message: HostMessage) => void, options: Fa
     return base;
   }
 
-  /** What bin/whooper-show --json <run-id> prints. */
+  /** What bin/whooper-show <run-id> prints. */
   function show(runId: string): Shown {
     const r = record(runId);
     return {
-      version: 1,
       run_id: runId,
       run: { repo: r.repo, pr: r.pr, head_sha: r.head_sha },
       title: r.title,

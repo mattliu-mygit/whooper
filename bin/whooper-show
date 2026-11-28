@@ -5,9 +5,8 @@
 # older run's diff, from the repo's clone in the cache, <cache>/repos/<owner>-<repo>, where <cache> is
 # $XDG_CACHE_HOME/whooper (default ~/.cache/whooper), in which git fetches nothing and writes nothing:
 #
-#   whooper-show <run-id> --json
+#   whooper-show <run-id>
 #
-#   version    1, the number of this format
 #   run_id     the run's ID
 #   run        run.json, the work item with the run's own fields, or null when it cannot be read, as
 #              when whooper-review stopped before it wrote the file
@@ -90,18 +89,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-usage="usage: whooper-show <run-id> --json"
-run_id="" json=false
-while (($#)); do
-  case "$1" in
-    --json) json=true ;;
-    *)
-      [[ -z "$run_id" ]] || { echo "$usage" >&2; exit 1; }
-      run_id="$1"
-      ;;
-  esac
-  shift
-done
-[[ -n "$run_id" && "$json" == true ]] || { echo "$usage" >&2; exit 1; }
+(($# == 1)) && [[ "$1" != -* ]] || { echo "usage: whooper-show <run-id>" >&2; exit 1; }
+run_id="$1"
 eval "$("$root/lib/python" "$root/lib/whooper.py" env)"
 exec "$root/lib/python" "$root/lib/whooper.py" show "$WHOOPER_STATE" "$run_id"
