@@ -3693,7 +3693,11 @@ def review_to_submit(data, run):
     # bin/whooper-submit writes submit.json saying posting before it posts, and adds GitHub's
     # response after, so a run that has the file may have its review on GitHub.
     if (run / "submit.json").exists():
-        if json.loads((run / "submit.json").read_text())["status"] == "posting":
+        submit = read_object(run / "submit.json")
+        if submit is None:
+            raise SystemExit(f"whooper-submit: {run} has a submit.json that cannot be read, so its review may be on"
+                             " GitHub; check the PR, then delete submit.json to submit again")
+        if submit.get("status") == "posting":
             raise SystemExit(f"whooper-submit: another submit of {run} is posting or did not finish, so its review"
                              " may be on GitHub; check the PR, then delete submit.json to submit again")
         raise SystemExit(f"whooper-submit: {run} was already submitted; see its submit.json")

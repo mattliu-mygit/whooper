@@ -3208,6 +3208,18 @@ class SubmitTest(unittest.TestCase):
         self.assertIn("did not finish", result.stderr)
         self.assertEqual(self.posted(), [])
 
+    def test_a_submit_json_that_cannot_be_read_blocks_the_next_without_a_traceback(self):
+        # Such as one cut short or edited by hand: the review it records may be on GitHub.
+        self.draft("include", "1")
+        for text in ["", '{"status": "post', "[]"]:
+            with self.subTest(text):
+                (self.run / "submit.json").write_text(text)
+                result = self.submit()
+                self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                 (1, "", f"whooper-submit: {self.run.resolve()} has a submit.json that cannot be read, so"
+                                  " its review may be on GitHub; check the PR, then delete submit.json to submit again\n"))
+        self.assertEqual((self.posted(), self.gh_calls()), ([], []))
+
     def test_of_two_submits_at_once_only_one_posts(self):
         # Another submit claims the run after this one found no submit.json, while it reads the drafts.
         self.draft("include", "1")
