@@ -2190,6 +2190,29 @@ class LanguageServerTest(RunDirTest):
         self.check_out_of_time(own_group=True)
 
 
+class RunCommandTest(unittest.TestCase):
+    """run_command, with which a step runs a command, such as go test or node, in a process group of its own."""
+
+    def test_a_signal_that_comes_as_the_command_ends_stops_the_step_and_reaps_the_command(self):
+        # A signal handler raises SystemExit, as main's does at whooper-review's TERM, while run_command waits for the
+        # command, which has ended but is not yet reaped, so that all its process group holds is the ended command. On
+        # macOS, killpg fails with EPERM for such a group.
+        wait, waited = subprocess.Popen.wait, []
+
+        def interrupted(process, timeout=None):
+            if timeout is None:
+                return wait(process)
+            waited.append(process)
+            while running(process.pid):
+                sleep(0.01)
+            raise SystemExit(128 + signal.SIGTERM)
+
+        with mock.patch.object(subprocess.Popen, "wait", interrupted), self.assertRaises(SystemExit):
+            whooper.run_command(["true"], ROOT, 10, os.environ)
+        [process] = waited
+        self.assertEqual(process.returncode, 0)
+
+
 # The limits test_gaps.json gives whenever it measures, in plain words.
 AND_LINES = "Go counts a line as run when any part of it ran: in `a && b`, the line counts as run even when b never ran."
 CHECKED = "A line that ran is not always checked: a test can run a line without checking what it does."

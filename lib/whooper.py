@@ -1937,8 +1937,7 @@ def run_command(command, folder, seconds, env):
         except subprocess.TimeoutExpired:
             code = None
         finally:
-            with suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
+            signal_group(process.pid, signal.SIGKILL)
             process.wait()
         out.seek(0)
         err.seek(0)
