@@ -1,12 +1,12 @@
 {
   "title": "Whooper settings",
-  "description": "The settings in Whooper's config.toml that a settings form may edit. bin/whooper-settings prints and saves them.",
+  "description": "The settings in Whooper's config.toml that a settings form may edit. bin/whooper settings get prints them and bin/whooper settings set saves them.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
     "schedule": {
       "title": "Polling",
-      "description": "When bin/whooper-run polls: a round starts the interval after the last one ended, at or after the start and before the end, on the chosen days.",
+      "description": "When bin/whooper run polls: a round starts the interval after the last one ended, at or after the start and before the end, on the chosen days.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -54,7 +54,7 @@
     },
     "jobs": {
       "title": "Agents",
-      "description": "The agent each job runs on. agents/ has a folder per agent with a launcher per job it can run.",
+      "description": "The agent each job runs on: claude (Claude Code) or devin (Devin). bin/whooper starts each one itself.",
       "type": "object",
       "additionalProperties": false,
       "properties": {

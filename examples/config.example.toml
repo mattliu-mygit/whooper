@@ -20,8 +20,7 @@ user_id = "U0000000000"            # your member ID: profile, "...", Copy member
 ask_channel = "C0000000001"        # where teammates ask you for reviews
 slackdump_workspace = "example"    # the poll's slackdump login: slackdump workspace new <name>
 
-# The agent each job runs on, required for both. agents/ has a folder per agent with a launcher
-# per job it can run.
+# The agent each job runs on, required for both: "claude" (Claude Code) or "devin" (Devin).
 [jobs]
 review = "devin"
 poll = "devin"
@@ -47,7 +46,7 @@ skills = ["multi-angle-review", "code-shape-and-runtime-review"]
 [ask]
 timeout_minutes = 10               # whooper-ask stops a run that takes longer to answer, on any agent
 
-# When bin/whooper-run polls: a round starts interval_minutes after the last one ended, at or after
+# When bin/whooper run polls: a round starts interval_minutes after the last one ended, at or after
 # start and before end (24-hour local times) on these days. These four are the defaults.
 [schedule]
 interval_minutes = 15

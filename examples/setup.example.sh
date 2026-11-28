@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Repo-specific setup that bin/whooper-review runs after the head and merge-base worktrees exist
+# Repo-specific setup that bin/whooper review runs after the head and merge-base worktrees exist
 # and before the review starts. Copy it next to config.toml and name it in the repo's table.
 #
 # Whooper sets:
