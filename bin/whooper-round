@@ -45,9 +45,9 @@ notify() {
   fi
 }
 
-# As in whooper-review: stops the process group of the review this round runs, named by the file lib/whooper.py
-# session writes its ID in, and everything the review started, with a SIGKILL to whatever is left 4 seconds after the
-# TERM (lib/stop-group), or keeps a review that has not yet made its group from starting.
+# As in whooper-review: stops the process group of the child this round runs, named by the file lib/whooper.py
+# session writes its ID in, and everything the child started, with a SIGKILL to whatever is left 4 seconds after the
+# TERM (lib/stop-group), or keeps a child that has not yet made its group from starting.
 stop_group() {
   if [[ -n "$1" ]] && "$root/lib/stop-group" "$1"; then
     wait "$(cat "$1")" 2>/dev/null || true
@@ -55,14 +55,14 @@ stop_group() {
 }
 
 # However the round ends, round.json becomes last-round.json with the time and result, and a review
-# still running is listed as interrupted, once it has stopped: finish first stops the review the
+# still running is listed as interrupted, once it has stopped: finish first stops the child the
 # round runs, or keeps one it is starting from starting (stop_group). The history gets the round
 # with the reason it ended so, or null, and 0 selected for a round that ended before it selected.
 # Only the round whose process ID the lock holds does this: one refused the lock below, or stopped
 # before it took it, leaves the lock and both files alone.
-result=interrupted reason="" work="" review_file=""
+result=interrupted reason="" work="" child_file=""
 finish() {
-  stop_group "$review_file"
+  stop_group "$child_file"
   rm -rf "$work"
   [[ "$(cat "$lock/pid" 2>/dev/null)" == "$$" ]] || return
   save "$WHOOPER_STATE/last-round.json" jq --argjson ended "$(date +%s)" --arg result "$result" \
@@ -78,6 +78,22 @@ trap 'exit 130' INT TERM HUP
 # As in whooper-review, the work folder comes after the traps, from a mktemp that ignores INT, TERM,
 # and HUP, so no signal leaves it behind.
 work="$(trap '' INT TERM HUP; mktemp -d)"
+
+# Runs bin/$1 with the arguments after it, whooper-fetch, whooper-poll, a review, or whooper-summary, in
+# a session of its own (lib/whooper.py session), as whooper-review starts its run, and returns its exit
+# code. The round waits for it in the background, so an INT, TERM, or HUP reaches finish at once, and
+# finish stops it through child.group in the work folder (stop_group). A Ctrl-C or kill -- -<pid> that
+# lands while the round forks a child can miss the child, which then ran to its end before the round
+# stopped, and the summary's agent has no time limit.
+run_child() {
+  local name="$1" code=0
+  shift
+  child_file="$work/child.group"
+  "$root/lib/python" "$root/lib/whooper.py" session "$child_file" "$root/bin/$name" "$@" < /dev/null &
+  wait "$!" || code=$?
+  rm -f "$child_file"
+  return "$code"
+}
 
 # The same lock rule as whooper-run's: mkdir is atomic, so of two rounds started at once only one
 # gets the lock, and a lock whose process is gone, or is now some other program, is stale and this
@@ -112,7 +128,7 @@ echo "=== $(date '+%F %T') poll"
 # step names the poll step that runs, for the history's reason when it fails. The first refuses a Claude
 # Code older than 2.1.295 while a job runs on claude (lib/whooper.py's check_claude).
 if ! { step="The Claude Code version check" && "$root/lib/python" "$root/lib/whooper.py" claude-version &&
-  step="The GitHub fetch" && "$root/bin/whooper-fetch" && step="The Slack poll" && "$root/bin/whooper-poll" &&
+  step="The GitHub fetch" && run_child whooper-fetch && step="The Slack poll" && run_child whooper-poll &&
   step="Selecting the work" && save "$items/selected.jsonl" "$root/bin/whooper-select"; }; then
   echo "a poll step failed; trying again next round"
   result=poll_failed reason="$step failed"
@@ -136,22 +152,14 @@ while IFS= read -r item <&3; do
   fi
   echo "--- review $pr $(jq -r .kind <<<"$item")"
   save "$record" jq --arg pr "$pr" '.reviewing = $pr' "$record"
-  # The review starts in a session of its own (lib/whooper.py session), as whooper-review starts its
-  # run, and the round waits for it in the background, so an INT, TERM, or HUP reaches finish at
-  # once, and finish stops the review through review.group in the work folder (stop_group). A Ctrl-C
-  # or kill -- -<pid> that lands while the round forks the review can miss the review, which then
-  # ran to its end before the round stopped. The review prints its run directory to run.txt there.
-  review_file="$work/review.group"
-  "$root/lib/python" "$root/lib/whooper.py" session "$review_file" "$root/bin/whooper-review" "$file" --dry-run \
-    < /dev/null > "$work/run.txt" &
+  # The review prints its run directory to run.txt in the work folder.
   review_exit=0
-  wait "$!" || review_exit=$?
-  rm -f "$review_file"
+  run_child whooper-review "$file" --dry-run > "$work/run.txt" || review_exit=$?
   run="$(cat "$work/run.txt")"
   if ((review_exit == 0)); then
     "$root/bin/whooper-classify" "$run" < /dev/null
     "$root/bin/whooper-post" "$(basename "$run")" --print < /dev/null
-    "$root/bin/whooper-summary" "$(basename "$run")" < /dev/null
+    run_child whooper-summary "$(basename "$run")"
     notify "Whooper reviewed $pr" "$(jq -r '"\(.approval.verdict | gsub("_"; " ")), \(.findings | length) finding(s). \(.approval.reason | .[0:200])"' "$run/findings.json")"
     outcome=reviewed
   elif [[ -n "$run" && -e "$run/skipped-by-user" ]]; then

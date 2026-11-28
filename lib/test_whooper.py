@@ -5672,6 +5672,68 @@ class RunTest(unittest.TestCase):
                         self.assertEqual((last["result"], last["reviews"]),
                                          ("interrupted", [{"pr": "example-org/example-repo#12", "outcome": "interrupted"}]))
 
+    def test_a_stop_that_misses_the_fetch_poll_or_summary_being_started_stops_it_and_the_round_at_once(self):
+        # As for a review, a Ctrl-C or kill -- -<pid> that lands while whooper-round forks whooper-fetch, whooper-poll,
+        # or whooper-summary reaches the round but can miss the child being forked, and the round then stopped only
+        # once that child had run to its end, which for the summary's agent has no time limit. A fake uv stops the
+        # child's first lib/python as it starts, and the test meanwhile sends TERM to the round alone, standing in for
+        # the stop the child missed. The child goes on only once the round has exited, or after 10 seconds. Under bash
+        # 3.2 and 5 alike, the round exits 130 at once, and the child never runs: after the pause, the child itself
+        # starts no lib/python of its own, which the fake uv notes in ran. The round reaches the summary once its
+        # review succeeds.
+        env, item, _ = self.pull_request()
+        head = json.loads(item.read_text())["head_sha"]
+        uv, tmp = shutil.which("uv"), Path(self.tmp.name)
+        self.fake_review_requests({**pr(number=12, head=head, requested=[LOGIN]),
+                                   "repository": {"nameWithOwner": "sample-org/plain-repo"}, "baseRefName": "main",
+                                   "url": "https://github.com/sample-org/plain-repo/pull/12"})
+        # The review run, which starts in the head worktree, finds nothing; the poll's run finds no asks.
+        (self.fakes / "result.json").write_text(json.dumps({
+            "type": "result", "subtype": "success", "total_cost_usd": 0, "duration_ms": 0, "num_turns": 1,
+            "structured_output": {"status": "reviewed", "skip_reason": "", "findings": [],
+                                  "approval": {"verdict": "approve_once_ci_passes", "reason": "Read the diff."}}}))
+        poll = (self.fakes / "claude").read_text().split("\n", 1)[1]
+        self.claude_script(f'case "$PWD" in */head) cat "${{0%/*}}/result.json"; exit ;; esac\n{poll}')
+
+        def alive(pid):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return False
+            return True
+
+        for case, child in enumerate(["/bin/whooper-fetch", "/bin/whooper-poll", "/bin/whooper-summary "]):
+            for n, bash in enumerate(BASHES):
+                with self.subTest(child.strip(), bash=str(bash)):
+                    paused, ran, home = tmp / f"paused-{case}-{n}", tmp / f"ran-{case}-{n}", tmp / f"state-{case}-{n}"
+                    # The fake uv's parent is a lib/python, and the lib/python's parent the script that runs it.
+                    self.script(self.fakes / "uv", "\n".join([
+                        'parent="$(ps -ww -o command= -p "$PPID")"',
+                        'script="$(ps -ww -o command= -p "$(ps -o ppid= -p "$PPID" | tr -d " ")")"',
+                        f'case "$parent $script" in *"{child}"*)',
+                        f'  if mkdir "{paused}" 2>/dev/null; then',
+                        f'    echo "$PPID" > "{paused}/pid.tmp" && mv "{paused}/pid.tmp" "{paused}/pid"',
+                        f'    until [ -e "{paused}/go" ]; do sleep 0.1; done',
+                        f'  else case "$script" in *"{child}"*) touch "{ran}" ;; esac; fi ;;',
+                        "esac",
+                        f'exec "{uv}" "$@"',
+                    ]))
+                    folder = bash_folder(bash, tmp / f"bash-{case}-{n}")
+                    command = self.start_command("whooper-round", env={**env, "XDG_STATE_HOME": str(home),
+                                                                       "PATH": f"{folder}{os.pathsep}{env['PATH']}"})
+                    self.wait_for(lambda: (paused / "pid").exists() or command.poll() is not None,
+                                  f"whooper-round to start {child.strip()}")
+                    starter = int((paused / "pid").read_text())
+                    os.kill(command.pid, signal.SIGTERM)
+                    with suppress(subprocess.TimeoutExpired):
+                        command.wait(timeout=10)
+                    exited = command.returncode
+                    (paused / "go").touch()
+                    self.wait_for(lambda: not alive(starter), "the process that starts the child to end")
+                    self.assertEqual((exited, ran.exists()), (130, False), command.communicate()[1])
+                    last = json.loads((home / "whooper" / "last-round.json").read_text())
+                    self.assertEqual(last["result"], "interrupted")
+
     def test_a_stop_of_whooper_run_ends_its_round_review_and_run_before_prompting_times_sigkill_whatever_ignores_term(self):
         # Prompting Time stops whooper-run with a TERM to its process group and, 5 seconds later, a SIGKILL to it. The
         # round and the review run in process groups of their own, which neither signal reaches, so each parent's
