@@ -4478,6 +4478,35 @@ class RunTest(unittest.TestCase):
         self.assertEqual(self.command("whooper-fetch").returncode, 0)
         self.assertEqual(json.loads((poll / "recheck-prs.json").read_text()), [])
 
+    def test_the_fetch_reads_every_pr_its_searches_find_up_to_the_1000_github_returns(self):
+        # Open PRs that request Sam's review in example-org. gh returns at most --limit of a search's results, which
+        # it pages through, and the fake logs each PR the fetch then reads.
+        requested, read = self.fakes / "requested", self.fakes / "read"
+        self.script(self.fakes / "gh", "\n".join([
+            'case "$*" in',
+            '  "search prs user-review-requested:sam-example --owner example-org "*)',
+            '    limit=30 previous=""',
+            '    for arg; do [ "$previous" = --limit ] && limit="$arg"; previous="$arg"; done',
+            '    head -n "$limit" "${0%/*}/requested" ;;',
+            '  "search prs "*) ;;',
+            '  "api graphql "*) for arg; do case "$arg" in url=*) echo "${arg#url=}" >> "${0%/*}/read" ;; esac; done ;;',
+            "  *) exit 1 ;;",
+            "esac",
+        ]))
+        urls = [f"https://github.com/example-org/example-repo/pull/{number}" for number in range(1, 1201)]
+        requested.write_text("".join(f"{url}\n" for url in urls[:150]))
+        fetch = self.command("whooper-fetch")
+        self.assertEqual((fetch.returncode, fetch.stderr), (0, ""))
+        self.assertEqual(sorted(read.read_text().splitlines()), sorted(urls[:150]))
+        # 1,000 is the most GitHub returns for one search, so a search that reaches it says it may have left PRs out.
+        requested.write_text("".join(f"{url}\n" for url in urls))
+        read.unlink()
+        fetch = self.command("whooper-fetch")
+        self.assertEqual((fetch.returncode, fetch.stderr), (
+            0, "whooper-fetch: the search for PRs that request sam-example's review in example-org found 1,000 PRs, the"
+               " most GitHub returns for one search, so it may have left some out\n"))
+        self.assertEqual(sorted(read.read_text().splitlines()), sorted(urls[:1000]))
+
     def test_a_round_reviews_each_selected_item_and_reports_how_it_ended(self):
         self.fake_one_review_request()
         # A lock left by a round that was killed, whose process ID now belongs to this test.

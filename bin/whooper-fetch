@@ -13,12 +13,18 @@ out="$WHOOPER_STATE/poll/github.json"
 looked_up="$WHOOPER_STATE/poll/recheck-prs.json"
 mkdir -p "$WHOOPER_STATE/poll"
 
-# Each search returns at most 100 PRs. Raise --limit if one ever returns 100.
+# gh pages through a search's results up to --limit, and 1,000 is the most GitHub returns for one search
+# (and the highest --limit gh takes), so a search that finds 1,000 may have left PRs out. This passes the
+# URLs through and then says so on the error output, naming the search ($1).
+capped() {
+  awk -v search="$1" '{ print } END { if (NR >= 1000) printf "whooper-fetch: %s found 1,000 PRs, the most GitHub returns for one search, so it may have left some out\n", search > "/dev/stderr" }'
+}
 for org in $WHOOPER_ORGS; do
-  gh search prs "user-review-requested:$WHOOPER_GITHUB_LOGIN" --owner "$org" --state open --limit 100 \
-    --json url --jq '.[].url'
-  gh search prs --reviewed-by "$WHOOPER_GITHUB_LOGIN" --owner "$org" --state open --limit 100 \
-    --json url --jq '.[].url' -- "-author:$WHOOPER_GITHUB_LOGIN"
+  gh search prs "user-review-requested:$WHOOPER_GITHUB_LOGIN" --owner "$org" --state open --limit 1000 \
+    --json url --jq '.[].url' | capped "the search for PRs that request $WHOOPER_GITHUB_LOGIN's review in $org"
+  gh search prs --reviewed-by "$WHOOPER_GITHUB_LOGIN" --owner "$org" --state open --limit 1000 \
+    --json url --jq '.[].url' -- "-author:$WHOOPER_GITHUB_LOGIN" |
+    capped "the search for PRs by others that $WHOOPER_GITHUB_LOGIN reviewed in $org"
 done | sort -u | "$root/bin/whooper-prs" > "$out.tmp"
 # The searches list open PRs only, so a listed PR they found is open, and only the others need a look.
 "$root/lib/python" "$root/lib/whooper.py" recheck-urls "$WHOOPER_STATE" "$out.tmp" | "$root/bin/whooper-prs" \
