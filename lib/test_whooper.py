@@ -7654,6 +7654,19 @@ class ReviewsTest(unittest.TestCase):
         self.assertEqual(term.read_text(), "TERM\n")
         self.assertTrue((run / "skipped-by-user").exists())
 
+    def test_skipping_a_review_that_ends_before_its_signal_marks_it_and_says_nothing_was_stopped(self):
+        run = self.make_run(timedelta(minutes=5))
+        self.fetched(run)
+        # running_runs saw the review's whooper-review, which has ended since, as one may between the two.
+        ended = subprocess.Popen(["true"])
+        ended.wait()
+        with mock.patch.object(whooper, "running_runs", return_value={run.name: ended.pid}):
+            said = whooper.skip_review(self.state, run.name)
+        self.assertEqual(said, f"marked {run.name} (example-org/example-repo#12) as skipped, without submitting it;"
+                               f" Whooper starts no other review of the PR until bin/whooper-skip {run.name} --undo"
+                               " unmarks it")
+        self.assertTrue((run / "skipped-by-user").exists())
+
     def test_skip_refuses_an_unknown_run_and_signals_no_other_program(self):
         run = self.make_run(timedelta(minutes=5))
         self.fetched(run)

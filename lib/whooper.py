@@ -3445,9 +3445,12 @@ def skip_review(data, run_id, undo=False):
     mark.touch()
     # running_runs counts only a process whose command names whooper-review, so a program that got the ID
     # of a whooper-review killed with kill -9 gets no signal.
-    stopped = pid is not None
-    if stopped:
-        os.kill(pid, signal.SIGTERM)
+    stopped = False
+    if pid is not None:
+        # The review may have ended since running_runs looked; then there is nothing to stop.
+        with suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGTERM)
+            stopped = True
     newest = "repo" in item and newest_run(data / "runs", item["repo"], item["pr"])
     return (f"marked {name} as skipped, without submitting it" + (", and stopped its review" if stopped else "")
             + ("; Whooper starts no other review of the PR until" if newest and newest[0] == run else ";")
