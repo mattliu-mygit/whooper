@@ -3126,16 +3126,20 @@ def write_record(prs_dir, item, status, now, approval=None):
     """
     path = record_path(prs_dir, item)
     started_at = now.isoformat(timespec="seconds")
-    old = json.loads(path.read_text()) if path.exists() else {"failures": 0, "started_at": started_at}
-    record = {
-        "status": status,
-        "failures": old["failures"] + (status == "failed"),
-        "started_at": started_at if status == "running" else old["started_at"],
-    }
-    if approval := approval or old.get("approval"):
-        record["approval"] = approval
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(record))
+    # Under the PR folder's lock, two writers, such as whooper-review counting a failure while whooper-post
+    # marks the head stale, cannot drop each other's change, and write_file never leaves half a record.
+    # A record that cannot be read starts over.
+    with folder_lock(path.parent):
+        old = read_object(path) or {"failures": 0, "started_at": started_at}
+        record = {
+            "status": status,
+            "failures": old["failures"] + (status == "failed"),
+            "started_at": started_at if status == "running" else old["started_at"],
+        }
+        if approval := approval or old.get("approval"):
+            record["approval"] = approval
+        write_file(path, json.dumps(record))
 
 
 def mark_new_commits(data, item, head_now, now):

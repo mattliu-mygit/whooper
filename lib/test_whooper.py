@@ -818,6 +818,42 @@ class WriteRecordTest(unittest.TestCase):
             path = prs / "example-org-example-repo-12" / "head3.first_review.json"
             self.assertEqual(json.loads(path.read_text())["approval"], approval)
 
+    def test_waits_for_the_pr_folders_lock_and_writes_through_a_temporary_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            prs, now = Path(tmp), datetime(2031, 8, 1, 17, 0, tzinfo=timezone.utc)
+            folder = prs / "example-org-example-repo-12"
+            path = folder / "head3.first_review.json"
+            folder.mkdir()
+            written, write_file = [], whooper.write_file
+
+            def spy(target, text, **flags):
+                written.append(target)
+                write_file(target, text, **flags)
+
+            with mock.patch.object(whooper, "write_file", spy):
+                # Another writer, such as whooper-post marking the head stale, holds the folder's lock and
+                # writes the record meanwhile; this write waits, then counts from what it wrote.
+                with whooper.folder_lock(folder):
+                    writer = threading.Thread(target=write_record, args=(prs, work_item(kind="first_review"), "failed", now))
+                    writer.start()
+                    writer.join(0.5)
+                    self.assertTrue(writer.is_alive())
+                    path.write_text(json.dumps({"status": "running", "failures": 1, "started_at": "2031-08-01T16:00:00+00:00"}))
+                writer.join(10)
+            self.assertEqual(written, [path])
+            self.assertEqual(json.loads(path.read_text()),
+                             {"status": "failed", "failures": 2, "started_at": "2031-08-01T16:00:00+00:00"})
+
+    def test_an_unreadable_record_starts_over(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            prs, now = Path(tmp), datetime(2031, 8, 1, 17, 0, tzinfo=timezone.utc)
+            path = prs / "example-org-example-repo-12" / "head3.first_review.json"
+            path.parent.mkdir()
+            path.write_text('{"status": "runn')
+            write_record(prs, work_item(kind="first_review"), "failed", now)
+            self.assertEqual(json.loads(path.read_text()),
+                             {"status": "failed", "failures": 1, "started_at": "2031-08-01T17:00:00+00:00"})
+
 
 T = datetime(2031, 7, 19, 21, 35, 4, tzinfo=timezone.utc)
 
