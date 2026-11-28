@@ -7886,6 +7886,19 @@ class SettingsTest(unittest.TestCase):
                 self.settings("set", json.dumps({"review": {"timeout_minutes": 30}}))
                 self.assertEqual(path.read_text(), EXAMPLE.replace("timeout_minutes = 45 ", "timeout_minutes = 30 ", 1))
 
+    def test_set_rewrites_a_line_whose_value_equals_the_saved_one_in_python_but_has_another_type(self):
+        # Python's == calls 45.0 equal to 45 and true equal to 1, and the config check refuses the float and the bool, so
+        # a save of 45 or 1 over a line edited by hand to either rewrites the line instead of keeping it and refusing.
+        # (the line edited by hand, the values set is given, the line it saves)
+        for old, values, new in [
+            ("timeout_minutes = 45.0 ", {"review": {"timeout_minutes": 45}}, "timeout_minutes = 45 "),
+            ("timeout_minutes = true ", {"review": {"timeout_minutes": 1}}, "timeout_minutes = 1 "),
+        ]:
+            with self.subTest(old):
+                path = self.use_config(EXAMPLE.replace("timeout_minutes = 45 ", old, 1))
+                self.settings("set", json.dumps(values))
+                self.assertEqual(path.read_text(), EXAMPLE.replace("timeout_minutes = 45 ", new, 1))
+
     def test_set_changes_only_the_given_line_and_keeps_every_comment(self):
         for values, old, new in [
             ({"schedule": {"interval_minutes": 30}}, "interval_minutes = 15\n", "interval_minutes = 30\n"),

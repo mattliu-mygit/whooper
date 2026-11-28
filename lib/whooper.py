@@ -2869,14 +2869,17 @@ def write_settings(values):
         raise SystemExit(f"whooper-settings: {e}")
 
     def merge(table, changes):
+        # The table's values as Python's own types, which tomlkit's items subclass.
+        current = table.unwrap()
         for key, value in changes.items():
             if isinstance(value, dict):
                 if key not in table:
                     table[key] = tomlkit.table()
                 merge(table[key], value)
             # Setting a key rewrites its line, which drops comments inside a list, so a value that did
-            # not change keeps its line as it is.
-            elif table.get(key) != value:
+            # not change keeps its line as it is. Python's == calls 45.0 equal to 45 and true equal to 1,
+            # which the checks tell apart, so a value of another type changed too.
+            elif type(current.get(key)) is not type(value) or current.get(key) != value:
                 table[key] = value
 
     # A config that links into a dotfiles folder stays a link, and the file it names changes.
