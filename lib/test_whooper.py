@@ -5481,11 +5481,11 @@ class RunTest(unittest.TestCase):
         self.assertEqual(json.loads((run / "failure.json").read_text()), CAUSES["unknown"])
 
     def test_a_review_stopped_by_an_unset_variable_fails_under_each_bash(self):
-        # With no review agent in [jobs], whooper-review stops at an unset variable once its run directory
-        # exists, and bash 3.2 then runs the cleanup with $? at 0.
+        # The repo's setup script hands the run a line that reads a variable nothing sets, so whooper-review
+        # stops at an unset variable once its run directory exists, and bash 3.2 then runs the cleanup with $?
+        # at 0.
         env, item, _ = self.pull_request()
-        config = Path(self.env["WHOOPER_CONFIG"])
-        config.write_text(config.read_text().replace('review = "claude"\n', ""))
+        self.setup_script("echo 'EXAMPLE_HOST=$EXAMPLE_UNSET' >> \"$WHOOPER_SETUP_ENV\"")
         for n, bash in enumerate(BASHES):
             with self.subTest(bash=str(bash)):
                 folder = bash_folder(bash, Path(self.tmp.name) / f"bash-{n}")
@@ -5494,7 +5494,7 @@ class RunTest(unittest.TestCase):
                 [run] = (self.state / "runs").iterdir()
                 failure = self.read(run / "failure.txt")
                 shutil.rmtree(run)
-                self.assertIn("WHOOPER_REVIEW_AGENT: unbound variable", result.stderr)
+                self.assertIn("EXAMPLE_UNSET: unbound variable", result.stderr)
                 # whooper-round counts a review that exits 0 as reviewed.
                 self.assertEqual((result.returncode, failure),
                                  (1, "the review stopped at an unexpected error; see whooper-review's error output\n"))
@@ -5957,6 +5957,19 @@ class ConfigTest(unittest.TestCase):
                     self.command("env")
             finally:
                 os.environ["WHOOPER_CONFIG"] = test_config
+
+    def test_a_config_without_each_of_the_three_jobs_fails_naming_the_missing_one(self):
+        jobs = 'review = "claude"\npoll = "claude"\nsummary = "claude"\n'
+        for missing, text in [("review", CONFIG.replace('review = "claude"\n', "")),
+                              ("summary", CONFIG.replace('summary = "claude"\n', "")),
+                              ("review, poll, or summary", CONFIG.replace(f"[jobs]\n{jobs}", ""))]:
+            with self.subTest(missing), tempfile.TemporaryDirectory() as tmp:
+                config = Path(tmp) / "config.toml"
+                config.write_text(text)
+                with mock.patch.dict(os.environ, WHOOPER_CONFIG=str(config)), self.assertRaises(SystemExit) as stop:
+                    self.command("env")
+                self.assertEqual(str(stop.exception), f"whooper: [jobs] names no agent for {missing}; each of review,"
+                                                      f" poll, and summary names the agent it runs on; see {config}")
 
     def test_a_repo_missing_from_the_config_fails(self):
         with self.assertRaises(SystemExit):
@@ -7639,6 +7652,18 @@ class SettingsTest(unittest.TestCase):
         for job, schema in jobs.items():
             with self.subTest(job):
                 self.assertEqual(sorted(schema["enum"]), sorted(p.parent.name for p in (ROOT / "agents").glob(f"*/{job}")))
+
+    def test_set_refuses_a_save_that_leaves_a_job_without_an_agent(self):
+        path = self.use_config(EXAMPLE.replace('summary = "devin"\n', ""))
+        before = path.read_text()
+        with self.assertRaises(SystemExit) as stop:
+            self.settings("set", json.dumps({"schedule": {"interval_minutes": 30}}))
+        self.assertEqual(str(stop.exception), "whooper: [jobs] names no agent for summary; each of review, poll, and"
+                                              f" summary names the agent it runs on; see {path}")
+        self.assertEqual(path.read_text(), before)
+        # A save that gives the job an agent goes through.
+        self.settings("set", json.dumps({"schedule": {"interval_minutes": 30}, "jobs": {"summary": "claude"}}))
+        self.assertEqual(json.loads(self.settings("get"))["jobs"], {"review": "devin", "poll": "devin", "summary": "claude"})
 
     def test_set_changes_only_the_given_line_and_keeps_every_comment(self):
         for values, old, new in [

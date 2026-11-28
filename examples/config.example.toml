@@ -22,7 +22,8 @@ summary_channel = "C0000000002"    # a private channel for Whooper's summaries
 summary_channel_name = "#whooper"
 slackdump_workspace = "example"    # the poll's slackdump login: slackdump workspace new <name>
 
-# The agent each job runs on. agents/ has a folder per agent with a launcher per job it can run.
+# The agent each job runs on, required for all three. agents/ has a folder per agent with a launcher
+# per job it can run.
 [jobs]
 review = "devin"
 poll = "devin"

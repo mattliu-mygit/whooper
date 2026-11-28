@@ -29,7 +29,9 @@ name search. A package's TypeScript 7 links them without `node`, through its own
 1. Copy `examples/config.example.toml` to `~/.config/whooper/config.toml` and fill it in. Everything
    that identifies you, your company, or your repos lives there: your GitHub login and name, the
    GitHub orgs, the Slack workspace and channels, the bots on both sides, the agent each job runs
-   on and each agent's models, the skills a review loads, and one table per repo.
+   on and each agent's models, the skills a review loads, and one table per repo. `[jobs]` must name
+   an agent for each of `review`, `poll`, and `summary`: without one, Whooper's commands refuse to
+   run and name the job.
 2. For each repo, optionally copy `examples/setup.example.sh`, `teardown.example.sh`, and
    `repo-notes.example.md` next to the config and name them in the repo's table. Setup prepares
    what a review needs beyond the two checkouts, such as dependencies or a database; teardown

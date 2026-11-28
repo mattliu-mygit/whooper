@@ -2759,9 +2759,18 @@ def check_schema(value, schema, where="the value", root=None):
             check_schema(item, schema["items"], f"{where}[{i}]", root)
 
 
+# The jobs Whooper runs, each on the agent the config's [jobs] names for it.
+JOBS = ("review", "poll", "summary")
+
+
 def check_jobs(config):
-    """Fails unless each job in the config's [jobs] names an agent with a launcher for it,
-    agents/<agent>/<job>."""
+    """Fails unless the config's [jobs] names an agent for each of JOBS, and each job in it names an agent
+    with a launcher for it, agents/<agent>/<job>."""
+    if missing := [job for job in JOBS if job not in config.get("jobs", {})]:
+        *rest, last = missing
+        named = f"{', '.join(rest)}{',' if len(rest) > 1 else ''} or {last}" if rest else last
+        raise SystemExit(f"whooper: [jobs] names no agent for {named}; each of review, poll, and summary names the"
+                         f" agent it runs on; see {config_path()}")
     for job, agent in config["jobs"].items():
         if not (ROOT / "agents" / agent / job).exists():
             raise SystemExit(f"whooper: [jobs] {job} names {agent!r}, which has no agents/{agent}/{job}")
