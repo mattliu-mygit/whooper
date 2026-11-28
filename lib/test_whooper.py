@@ -5944,6 +5944,20 @@ class ScheduleTest(unittest.TestCase):
                     main("next-round", str(int(ended.timestamp())))
                 self.assertEqual((int(out.getvalue()), err.getvalue()), (int(want.timestamp()), note))
 
+    def test_an_interval_typed_as_a_float_with_no_fraction_is_that_many_minutes(self):
+        # TOML reads interval_minutes = 15.0, edited by hand, as a float, which a settings form shows as 15, so typing 15
+        # there sends nothing. read_schedule takes it as 15, and so does next-round, which whooper-run runs before each
+        # wait.
+        interval = read_schedule({"schedule": {"interval_minutes": 15.0}})["interval_minutes"]
+        self.assertEqual((interval, type(interval)), (15, int))
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.toml"
+            config.write_text(CONFIG + "\n[schedule]\ninterval_minutes = 15.0\n")
+            out = io.StringIO()
+            with mock.patch.dict(os.environ, WHOOPER_CONFIG=str(config)), redirect_stdout(out):
+                main("next-round", str(int(at("wed", "10:06").timestamp())))
+        self.assertEqual(int(out.getvalue()), int(at("wed", "10:21").timestamp()))
+
     def test_a_schedule_whooper_run_cannot_follow_fails(self):
         for name, values in [
             ("an unknown day", {"days": ["mon", "tues"]}),
@@ -5956,6 +5970,8 @@ class ScheduleTest(unittest.TestCase):
             ("a negative interval", {"interval_minutes": -30}),
             ("an interval in quotes", {"interval_minutes": "15"}),
             ("part of a minute", {"interval_minutes": 1.5}),
+            # bool is an int in Python, but true is no number of minutes.
+            ("an interval of true", {"interval_minutes": True}),
         ]:
             with self.subTest(name), self.assertRaises(SystemExit):
                 read_schedule({"schedule": values})
@@ -7927,27 +7943,28 @@ class SettingsTest(unittest.TestCase):
                 self.settings("set", json.dumps({"review": {"timeout_minutes": 30}}))
                 self.assertEqual(path.read_text(), EXAMPLE.replace("timeout_minutes = 45 ", "timeout_minutes = 30 ", 1))
 
-    def test_a_whole_number_limit_typed_as_a_float_reads_as_that_number_and_a_save_of_another_setting_keeps_it(self):
-        # TOML reads timeout_minutes = 45.0, edited by hand, as a float, which a settings form shows as 45, so typing 45
-        # there sends nothing. The checks take it as 45, so get prints 45, and a save of another setting goes through
-        # and keeps the line as it is.
-        edited = (EXAMPLE.replace("timeout_minutes = 45 ", "timeout_minutes = 45.0 ", 1)
+    def test_a_whole_number_typed_as_a_float_reads_as_that_number_and_a_save_of_another_setting_keeps_it(self):
+        # TOML reads interval_minutes = 15.0 or timeout_minutes = 45.0, edited by hand, as a float, which a settings
+        # form shows as 15 or 45, so typing 15 or 45 there sends nothing. The checks take it as that whole number, so
+        # get prints it as one, and a save of another setting goes through and keeps the line as it is.
+        edited = (EXAMPLE.replace("interval_minutes = 15\n", "interval_minutes = 15.0\n", 1)
+                  .replace("timeout_minutes = 45 ", "timeout_minutes = 45.0 ", 1)
                   .replace("timeout_minutes = 10 ", "timeout_minutes = 10.0 ", 1))
         path = self.use_config(edited)
         got = json.loads(self.settings("get"))
-        limits = [got["poll"]["timeout_minutes"], got["review"]["timeout_minutes"]]
-        self.assertEqual([(limit, type(limit)) for limit in limits], [(10, int), (45, int)])
-        self.settings("set", json.dumps({"schedule": {"interval_minutes": 30}}))
-        self.assertEqual(path.read_text(), edited.replace("interval_minutes = 15\n", "interval_minutes = 30\n", 1))
+        numbers = [got["schedule"]["interval_minutes"], got["poll"]["timeout_minutes"], got["review"]["timeout_minutes"]]
+        self.assertEqual([(number, type(number)) for number in numbers], [(15, int), (10, int), (45, int)])
+        self.settings("set", json.dumps({"jobs": {"review": "claude"}}))
+        self.assertEqual(path.read_text(), edited.replace('[jobs]\nreview = "devin"', '[jobs]\nreview = "claude"', 1))
 
     def test_set_rewrites_a_line_whose_value_equals_the_saved_one_in_python_but_has_another_type(self):
-        # Python's == calls 15.0 equal to 15 and true equal to 1, and read_schedule refuses interval_minutes = 15.0 and
-        # the config check a limit of true, so a save of 15 or 1 over a line edited by hand to either rewrites the line
-        # instead of keeping it and refusing.
+        # Python's == calls true equal to 1, and read_schedule refuses interval_minutes = true and the config check a
+        # limit of true, so a save of 1 over a line edited by hand to true rewrites the line instead of keeping it and
+        # refusing.
         # (the line, the line edited by hand, the values set is given, the line it saves)
         for line, edited, values, saved in [
-            ("interval_minutes = 15\n", "interval_minutes = 15.0\n", {"schedule": {"interval_minutes": 15}},
-             "interval_minutes = 15\n"),
+            ("interval_minutes = 15\n", "interval_minutes = true\n", {"schedule": {"interval_minutes": 1}},
+             "interval_minutes = 1\n"),
             ("timeout_minutes = 45 ", "timeout_minutes = true ", {"review": {"timeout_minutes": 1}},
              "timeout_minutes = 1 "),
         ]:

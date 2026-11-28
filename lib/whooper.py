@@ -173,8 +173,9 @@ ASK_TIMEOUT_MINUTES = 10
 
 
 def read_schedule(config):
-    """The config's [schedule], with SCHEDULE_DEFAULTS for what it leaves out and start and end as
-    times of day. Fails on a schedule that next_round cannot follow."""
+    """The config's [schedule], with SCHEDULE_DEFAULTS for what it leaves out, start and end as
+    times of day, and interval_minutes as an int (whole_number), so 15.0 reads as 15. Fails on a
+    schedule that next_round cannot follow."""
     values = {**SCHEDULE_DEFAULTS, **config.get("schedule", {})}
     try:
         start, end = (datetime.strptime(values[key], "%H:%M").time() for key in ("start", "end"))
@@ -184,11 +185,12 @@ def read_schedule(config):
         raise SystemExit(f"whooper: [schedule] days takes names from {', '.join(DAYS)}, not {unknown}")
     # Each poll runs a model, so 0 or less would poll nonstop. bool is an int in Python, so true would
     # otherwise pass as 1.
-    if type(values["interval_minutes"]) is not int or values["interval_minutes"] < 1:
+    interval = whole_number(values["interval_minutes"])
+    if type(interval) is not int or interval < 1:
         raise SystemExit(f"whooper: [schedule] interval_minutes takes a whole number of minutes, at least 1; see {config_path()}")
     if not values["days"] or start >= end:
         raise SystemExit(f"whooper: [schedule] needs at least one day and an end after its start; see {config_path()}")
-    return {**values, "start": start, "end": end}
+    return {**values, "interval_minutes": interval, "start": start, "end": end}
 
 
 def next_round(schedule, earliest):
@@ -2781,7 +2783,8 @@ def check_jobs(config):
 def whole_number(value):
     """value as an int when it is a float with no fraction, such as 45.0, and as it is otherwise, such as 1.5, "45", or
     true. TOML reads timeout_minutes = 45.0, typed by hand, as a float, which a settings form shows as 45, so typing 45
-    there sends nothing; the limits that take a whole number read such a float as that number instead of refusing it."""
+    there sends nothing; the settings that take a whole number, such as [schedule] interval_minutes and [review]
+    timeout_minutes, read such a float as that number instead of refusing it."""
     return int(value) if type(value) is float and value.is_integer() else value
 
 
@@ -2853,14 +2856,15 @@ SETTINGS_SCHEMA = ROOT / "schemas" / "settings.json"
 
 def read_settings(config):
     """The config's values for the settings in SETTINGS_SCHEMA, with Whooper's defaults for what the
-    config leaves out, such as SCHEDULE_DEFAULTS. A setting with neither is left out. [poll] and
-    [review] timeout_minutes read as check_config reads them, so 45.0 reads as 45."""
+    config leaves out, such as SCHEDULE_DEFAULTS. A setting with neither is left out. [schedule]
+    interval_minutes and [poll] and [review] timeout_minutes read as read_schedule and check_config
+    read them, so 45.0 reads as 45."""
     values = {**config, "schedule": {**SCHEDULE_DEFAULTS, **config.get("schedule", {})},
               "poll": {"timeout_minutes": POLL_TIMEOUT_MINUTES, **config.get("poll", {})},
               "ask": {"timeout_minutes": ASK_TIMEOUT_MINUTES, **config.get("ask", {})}}
-    for table in ("poll", "review"):
-        if "timeout_minutes" in values.get(table, {}):
-            values[table] = {**values[table], "timeout_minutes": whole_number(values[table]["timeout_minutes"])}
+    for table, key in (("schedule", "interval_minutes"), ("poll", "timeout_minutes"), ("review", "timeout_minutes")):
+        if key in values.get(table, {}):
+            values[table] = {**values[table], key: whole_number(values[table][key])}
 
     def pick(value, schema):
         # Only what the schema names, at every level.
@@ -2890,9 +2894,9 @@ def write_settings(values):
                     table[key] = tomlkit.table()
                 merge(table[key], value)
             # Setting a key rewrites its line, which drops comments inside a list, so a value that did
-            # not change keeps its line as it is. Python's == calls 15.0 equal to 15 and true equal to 1,
-            # which the checks may tell apart, as read_schedule does for interval_minutes, so a value of
-            # another type changed too.
+            # not change keeps its line as it is. Python's == calls true equal to 1, which the checks
+            # tell apart, as read_schedule does for interval_minutes, so a value of another type changed
+            # too, and a save of 15 over 15.0 writes 15.
             elif type(current.get(key)) is not type(value) or current.get(key) != value:
                 table[key] = value
 
