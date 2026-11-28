@@ -406,8 +406,10 @@ since whooper-review removes the worktrees, so the run answers from the record, 
 holds the PR's change. [Approvals](#approvals) says what the run may do.
 
 whooper-ask refuses a review that is still running, and says so: one whose whooper-review holds the
-PR's lock with the run's ID in it. A lock whose process is gone, as after a `kill -9`, does not
-count, so a review killed that way can be asked about.
+PR's lock with the run's ID in it. A lock whose process is gone, as after a `kill -9`, or whose
+process ID now belongs to a program other than whooper-review, does not count, so a review killed
+that way can be asked about. whooper-status, whooper-submit, whooper-retry, whooper-remove, and
+whooper-skip tell a review that is still running the same way.
 
 whooper-ask saves each answer in the run directory as `asks/<n>.json`, numbered in order from 1:
 `question`, `finding` (its ID or null), `answer`, `agent`, `started_at` and `ended_at` in UTC, and

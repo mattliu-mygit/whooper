@@ -3133,11 +3133,11 @@ class SubmitTest(unittest.TestCase):
         return printed.stdout.splitlines()[-1].removeprefix("fingerprint: ")
 
     def hold(self):
-        """Has the lock of the run's PR name the run and this test's process, which is alive, as
+        """Has the lock of the run's PR name the run and a stand-in for a live whooper-review, as
         whooper-review's lock does while it reviews; returns the lock."""
         lock = self.state / "locks" / "example-org-example-repo-12"
         lock.mkdir(parents=True)
-        (lock / "pid").write_text(f"{os.getpid()}\n")
+        (lock / "pid").write_text(f"{review_stand_in(self, Path(self.tmp.name) / 'review')}\n")
         (lock / "run_id").write_text(f"{self.run.name}\n")
         return lock
 
@@ -6181,6 +6181,23 @@ def fake(path, body):
     path.chmod(0o755)
 
 
+def review_stand_in(test, folder):
+    """Starts a stand-in for a running whooper-review, a script named whooper-review in folder that waits until the
+    test ends, so the command of its process names whooper-review, as the check of whether a review still runs wants.
+    Returns its process ID once ps shows that command."""
+    path = folder / "whooper-review"
+    fake(path, "while :; do sleep 0.1; done")
+    process = subprocess.Popen([str(path)])
+    test.addCleanup(lambda: (process.kill(), process.wait()))
+    deadline = monotonic() + 10
+    while "whooper-review" not in subprocess.run(["ps", "-o", "command=", "-p", str(process.pid)],
+                                                 capture_output=True, text=True).stdout:
+        if monotonic() > deadline:
+            test.fail("the stand-in for whooper-review did not start")
+        sleep(0.05)
+    return process.pid
+
+
 class AskTest(unittest.TestCase):
     """bin/whooper-ask, and whooper.py prompt ask, which it runs, on a finished Claude review of
     example-org/example-repo#12 in a throwaway state folder. claude is a fake that records its
@@ -6283,6 +6300,30 @@ class AskTest(unittest.TestCase):
                 self.assertIn(f"whooper-ask: the run has no finding 1; {why}\n", result.stderr)
                 self.assertNotIn("Traceback", result.stderr)
         self.assertFalse((self.run / "asks").exists())
+
+    def lock(self, pid):
+        """Has the lock of the run's PR name the run and the process pid, as whooper-review's lock does while it
+        reviews."""
+        lock = Path(self.tmp.name) / "whooper" / "locks" / "example-org-example-repo-12"
+        lock.mkdir(parents=True)
+        (lock / "pid").write_text(f"{pid}\n")
+        (lock / "run_id").write_text(f"{self.run.name}\n")
+
+    def test_refuses_a_review_a_live_whooper_review_still_runs(self):
+        pid = review_stand_in(self, Path(self.tmp.name) / "review")
+        self.lock(pid)
+        result = self.ask(self.run.name, self.QUESTION)
+        self.assertEqual((result.returncode, result.stdout), (1, ""))
+        self.assertIn(f"the review is still running, in process {pid}; ask again once it ends", result.stderr)
+
+    def test_a_lock_whose_process_is_now_another_program_does_not_stop_an_ask(self):
+        # The lock of a whooper-review killed with kill -9 stays, and the system may give its process ID to
+        # another program, here this test.
+        self.lock(os.getpid())
+        (self.fakes / "answer").write_text("They hide a change from the reader.\n")
+        result = self.ask(self.run.name, self.QUESTION)
+        self.assertEqual((result.returncode, result.stdout), (0, "They hide a change from the reader.\n"),
+                         result.stderr)
 
     def test_a_review_that_did_not_finish_can_be_asked_why(self):
         # The review's findings did not fit the schema, so whooper-review set them aside as
@@ -6576,6 +6617,7 @@ class ReviewsTest(unittest.TestCase):
         self.env = {**os.environ, "PATH": f"{tmp / 'bin'}:{os.environ['PATH']}", "XDG_STATE_HOME": str(tmp),
                     "XDG_CACHE_HOME": str(tmp / "cache"), "TZ": "America/Los_Angeles"}
         self.state = tmp / "whooper"
+        self.reviewer = None
         # A run ID holds its run's start time to the second.
         self.now = datetime.now(timezone.utc).replace(microsecond=0)
 
@@ -6629,9 +6671,13 @@ class ReviewsTest(unittest.TestCase):
         self.fetched(run)
         self.write(run, "findings.json", self.findings(*args, **kwargs), 20)
 
-    def hold(self, run, pid):
-        """Has the lock of the run's PR name the run and the process pid, as whooper-review's lock does
-        while it reviews."""
+    def hold(self, run, pid=None):
+        """Has the lock of the run's PR name the run and the process pid, by default a stand-in for a live
+        whooper-review, which one test shares, as whooper-review's lock does while it reviews."""
+        if pid is None:
+            if self.reviewer is None:
+                self.reviewer = review_stand_in(self, Path(self.tmp.name) / "review")
+            pid = self.reviewer
         lock = self.state / "locks" / f"example-org-example-repo-{run.name.split('-')[1]}"
         lock.mkdir(parents=True)
         (lock / "pid").write_text(f"{pid}\n")
@@ -6752,7 +6798,7 @@ class ReviewsTest(unittest.TestCase):
         (removed / "removed-by-user").touch()
         reviewing = self.make_run(timedelta(minutes=10), pr=15)
         self.fetched(reviewing)
-        self.hold(reviewing, os.getpid())
+        self.hold(reviewing)
         # A review that waits read no github.json yet, so its title is its PR.
         waits = self.waiting(timedelta(minutes=30), 16)
         status = self.status()
@@ -6792,15 +6838,15 @@ class ReviewsTest(unittest.TestCase):
         earlier = self.make_run(timedelta(hours=2))
         self.finish(earlier)
         # A Devin review writes findings.json itself, and may change it until it ends, so its findings do
-        # not count yet. The lock's process is alive: it is this test.
+        # not count yet. The lock names a live whooper-review.
         current = self.make_run(timedelta(minutes=30))
         self.fetched(current)
         self.write(current, "findings.json", self.findings(findings=[finding()]), 25)
-        self.hold(current, os.getpid())
+        self.hold(current)
         # whooper-review takes the lock before it makes the run directory, and writes run.json, which
         # names the repo, after it fetches.
         fetching = self.make_run(timedelta(minutes=1), pr=20, run_json=False)
-        self.hold(fetching, os.getpid())
+        self.hold(fetching)
         # A whooper-review killed with kill -9 leaves its lock, whose process is gone, and no failure.txt.
         gone = subprocess.Popen(["true"])
         gone.wait()
@@ -6814,6 +6860,16 @@ class ReviewsTest(unittest.TestCase):
             # The run the lock names is newer, so the earlier run of its PR no longer needs the user.
             self.review(earlier, needs_you=False),
             self.review(killed, outcome="failed", verdict=None, ended_at=None, cause=CAUSES["unknown"]),
+        ])
+
+    def test_a_lock_whose_process_is_now_another_program_is_stale(self):
+        # The lock of a whooper-review killed with kill -9 stays, and the system may give its process ID to
+        # another program, here this test, so the review ended as one whose process is gone did.
+        reused = self.make_run(timedelta(hours=3))
+        self.fetched(reused)
+        self.hold(reused, os.getpid())
+        self.assertEqual(self.reviews(), [
+            self.review(reused, outcome="failed", verdict=None, ended_at=None, cause=CAUSES["unknown"]),
         ])
 
     def test_a_newer_run_of_a_pr_supersedes_its_older_runs(self):
@@ -6832,7 +6888,7 @@ class ReviewsTest(unittest.TestCase):
         self.write(failed, "failure.txt", "the review run passed its 45-minute limit\n", 45)
         running = self.make_run(timedelta(minutes=10), pr=13)
         self.fetched(running)
-        self.hold(running, os.getpid())
+        self.hold(running)
         self.assertEqual(self.reviews(), [
             self.review(running, outcome="running", ended_at=None, verdict=None, needs_you=False),
             self.review(newer),
@@ -6973,7 +7029,7 @@ class ReviewsTest(unittest.TestCase):
         self.waiting(timedelta(hours=8) - timedelta(minutes=3), 13)
         self.waiting(timedelta(hours=8) - timedelta(minutes=4), 14)
         self.stopped(timedelta(hours=7), 12, "docker_unavailable")
-        self.hold(self.make_run(timedelta(minutes=5), pr=15), os.getpid())
+        self.hold(self.make_run(timedelta(minutes=5), pr=15))
         self.assertEqual(self.status()["blocked"], {**CAUSES["docker_unavailable"], "since": since, "waiting": 2})
         # A review that stops at a cause of its PR's own got past the setup script, so Docker runs again.
         self.stopped(timedelta(hours=6), 16, "time_limit")
@@ -7029,7 +7085,7 @@ class ReviewsTest(unittest.TestCase):
         # findings that fit failed.
         running = self.make_run(timedelta(minutes=10), pr=14)
         self.finish(running, "approve_once_ci_passes", [self.NIT])
-        self.hold(running, os.getpid())
+        self.hold(running)
         timed_out = self.make_run(timedelta(hours=3), pr=15)
         self.finish(timed_out, "approve_once_ci_passes", [self.NIT])
         self.write(timed_out, "failure.txt", "the review run passed its 45-minute limit\n", 45)
@@ -7105,7 +7161,7 @@ class ReviewsTest(unittest.TestCase):
         running = self.make_run(timedelta(minutes=5), pr=14)
         self.fetched(running)
         self.write(running, "findings.json", self.findings(findings=[finding()]), 4)
-        self.hold(running, os.getpid())
+        self.hold(running)
         self.assertEqual(self.shown(running), {
             **nothing, "run_id": running.name, "run": json.loads((running / "run.json").read_text()),
             "title": self.TITLE, "author": "alice", "outcome": "running", "diff": self.DIFF, "failure": None,
@@ -7136,7 +7192,7 @@ class ReviewsTest(unittest.TestCase):
         running = self.make_run(timedelta(minutes=5), pr=14)
         self.fetched(running)
         self.write(running, "overview.json", kept, 4)
-        self.hold(running, os.getpid())
+        self.hold(running)
         self.assertEqual({key: self.shown(running)[key] for key in ["outcome", "overview"]},
                          {"outcome": "running", "overview": None})
 
@@ -7154,7 +7210,7 @@ class ReviewsTest(unittest.TestCase):
         running = self.make_run(timedelta(minutes=5), pr=14)
         self.fetched(running)
         self.write(running, "connections.json", graph, 4)
-        self.hold(running, os.getpid())
+        self.hold(running)
         self.assertEqual({key: self.shown(running)[key] for key in ["outcome", "connections"]},
                          {"outcome": "running", "connections": None})
 
@@ -7176,7 +7232,7 @@ class ReviewsTest(unittest.TestCase):
         self.fetched(running)
         self.write(running, "test_gaps.json", gaps, 1)
         self.write(running, "examples.json", examples, 4)
-        self.hold(running, os.getpid())
+        self.hold(running)
         self.assertEqual({key: self.shown(running)[key] for key in ["outcome", "test_gaps", "examples"]},
                          {"outcome": "running", "test_gaps": None, "examples": None})
 
@@ -7353,8 +7409,8 @@ class ReviewsTest(unittest.TestCase):
                 result = self.remove(run_id)
                 self.assertEqual((result.returncode, result.stdout, result.stderr),
                                  (1, "", f"whooper-remove: no run {run_id} in {self.state / 'runs'}\n"))
-        # A live whooper-review holds the PR's lock for the run; the lock's process is this test.
-        self.hold(run, os.getpid())
+        # A live whooper-review holds the PR's lock for the run.
+        self.hold(run)
         for args in [[run.name], [run.name, "--undo"]]:
             with self.subTest(args=args):
                 result = self.remove(*args)
@@ -7642,10 +7698,10 @@ class RetryTest(unittest.TestCase):
                 result = self.retry(run_id)
                 self.assertEqual((result.returncode, result.stdout, result.stderr),
                                  (1, "", f"whooper-retry: no run {run_id} in {runs}\n"))
-        # A live whooper-review holds the PR's lock for the run; the lock's process is this test.
+        # A live whooper-review holds the PR's lock for the run.
         lock = self.state / "locks" / "example-org-example-repo-12"
         lock.mkdir(parents=True)
-        (lock / "pid").write_text(f"{os.getpid()}\n")
+        (lock / "pid").write_text(f"{review_stand_in(self, Path(self.tmp.name) / 'review')}\n")
         (lock / "run_id").write_text(f"{self.run.name}\n")
         result = self.retry(self.run.name)
         self.assertEqual((result.returncode, result.stdout, result.stderr),

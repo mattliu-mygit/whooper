@@ -536,18 +536,20 @@ def parse_run_id(run_id):
 def running_runs(data):
     """The IDs of the review runs that a live whooper-review still runs, each with the process ID its
     lock names, by whooper-ask's rule: the PR's lock under data/locks names the run in run_id, and the
-    process in its pid exists. A lock whose process is gone, as after a kill -9, is stale. The locks are
-    read for the runs they name, so a review counts as running before it writes run.json, which names
-    its PR and so its lock."""
+    command of the process in its pid names whooper-review, as whooper-review's own takeover checks. A
+    lock whose process is gone, as after a kill -9, is stale, and so is one whose process ID the system
+    gave to another program since. The locks are read for the runs they name, so a review counts as
+    running before it writes run.json, which names its PR and so its lock."""
     running = {}
     for lock in (data / "locks").glob("*"):
         try:
             pid, run_id = int((lock / "pid").read_text()), (lock / "run_id").read_text().strip()
-            # Signal 0 only checks that the process exists, as whooper-ask's kill -0 does.
-            os.kill(pid, 0)
         except (OSError, ValueError):
             continue
-        running[run_id] = pid
+        # ps prints nothing for a process that is gone.
+        command = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout
+        if "whooper-review" in command:
+            running[run_id] = pid
     return running
 
 
@@ -3355,10 +3357,9 @@ def skip_review(data, run_id, undo=False):
     # The mark comes first, so whooper-status never lists the stopped review as a failure that needs the
     # user. The file stays empty, so a program watching the folder has nothing to read half of.
     mark.touch()
-    # The lock outlives a process killed with kill -9, and the system may give its ID to another
-    # program, which must not get the signal.
-    stopped = pid is not None and "whooper-review" in subprocess.run(
-        ["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout
+    # running_runs counts only a process whose command names whooper-review, so a program that got the ID
+    # of a whooper-review killed with kill -9 gets no signal.
+    stopped = pid is not None
     if stopped:
         os.kill(pid, signal.SIGTERM)
     newest = "repo" in item and newest_run(data / "runs", item["repo"], item["pr"])
